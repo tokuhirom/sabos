@@ -2,10 +2,17 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
+mod allocator;
 mod framebuffer;
 mod gdt;
 mod interrupts;
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt::Write;
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
@@ -102,6 +109,11 @@ fn main() -> Status {
     // これがないと例外 → ダブルフォルト → トリプルフォルト → CPU リセット。
     interrupts::init();
 
+    // --- ヒープアロケータの初期化 ---
+    // これで Vec, Box, String など alloc crate の型が使えるようになる。
+    // BSS セクションに 1 MiB の静的領域を確保して、linked_list_allocator で管理する。
+    allocator::init();
+
     // Exit Boot Services 後でもフレームバッファは生きている。
     // 保存しておいた情報を使って FramebufferWriter を再構築する。
     let mut fb = FramebufferWriter::from_info(fb_info);
@@ -157,9 +169,35 @@ fn main() -> Status {
     fb.write_str("OK!\n");
 
     fb.set_colors((255, 255, 255), (0, 0, 128));
-    fb.write_str("\nAll exception handlers are set up.\n");
+    fb.write_str("\nAll exception handlers are set up.\n\n");
 
-    // カーネルとして停止。ここからヒープ、ページング、ドライバへと進む。
+    // --- ヒープアロケータのテスト ---
+    // Vec, Box, String が動くか確認する。
+    // alloc crate が使えるのは allocator::init() の後。
+    fb.write_str("Heap allocator test:\n");
+
+    // Box: ヒープ上にスカラ値を確保
+    let boxed = alloc::boxed::Box::new(42);
+    write!(fb, "  Box<i32>: {}\n", *boxed).unwrap();
+
+    // Vec: 動的配列
+    let mut numbers: Vec<i32> = vec![1, 2, 3, 4, 5];
+    numbers.push(6);
+    write!(fb, "  Vec: {:?} (len={})\n", numbers, numbers.len()).unwrap();
+
+    // String: 動的文字列
+    let mut greeting = String::from("Hello, ");
+    greeting.push_str("SABOS heap!");
+    write!(fb, "  String: \"{}\"\n", greeting).unwrap();
+
+    // format! マクロ（ヒープに String を生成）
+    let formatted = format!("Heap size: {} KiB", 1024);
+    write!(fb, "  format!: \"{}\"\n", formatted).unwrap();
+
+    fb.set_colors((0, 255, 0), (0, 0, 128));
+    fb.write_str("\nHeap allocator is working!\n");
+
+    // カーネルとして停止。ここからページング、ドライバへと進む。
     loop {
         unsafe {
             core::arch::asm!("hlt");
