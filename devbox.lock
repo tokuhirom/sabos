@@ -1,0 +1,184 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "OVMF@latest": {
+      "last_modified": "2026-01-23T17:20:52Z",
+      "resolved": "github:NixOS/nixpkgs/a1bab9e494f5f4939442a57a58d0449a109593fe#OVMF",
+      "source": "devbox-search",
+      "version": "202511",
+      "systems": {
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/gll6spbrh4j6np0fcrfqfnj0xn5bjdxj-OVMF-202511",
+              "default": true
+            },
+            {
+              "name": "fd",
+              "path": "/nix/store/5nnrqv7jgl5iwr97gd1a1pm8kyx2r19g-OVMF-202511-fd"
+            }
+          ],
+          "store_path": "/nix/store/gll6spbrh4j6np0fcrfqfnj0xn5bjdxj-OVMF-202511"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/f7vav9vxv3896zdnf8a7164sxwc9xh4s-OVMF-202511",
+              "default": true
+            },
+            {
+              "name": "fd",
+              "path": "/nix/store/vj8ln29wg40yw6k0vfybn756cqbhfm8l-OVMF-202511-fd"
+            }
+          ],
+          "store_path": "/nix/store/f7vav9vxv3896zdnf8a7164sxwc9xh4s-OVMF-202511"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/jcsp34qpg66bmjbavs4gsbmswbam279s-OVMF-202511",
+              "default": true
+            },
+            {
+              "name": "fd",
+              "path": "/nix/store/hlxkmywgbjzj6msi6lx61n317id2djrm-OVMF-202511-fd"
+            }
+          ],
+          "store_path": "/nix/store/jcsp34qpg66bmjbavs4gsbmswbam279s-OVMF-202511"
+        }
+      }
+    },
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2026-01-30T02:32:49Z",
+      "resolved": "github:NixOS/nixpkgs/6308c3b21396534d8aaeac46179c14c439a89b8a?lastModified=1769740369"
+    },
+    "qemu@latest": {
+      "last_modified": "2026-01-27T15:18:14Z",
+      "resolved": "github:NixOS/nixpkgs/afce96367b2e37fc29afb5543573cd49db3357b7#qemu",
+      "source": "devbox-search",
+      "version": "10.1.2",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/2wq5gy15vj68nwx6qzriy8ykq9scqf5z-qemu-10.1.2",
+              "default": true
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/5kc1klpj90l6jm3ivkn47q3662jjk5af-qemu-10.1.2-doc"
+            }
+          ],
+          "store_path": "/nix/store/2wq5gy15vj68nwx6qzriy8ykq9scqf5z-qemu-10.1.2"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/7f96gszc3gkfp3gs8ilj1l1w45kh9ngp-qemu-10.1.2",
+              "default": true
+            },
+            {
+              "name": "ga",
+              "path": "/nix/store/ldzv0kfqzpgzcjfri9z6ssfyqirvbzj6-qemu-10.1.2-ga"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/a8gxhm44c3l2yf24095gs2r8mv7v0rvp-qemu-10.1.2-doc"
+            }
+          ],
+          "store_path": "/nix/store/7f96gszc3gkfp3gs8ilj1l1w45kh9ngp-qemu-10.1.2"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/l6ndxadb6kln4ihjfzsndg9r8lvqsqnr-qemu-10.1.2",
+              "default": true
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/zl7xp0pkmh50j0gbjxwjrgypzb3mcl5f-qemu-10.1.2-doc"
+            }
+          ],
+          "store_path": "/nix/store/l6ndxadb6kln4ihjfzsndg9r8lvqsqnr-qemu-10.1.2"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/hla254qnyqg97hjrl7yhvhyyn7zwl0gz-qemu-10.1.2",
+              "default": true
+            },
+            {
+              "name": "debug",
+              "path": "/nix/store/w99i3aqq767vrjwhzpycg1lrwyk84hyn-qemu-10.1.2-debug"
+            },
+            {
+              "name": "doc",
+              "path": "/nix/store/pqgnd1jshzr6dpz4cll237vyfa4rlns1-qemu-10.1.2-doc"
+            },
+            {
+              "name": "ga",
+              "path": "/nix/store/x4gfn2lyggx3zvpbgaz1hcln5f4xjsnl-qemu-10.1.2-ga"
+            }
+          ],
+          "store_path": "/nix/store/hla254qnyqg97hjrl7yhvhyyn7zwl0gz-qemu-10.1.2"
+        }
+      }
+    },
+    "rustup@latest": {
+      "last_modified": "2026-01-23T17:20:52Z",
+      "plugin_version": "0.0.1",
+      "resolved": "github:NixOS/nixpkgs/a1bab9e494f5f4939442a57a58d0449a109593fe#rustup",
+      "source": "devbox-search",
+      "version": "1.28.2",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/r0nacc31pp9jglw15wacjp8bzyjhi41b-rustup-1.28.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/r0nacc31pp9jglw15wacjp8bzyjhi41b-rustup-1.28.2"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/jczizx7qz254wi11kj9flx1kyzvpxb3x-rustup-1.28.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/jczizx7qz254wi11kj9flx1kyzvpxb3x-rustup-1.28.2"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/prxdrp8ffnsrmzfznjgiqvqm8j810c5v-rustup-1.28.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/prxdrp8ffnsrmzfznjgiqvqm8j810c5v-rustup-1.28.2"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/8kys5yhdhiybfw4p4rdyfg7av8rldl6r-rustup-1.28.2",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/8kys5yhdhiybfw4p4rdyfg7av8rldl6r-rustup-1.28.2"
+        }
+      }
+    }
+  }
+}
