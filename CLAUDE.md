@@ -23,7 +23,7 @@ make run-gui
 ## Project Structure
 
 - `kernel/` - カーネル本体（Rust, no_std, UEFI target）
-- `docs/adr/` - Architecture Decision Records
+- `docs/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
 - `devbox.json` - 開発環境定義（rustup, qemu, OVMF）
 
 ## Git Workflow
@@ -33,7 +33,7 @@ make run-gui
 
 ## Development Principles
 
-- ADRを開発日記代わりに積極的に書く。設計判断は必ずADRに記録する
+- 開発日記を `docs/YYYY-MM-DD.md` に書く。その日やったこと、学んだこと、スクショを残す
 - 習作プロジェクトなので楽しさと学びを重視
 - 一度作った機能は壊さない。GitHub Actions でビルドの成功を常に保証する
 - コメントはマシマシで書く。学習用プロジェクトなので「なぜそうしているか」「何をしているか」を後から読んで理解できるよう丁寧にコメントを残す
@@ -43,14 +43,3 @@ make run-gui
 - GitHub Actions で `cargo build --target x86_64-unknown-uefi` が通ることを保証
 - 新機能を追加したら対応するCIチェックも追加する
 
-## Architecture Decisions
-
-ADR は `docs/adr/` に連番で管理する。フォーマット:
-
-```
-# ADR-NNNN: タイトル
-## Status (Proposed / Accepted / Deprecated / Superseded)
-## Context
-## Decision
-## Consequences
-```

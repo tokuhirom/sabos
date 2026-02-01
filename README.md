@@ -7,9 +7,9 @@ x86_64向け自作OS。Rust + UEFIで構築する。
 - ネットワーク接続
 - GUIアプリケーションの動作
 
-## Architecture Decision Records
+## Dev Diary
 
-- [ADR-0001: Foundation](docs/adr/0001-foundation.md) — アーキテクチャ・言語・ブート方式
+- [2026-02-01](docs/2026-02-01.md) — Day 1: プロジェクト開始、Hello SABOS!
 
 ## Build
 
