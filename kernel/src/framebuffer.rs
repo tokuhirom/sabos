@@ -43,6 +43,16 @@ pub fn set_global_colors(fg: (u8, u8, u8), bg: (u8, u8, u8)) {
     });
 }
 
+/// グローバルフレームバッファの画面をクリアする。
+/// シェルの clear コマンドで使う。
+pub fn clear_global_screen() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(writer) = WRITER.lock().as_mut() {
+            writer.clear();
+        }
+    });
+}
+
 /// kprint!/kprintln! マクロの内部実装。
 /// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。
 ///
@@ -302,6 +312,17 @@ impl FramebufferWriter {
         }
     }
 
+    /// カーソル位置の 1 文字分を背景色で塗りつぶす。
+    /// バックスペースで文字を消すときに使う。
+    fn erase_char_at_cursor(&self) {
+        let (r, g, b) = self.bg_color;
+        for row in 0..CHAR_HEIGHT {
+            for col in 0..CHAR_WIDTH {
+                self.put_pixel(self.cursor_x + col, self.cursor_y + row, r, g, b);
+            }
+        }
+    }
+
     /// 1文字を現在のカーソル位置に描画し、カーソルを進める。
     fn write_char(&mut self, c: char) {
         match c {
@@ -314,6 +335,14 @@ impl FramebufferWriter {
             '\r' => {
                 // キャリッジリターン: X を先頭に戻す
                 self.cursor_x = 0;
+            }
+            '\x08' => {
+                // バックスペース: カーソルを1文字戻して、その位置を背景色で消す。
+                // 行頭より前には戻らない（前の行への巻き戻しは未対応）。
+                if self.cursor_x >= CHAR_WIDTH {
+                    self.cursor_x -= CHAR_WIDTH;
+                    self.erase_char_at_cursor();
+                }
             }
             c => {
                 // 画面右端に達したら折り返し

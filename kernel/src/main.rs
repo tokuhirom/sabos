@@ -8,6 +8,7 @@ mod allocator;
 mod framebuffer;
 mod gdt;
 mod interrupts;
+mod shell;
 
 // kprint! / kprintln! マクロを使えるようにする。
 // #[macro_export] で定義されたマクロはクレートルートに配置される。
@@ -162,17 +163,33 @@ fn main() -> Status {
     kprintln!("Hardware interrupts enabled!");
     kprintln!();
 
-    // キーボード入力待ちのプロンプト
+    // --- シェルの起動 ---
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
-    kprintln!("Type something:");
+    kprintln!("Welcome to SABOS shell! Type 'help' for commands.");
+    kprintln!();
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
+    let mut shell = shell::Shell::new(usable_mib, usable_pages);
+    shell.print_prompt();
+
     // --- メインループ ---
-    // hlt 命令で CPU を省電力モードにして割り込みを待つ。
-    // 割り込み（タイマー、キーボード等）が来ると hlt から復帰して、
-    // ハンドラが実行された後、再び hlt に戻る。
-    // hlt を使わないと CPU が 100% ビジーループして電力を浪費する。
+    // キーボード割り込みで KEY_QUEUE にプッシュされた文字を読み取り、
+    // シェルに渡す。キーがなければ hlt で CPU を省電力モードにして待つ。
+    //
+    // enable_and_hlt() は sti と hlt をアトミックに実行する。
+    // これにより「キューチェック → hlt の間に割り込みが来て取りこぼす」
+    // というレースコンディションを防ぐ。
     loop {
-        x86_64::instructions::hlt();
+        // 割り込みを無効化してキューをチェック
+        x86_64::instructions::interrupts::disable();
+
+        if let Some(c) = interrupts::get_key() {
+            // キーがあった場合は割り込みを再有効化してから処理
+            x86_64::instructions::interrupts::enable();
+            shell.handle_char(c);
+        } else {
+            // キーがない場合は sti+hlt をアトミックに実行して割り込みを待つ
+            x86_64::instructions::interrupts::enable_and_hlt();
+        }
     }
 }

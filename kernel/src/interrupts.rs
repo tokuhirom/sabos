@@ -11,12 +11,37 @@
 // ハードウェア割り込みは PIC (8259) 経由で CPU に届く。
 // PIC が IRQ 0〜15 を IDT の 32〜47 番にマッピングする。
 
+use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use crate::gdt;
+
+// =================================================================
+// キー入力キュー
+// =================================================================
+//
+// キーボード割り込みハンドラが受け取った文字をキューに溜めて、
+// メインループ（シェル）がそこから読み取る。
+// 割り込みハンドラから直接画面に書くのではなく、キューを介することで
+// 表示ロジック（エコーバック、行編集等）をメインコード側に置ける。
+
+lazy_static! {
+    /// キー入力キュー。キーボードハンドラが push、シェルが pop する。
+    static ref KEY_QUEUE: spin::Mutex<VecDeque<char>> =
+        spin::Mutex::new(VecDeque::new());
+}
+
+/// キューから1文字取り出す。キューが空なら None を返す。
+/// 割り込みを無効化してからロックを取ることで、
+/// キーボードハンドラとのデッドロックを防ぐ。
+pub fn get_key() -> Option<char> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        KEY_QUEUE.lock().pop_front()
+    })
+}
 
 // =================================================================
 // PIC (Programmable Interrupt Controller) の設定
@@ -245,7 +270,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
                 DecodedKey::Unicode(character) => {
-                    crate::kprint!("{}", character);
+                    // 文字をキー入力キューに追加する。
+                    // シェルのメインループがここから読み取って処理する。
+                    KEY_QUEUE.lock().push_back(character);
                 }
                 DecodedKey::RawKey(key) => {
                     // 特殊キー（矢印キー、F1-F12等）は今は無視。
