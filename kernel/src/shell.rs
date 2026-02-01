@@ -91,6 +91,7 @@ impl Shell {
             "mem" => self.cmd_mem(),
             "page" => self.cmd_page(args),
             "echo" => self.cmd_echo(args),
+            "panic" => self.cmd_panic(),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
                 kprintln!("Unknown command: {}", command);
@@ -108,6 +109,7 @@ impl Shell {
         kprintln!("  mem             - Show memory information");
         kprintln!("  page [addr]     - Show paging info / translate address");
         kprintln!("  echo <text>     - Echo text back");
+        kprintln!("  panic           - Trigger a kernel panic (for testing)");
     }
 
     /// clear コマンド: 画面をクリアする。
@@ -177,4 +179,9 @@ impl Shell {
         kprintln!("{}", args);
     }
 
+    /// panic コマンド: 意図的にカーネルパニックを発生させる。
+    /// panic ハンドラのテスト用。シリアルと画面に赤字で panic 情報が表示されるはず。
+    fn cmd_panic(&self) {
+        panic!("User-triggered panic from shell command");
+    }
 }

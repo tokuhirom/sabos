@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-uefi = { version = "0.35", features = ["panic_handler"] }
+uefi = { version = "0.35" }
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 x86_64 = "0.15"
 lazy_static = { version = "1", features = ["spin_no_std"] }

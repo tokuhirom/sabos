@@ -10,6 +10,7 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod paging;
+mod panic;
 mod serial;
 mod shell;
 
