@@ -11,6 +11,7 @@ mod interrupts;
 mod memory;
 mod paging;
 mod panic;
+mod scheduler;
 mod serial;
 mod shell;
 
@@ -180,6 +181,33 @@ fn main() -> Status {
     kprintln!("Hardware interrupts enabled!");
     kprintln!();
 
+    // --- スケジューラの初期化 ---
+    // 現在の実行コンテキストを task 0 ("kernel") として登録する。
+    // 割り込み有効化の後に呼ぶ（タスク内で割り込みが必要になるため）。
+    scheduler::init();
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("Scheduler initialized.");
+    kprintln!();
+
+    // --- マルチタスクのデモ ---
+    // 2つのデモタスクを生成して、協調的マルチタスクの動作を確認する。
+    // 各タスクはメッセージを表示して yield を繰り返し、最後に return する。
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Spawning demo tasks...");
+    scheduler::spawn("demo_a", demo_task_a);
+    scheduler::spawn("demo_b", demo_task_b);
+
+    kprintln!("Running demo tasks:");
+    // yield_now() で kernel → demo_a → demo_b → kernel ... とラウンドロビンする。
+    // 全タスクが Finished になるまで繰り返す。
+    while scheduler::has_ready_tasks() {
+        scheduler::yield_now();
+    }
+
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("All demo tasks finished!");
+    kprintln!();
+
     // --- シェルの起動 ---
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
     kprintln!("Welcome to SABOS shell! Type 'help' for commands.");
@@ -209,4 +237,34 @@ fn main() -> Status {
             x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
+}
+
+// =================================================================
+// マルチタスクのデモ用タスク
+// =================================================================
+//
+// 各タスクはメッセージを表示して yield_now() で CPU を譲る。
+// これを数回繰り返してから return する。
+// return すると task_trampoline → task_exit_handler で自動的に Finished になる。
+
+/// デモタスク A: メッセージを3回表示する。
+fn demo_task_a() {
+    framebuffer::set_global_colors((100, 200, 255), (0, 0, 128));
+    kprintln!("  [Task A] Hello! (1/3)");
+    scheduler::yield_now();
+    kprintln!("  [Task A] Running! (2/3)");
+    scheduler::yield_now();
+    kprintln!("  [Task A] Done! (3/3)");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+}
+
+/// デモタスク B: メッセージを3回表示する。
+fn demo_task_b() {
+    framebuffer::set_global_colors((255, 200, 100), (0, 0, 128));
+    kprintln!("  [Task B] Hello! (1/3)");
+    scheduler::yield_now();
+    kprintln!("  [Task B] Running! (2/3)");
+    scheduler::yield_now();
+    kprintln!("  [Task B] Done! (3/3)");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 }

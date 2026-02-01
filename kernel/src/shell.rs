@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use crate::framebuffer;
 use crate::memory::FRAME_ALLOCATOR;
 use crate::paging;
+use crate::scheduler;
 use crate::{kprint, kprintln};
 use x86_64::VirtAddr;
 
@@ -90,6 +91,7 @@ impl Shell {
             "clear" => self.cmd_clear(),
             "mem" => self.cmd_mem(),
             "page" => self.cmd_page(args),
+            "ps" => self.cmd_ps(),
             "echo" => self.cmd_echo(args),
             "panic" => self.cmd_panic(),
             _ => {
@@ -108,6 +110,7 @@ impl Shell {
         kprintln!("  clear           - Clear the screen");
         kprintln!("  mem             - Show memory information");
         kprintln!("  page [addr]     - Show paging info / translate address");
+        kprintln!("  ps              - Show task list");
         kprintln!("  echo <text>     - Echo text back");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
     }
@@ -180,6 +183,22 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// ps コマンド: タスク一覧を表示する。
+    fn cmd_ps(&self) {
+        let tasks = scheduler::task_list();
+        kprintln!("  ID  STATE       NAME");
+        kprintln!("  --  ----------  ----------");
+        for t in &tasks {
+            let state_str = match t.state {
+                scheduler::TaskState::Ready => "Ready",
+                scheduler::TaskState::Running => "Running",
+                scheduler::TaskState::Finished => "Finished",
+            };
+            kprintln!("  {:2}  {:10}  {}", t.id, state_str, t.name);
+        }
+        kprintln!("  Total: {} tasks", tasks.len());
     }
 
     /// echo コマンド: 引数をそのまま出力する。
