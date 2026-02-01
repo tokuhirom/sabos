@@ -18,6 +18,12 @@ make run
 
 # QEMU で実行（GUI付き）
 make run-gui
+
+# スクリーンショットを撮る
+make screenshot SCREENSHOT_OUT=docs/images/foo.png
+
+# 待ち時間を変えたい場合（デフォルト6秒）
+make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 ```
 
 ## Project Structure
