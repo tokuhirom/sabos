@@ -3,10 +3,82 @@
 // GOP から取得したフレームバッファに直接ピクセルを書き込んで
 // テキストや図形を描画する。BltOp は矩形の塗りつぶしには便利だけど、
 // 1ピクセルずつ描くにはフレームバッファ直接アクセスのほうが速い。
+//
+// グローバルライター (WRITER) を提供して、kprint!/kprintln! マクロで
+// カーネルのどこからでも（割り込みハンドラからも）画面に出力できるようにする。
 
 use core::fmt;
 use font8x8::UnicodeFonts;
+use spin::Mutex;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
+
+// =================================================================
+// グローバルフレームバッファライター
+// =================================================================
+//
+// 割り込みハンドラ（キーボード等）から画面に文字を表示するには、
+// FramebufferWriter がグローバルにアクセス可能でなければならない。
+// spin::Mutex で排他制御し、Option で「まだ初期化されていない」状態を表す。
+
+/// グローバルフレームバッファライター。
+/// spin::Mutex で割り込みハンドラからの同時アクセスを排他制御する。
+/// 初期化前は None。init_global_writer() で初期化する。
+pub static WRITER: Mutex<Option<FramebufferWriter>> = Mutex::new(None);
+
+/// グローバルフレームバッファライターを初期化する。
+/// Exit Boot Services 後、フレームバッファ情報が確定してから呼ぶ。
+pub fn init_global_writer(info: FramebufferInfo) {
+    let mut writer = FramebufferWriter::from_info(info);
+    writer.clear();
+    *WRITER.lock() = Some(writer);
+}
+
+/// グローバルライターの前景色と背景色を設定する。
+/// 割り込み無効区間で実行して、割り込みハンドラとのデッドロックを防ぐ。
+pub fn set_global_colors(fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(writer) = WRITER.lock().as_mut() {
+            writer.set_colors(fg, bg);
+        }
+    });
+}
+
+/// kprint!/kprintln! マクロの内部実装。
+/// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。
+///
+/// デッドロックの仕組み:
+///   1. メインコードが WRITER.lock() を取得して書き込み中
+///   2. キーボード割り込みが発生
+///   3. キーボードハンドラが WRITER.lock() を取ろうとする
+///   4. ロックはメインコードが持っている → 永久待ち（デッドロック）
+///
+/// without_interrupts で割り込みを一時的に無効化すれば、
+/// ロック保持中に割り込みが入ることはなくなる。
+#[doc(hidden)]
+pub fn _print(args: fmt::Arguments) {
+    use core::fmt::Write;
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(writer) = WRITER.lock().as_mut() {
+            writer.write_fmt(args).unwrap();
+        }
+    });
+}
+
+/// カーネル用 print! マクロ。グローバルフレームバッファに出力する。
+/// 割り込みハンドラからも安全に呼べる。
+#[macro_export]
+macro_rules! kprint {
+    ($($arg:tt)*) => ({
+        $crate::framebuffer::_print(format_args!($($arg)*));
+    });
+}
+
+/// カーネル用 println! マクロ。末尾に改行を付けて出力する。
+#[macro_export]
+macro_rules! kprintln {
+    () => ($crate::kprint!("\n"));
+    ($($arg:tt)*) => ($crate::kprint!("{}\n", format_args!($($arg)*)));
+}
 
 /// フレームバッファの情報を保持する構造体。
 /// Exit Boot Services の前に GOP から情報を取得して保存しておく。
@@ -65,6 +137,11 @@ pub struct FramebufferWriter {
     /// テキストの背景色 (R, G, B)
     bg_color: (u8, u8, u8),
 }
+
+// FramebufferWriter は *mut u8（フレームバッファの生ポインタ）を持つため、
+// コンパイラは自動で Send を実装しない。しかしフレームバッファは
+// 単一の物理メモリ領域で、spin::Mutex で排他制御しているので安全。
+unsafe impl Send for FramebufferWriter {}
 
 /// font8x8 は 8x8 ピクセルのフォント。1文字あたり 8 バイト。
 const CHAR_WIDTH: usize = 8;

@@ -9,22 +9,21 @@ mod framebuffer;
 mod gdt;
 mod interrupts;
 
-use alloc::format;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
+// kprint! / kprintln! マクロを使えるようにする。
+// #[macro_export] で定義されたマクロはクレートルートに配置される。
+
 use core::fmt::Write;
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::mem::memory_map::{MemoryMap, MemoryType};
 
-use crate::framebuffer::{FramebufferInfo, FramebufferWriter};
+use crate::framebuffer::FramebufferInfo;
 
 #[entry]
 fn main() -> Status {
     // --- シリアルコンソールに挨拶 ---
     uefi::system::with_stdout(|stdout| {
-        stdout.write_str("Hello, SABOS!\r\n").unwrap();
+        let _ = stdout.write_str("Hello, SABOS!\r\n");
     });
 
     // --- GOP (Graphics Output Protocol) を取得 ---
@@ -38,7 +37,7 @@ fn main() -> Status {
     let (width, height) = mode_info.resolution();
     uefi::system::with_stdout(|stdout| {
         write!(stdout, "GOP: {}x{}, format: {:?}\r\n",
-            width, height, mode_info.pixel_format()).unwrap();
+            width, height, mode_info.pixel_format()).ok();
     });
 
     // --- Exit Boot Services の前にフレームバッファ情報を保存する ---
@@ -48,13 +47,10 @@ fn main() -> Status {
     let fb_info = FramebufferInfo::from_gop(&mut gop);
 
     uefi::system::with_stdout(|stdout| {
-        write!(stdout, "FB saved: {:#x}\r\n", fb_info.fb_addr).unwrap();
+        let _ = write!(stdout, "FB saved: {:#x}\r\n", fb_info.fb_addr);
     });
 
     // --- メモリマップのサマリーを表示する ---
-    // Exit Boot Services の前に、UEFI にメモリマップを教えてもらう。
-    // メモリマップは「この物理アドレス範囲はこういう種類のメモリです」という一覧。
-    // カーネルが自分でメモリ管理をするために必要な情報。
     {
         let memory_map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
             .expect("Failed to get memory map");
@@ -70,147 +66,113 @@ fn main() -> Status {
 
         uefi::system::with_stdout(|stdout| {
             write!(stdout, "Memory map: {} entries, {} MiB usable\r\n",
-                entry_count, usable_mib).unwrap();
+                entry_count, usable_mib).ok();
         });
-        // memory_map はここで drop される。
-        // exit_boot_services は自前で新しいメモリマップを取得する。
     }
 
     // --- GOP のプロトコルハンドルを解放する ---
-    // Exit Boot Services を呼ぶ前に、UEFI プロトコルへの参照をすべて手放す必要がある。
-    // ScopedProtocol は drop 時に close_protocol を呼ぶので、ここで明示的に drop する。
     drop(gop);
 
     // =================================================================
     // Exit Boot Services — ここが UEFI アプリからカーネルへの分岐点
     // =================================================================
-    // この呼び出し以降:
-    //   - UEFI の Boot Services（メモリ確保、プロトコル、コンソール出力等）は使えない
-    //   - 全メモリ・全ハードウェアの管理責任がカーネルに移る
-    //   - 唯一 UEFI Runtime Services（時刻取得等）だけは引き続き使える
-    //   - シリアルコンソールへの UEFI 経由の出力もここで終わり
     uefi::system::with_stdout(|stdout| {
-        stdout.write_str("Exiting boot services...\r\n").unwrap();
+        let _ = stdout.write_str("Exiting boot services...\r\n");
     });
 
-    let _memory_map = unsafe { uefi::boot::exit_boot_services(None) };
+    let memory_map = unsafe { uefi::boot::exit_boot_services(None) };
 
     // =================================================================
     // ここからはカーネルの世界。UEFI の助けはもう借りられない。
     // =================================================================
 
     // --- GDT (Global Descriptor Table) の初期化 ---
-    // カーネルのコード/データセグメントと TSS（ダブルフォルト用スタック）を設定。
-    // IDT より先に初期化する必要がある（IST を使うため TSS が先に必要）。
     gdt::init();
 
-    // --- IDT (Interrupt Descriptor Table) の初期化 ---
-    // CPU 例外（ゼロ除算、ページフォルト等）のハンドラを登録。
-    // これがないと例外 → ダブルフォルト → トリプルフォルト → CPU リセット。
+    // --- IDT + PIC の初期化 ---
+    // CPU 例外ハンドラと、ハードウェア割り込み（タイマー、キーボード）のハンドラを登録。
+    // PIC を初期化して IRQ 0〜15 を IDT の 32〜47 番にリマップする。
     interrupts::init();
 
     // --- ヒープアロケータの初期化 ---
-    // これで Vec, Box, String など alloc crate の型が使えるようになる。
-    // BSS セクションに 1 MiB の静的領域を確保して、linked_list_allocator で管理する。
     allocator::init();
 
-    // Exit Boot Services 後でもフレームバッファは生きている。
-    // 保存しておいた情報を使って FramebufferWriter を再構築する。
-    let mut fb = FramebufferWriter::from_info(fb_info);
-
-    // 紺色の背景で画面をクリア
-    fb.clear();
+    // --- グローバルフレームバッファライターの初期化 ---
+    // これ以降は kprint!/kprintln! マクロでどこからでも画面に出力できる。
+    // 割り込みハンドラ（キーボード）からも安全に書ける。
+    framebuffer::init_global_writer(fb_info);
 
     // タイトルを黄色で表示
-    fb.set_colors((255, 255, 0), (0, 0, 128));
-    fb.write_str("=== SABOS ===\n\n");
+    framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+    kprintln!("=== SABOS ===");
+    kprintln!();
 
     // 画面情報を白色で表示
-    fb.set_colors((255, 255, 255), (0, 0, 128));
-    write!(fb, "Framebuffer: {}x{}\n", fb_info.width, fb_info.height).unwrap();
-    write!(fb, "Pixel format: {:?}\n", fb_info.pixel_format).unwrap();
-    fb.write_str("\n");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Framebuffer: {}x{}", fb_info.width, fb_info.height);
+    kprintln!("Pixel format: {:?}", fb_info.pixel_format);
+    kprintln!();
 
     // Boot Services を抜けたことを表示
-    fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("Boot services exited successfully!\n");
-    fb.write_str("Kernel is now in control.\n\n");
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("Boot services exited successfully!");
+    kprintln!("Kernel is now in control.");
+    kprintln!();
 
     // メモリマップのサマリーを表示
-    fb.set_colors((255, 255, 255), (0, 0, 128));
-    fb.write_str("Memory map:\n");
-
-    // 使用可能なメモリの合計を計算して表示
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Memory map:");
     let mut usable_pages: u64 = 0;
-    for desc in _memory_map.entries() {
-        // CONVENTIONAL_MEMORY が OS が自由に使えるメモリ
+    for desc in memory_map.entries() {
         if desc.ty == MemoryType::CONVENTIONAL {
             usable_pages += desc.page_count;
         }
     }
-    // 1 ページ = 4KiB なので、ページ数 * 4096 / 1024 / 1024 = MiB
     let usable_mib = usable_pages * 4096 / 1024 / 1024;
-    write!(fb, "  Usable memory: {} MiB ({} pages)\n", usable_mib, usable_pages).unwrap();
-    write!(fb, "  Total entries: {}\n", _memory_map.entries().len()).unwrap();
+    kprintln!("  Usable memory: {} MiB ({} pages)", usable_mib, usable_pages);
+    kprintln!("  Total entries: {}", memory_map.entries().len());
+    kprintln!();
 
-    // GDT/IDT 初期化の成功を表示
-    fb.write_str("\n");
-    fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("GDT initialized.\n");
-    fb.write_str("IDT initialized.\n\n");
+    // 初期化成功を表示
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("GDT initialized.");
+    kprintln!("IDT initialized.");
+    kprintln!("PIC initialized.");
+    kprintln!("Heap allocator initialized.");
+    kprintln!();
 
-    // --- int3 テスト ---
-    // ブレークポイント例外を意図的に発生させて、IDT が正しく動いているか確認する。
-    // breakpoint_handler は panic しないので、ここから正常に戻ってくるはず。
-    fb.set_colors((255, 255, 255), (0, 0, 128));
-    fb.write_str("Testing int3 breakpoint... ");
+    // int3 テスト
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprint!("Testing int3 breakpoint... ");
     x86_64::instructions::interrupts::int3();
-    fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("OK!\n");
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("OK!");
+    kprintln!();
 
-    fb.set_colors((255, 255, 255), (0, 0, 128));
-    fb.write_str("\nAll exception handlers are set up.\n\n");
+    // --- 割り込みを有効化 (sti 命令) ---
+    // ここで CPU の割り込みフラグを立てる。
+    // これ以降、タイマー割り込みとキーボード割り込みが CPU に届くようになる。
+    // sti の前にすべての初期化を終えておくこと。
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("Enabling hardware interrupts...");
 
-    // --- ヒープアロケータのテスト ---
-    // Vec, Box, String が動くか確認する。
-    // alloc crate が使えるのは allocator::init() の後。
-    fb.write_str("Heap allocator test:\n");
+    x86_64::instructions::interrupts::enable();
 
-    // Box: ヒープ上にスカラ値を確保
-    let boxed = alloc::boxed::Box::new(42);
-    write!(fb, "  Box<i32>: {}\n", *boxed).unwrap();
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Hardware interrupts enabled!");
+    kprintln!();
 
-    // Vec: 動的配列
-    let mut numbers: Vec<i32> = vec![1, 2, 3, 4, 5];
-    numbers.push(6);
-    write!(fb, "  Vec: {:?} (len={})\n", numbers, numbers.len()).unwrap();
+    // キーボード入力待ちのプロンプト
+    framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+    kprintln!("Type something:");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
-    // String: 動的文字列
-    let mut greeting = String::from("Hello, ");
-    greeting.push_str("SABOS heap!");
-    write!(fb, "  String: \"{}\"\n", greeting).unwrap();
-
-    // format! マクロ（ヒープに String を生成）
-    let formatted = format!("Heap size: {} KiB", 1024);
-    write!(fb, "  format!: \"{}\"\n", formatted).unwrap();
-
-    fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("\nHeap allocator is working!\n\n");
-
-    // --- スクロールテスト ---
-    // 画面がいっぱいになったら上にスクロールして、最下行に新しい内容が描かれることを確認。
-    fb.set_colors((255, 255, 255), (0, 0, 128));
-    fb.write_str("Scroll test:\n");
-    for i in 0..120 {
-        write!(fb, "  Line {}\n", i).unwrap();
-    }
-    fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("Scroll test passed!\n");
-
-    // カーネルとして停止。ここからページング、ドライバへと進む。
+    // --- メインループ ---
+    // hlt 命令で CPU を省電力モードにして割り込みを待つ。
+    // 割り込み（タイマー、キーボード等）が来ると hlt から復帰して、
+    // ハンドラが実行された後、再び hlt に戻る。
+    // hlt を使わないと CPU が 100% ビジーループして電力を浪費する。
     loop {
-        unsafe {
-            core::arch::asm!("hlt");
-        }
+        x86_64::instructions::hlt();
     }
 }
