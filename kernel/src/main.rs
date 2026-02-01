@@ -195,7 +195,17 @@ fn main() -> Status {
     write!(fb, "  format!: \"{}\"\n", formatted).unwrap();
 
     fb.set_colors((0, 255, 0), (0, 0, 128));
-    fb.write_str("\nHeap allocator is working!\n");
+    fb.write_str("\nHeap allocator is working!\n\n");
+
+    // --- スクロールテスト ---
+    // 画面がいっぱいになったら上にスクロールして、最下行に新しい内容が描かれることを確認。
+    fb.set_colors((255, 255, 255), (0, 0, 128));
+    fb.write_str("Scroll test:\n");
+    for i in 0..120 {
+        write!(fb, "  Line {}\n", i).unwrap();
+    }
+    fb.set_colors((0, 255, 0), (0, 0, 128));
+    fb.write_str("Scroll test passed!\n");
 
     // カーネルとして停止。ここからページング、ドライバへと進む。
     loop {

@@ -183,6 +183,48 @@ impl FramebufferWriter {
         }
     }
 
+    /// 画面を1行分（CHAR_HEIGHT ピクセル）上にスクロールする。
+    /// フレームバッファの内容を上方向にコピーして、最下行を背景色で埋める。
+    ///
+    /// フレームバッファは MMIO（メモリマップドI/O）なので、
+    /// 通常の RAM よりアクセスが遅い。大量のピクセルをコピーするので
+    /// 目に見えるほど遅くなる可能性がある。
+    /// 将来的にはバックバッファ（RAM 上のコピー）を使って高速化できる。
+    fn scroll_up(&mut self) {
+        let bytes_per_pixel: usize = 4;
+        let row_bytes = self.stride * bytes_per_pixel;
+        let scroll_bytes = CHAR_HEIGHT * row_bytes;
+        let total_bytes = self.height * row_bytes;
+
+        // フレームバッファの内容を CHAR_HEIGHT 行分上にずらす。
+        // core::ptr::copy は memmove 相当で、重なった領域も正しく処理する。
+        unsafe {
+            core::ptr::copy(
+                self.fb_ptr.add(scroll_bytes),
+                self.fb_ptr,
+                total_bytes - scroll_bytes,
+            );
+        }
+
+        // 最下行（スクロールで空いた部分）を背景色でクリア
+        let (r, g, b) = self.bg_color;
+        let clear_start_y = self.height - CHAR_HEIGHT;
+        for y in clear_start_y..self.height {
+            for x in 0..self.width {
+                self.put_pixel(x, y, r, g, b);
+            }
+        }
+    }
+
+    /// カーソルが画面下端を超えていたらスクロールする。
+    /// 複数行分超えている場合も対応する。
+    fn ensure_cursor_visible(&mut self) {
+        while self.cursor_y + CHAR_HEIGHT > self.height {
+            self.scroll_up();
+            self.cursor_y -= CHAR_HEIGHT;
+        }
+    }
+
     /// 1文字を現在のカーソル位置に描画し、カーソルを進める。
     fn write_char(&mut self, c: char) {
         match c {
@@ -190,6 +232,7 @@ impl FramebufferWriter {
                 // 改行: X を先頭に戻し、Y を 1 行分下げる
                 self.cursor_x = 0;
                 self.cursor_y += CHAR_HEIGHT;
+                self.ensure_cursor_visible();
             }
             '\r' => {
                 // キャリッジリターン: X を先頭に戻す
@@ -202,11 +245,8 @@ impl FramebufferWriter {
                     self.cursor_y += CHAR_HEIGHT;
                 }
 
-                // 画面下端を超えたらスクロール...は未実装。
-                // とりあえず描画を止める。
-                if self.cursor_y + CHAR_HEIGHT > self.height {
-                    return;
-                }
+                // 画面下端を超えていたらスクロール
+                self.ensure_cursor_visible();
 
                 self.draw_char(self.cursor_x, self.cursor_y, c);
                 self.cursor_x += CHAR_WIDTH;
