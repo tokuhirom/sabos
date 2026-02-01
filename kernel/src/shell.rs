@@ -8,7 +8,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::framebuffer;
+use crate::memory::FRAME_ALLOCATOR;
+use crate::paging;
 use crate::{kprint, kprintln};
+use x86_64::VirtAddr;
 
 /// シェルの状態を管理する構造体。
 pub struct Shell {
@@ -86,6 +89,7 @@ impl Shell {
             "help" => self.cmd_help(),
             "clear" => self.cmd_clear(),
             "mem" => self.cmd_mem(),
+            "page" => self.cmd_page(args),
             "echo" => self.cmd_echo(args),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -99,10 +103,11 @@ impl Shell {
     /// help コマンド: 使えるコマンドの一覧を表示する。
     fn cmd_help(&self) {
         kprintln!("Available commands:");
-        kprintln!("  help        - Show this help message");
-        kprintln!("  clear       - Clear the screen");
-        kprintln!("  mem         - Show memory information");
-        kprintln!("  echo <text> - Echo text back");
+        kprintln!("  help            - Show this help message");
+        kprintln!("  clear           - Clear the screen");
+        kprintln!("  mem             - Show memory information");
+        kprintln!("  page [addr]     - Show paging info / translate address");
+        kprintln!("  echo <text>     - Echo text back");
     }
 
     /// clear コマンド: 画面をクリアする。
@@ -117,8 +122,59 @@ impl Shell {
         kprintln!("  Heap:   1024 KiB (static BSS allocation)");
     }
 
+    /// page コマンド: ページング情報を表示する。
+    ///
+    /// 引数なし: CR3 レジスタ値、L4 テーブルの使用エントリ数、
+    ///           フレームアロケータの割り当て状況を表示する。
+    /// 引数あり: 16進数の仮想アドレスを物理アドレスに変換して表示する。
+    fn cmd_page(&self, args: &str) {
+        let args = args.trim();
+        if args.is_empty() {
+            // 引数なし: ページング情報のサマリーを表示
+            let cr3 = paging::read_cr3();
+            let l4_entries = paging::l4_used_entries();
+            let fa = FRAME_ALLOCATOR.lock();
+            let total = fa.total_frames();
+            let allocated = fa.allocated_count();
+
+            kprintln!("Paging information:");
+            kprintln!("  CR3 (L4 table): {:#x}", cr3.as_u64());
+            kprintln!("  L4 used entries: {} / 512", l4_entries);
+            kprintln!("  Frame allocator: {} / {} frames used", allocated, total);
+        } else {
+            // 引数あり: 仮想アドレスを物理アドレスに変換
+            // "0x" プレフィックスがあれば除去して16進数としてパース
+            let hex_str = args.trim_start_matches("0x").trim_start_matches("0X");
+            match u64::from_str_radix(hex_str, 16) {
+                Ok(addr) => {
+                    // x86_64 の仮想アドレスは 48 ビット（符号拡張）。
+                    // 不正なアドレスの場合は VirtAddr::try_new がエラーを返す。
+                    match VirtAddr::try_new(addr) {
+                        Ok(virt) => match paging::translate_addr(virt) {
+                            Some(phys) => {
+                                kprintln!("  virt {:#x} -> phys {:#x}", addr, phys.as_u64());
+                            }
+                            None => {
+                                kprintln!("  virt {:#x} -> NOT MAPPED", addr);
+                            }
+                        },
+                        Err(_) => {
+                            kprintln!("  Invalid virtual address: {:#x}", addr);
+                            kprintln!("  (x86_64 virtual addresses must be 48-bit canonical)");
+                        }
+                    }
+                }
+                Err(_) => {
+                    kprintln!("  Invalid hex address: {}", args);
+                    kprintln!("  Usage: page [hex_address]");
+                }
+            }
+        }
+    }
+
     /// echo コマンド: 引数をそのまま出力する。
     fn cmd_echo(&self, args: &str) {
         kprintln!("{}", args);
     }
+
 }

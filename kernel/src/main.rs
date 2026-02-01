@@ -8,6 +8,8 @@ mod allocator;
 mod framebuffer;
 mod gdt;
 mod interrupts;
+mod memory;
+mod paging;
 mod serial;
 mod shell;
 
@@ -99,6 +101,12 @@ fn main() -> Status {
     // --- ヒープアロケータの初期化 ---
     allocator::init();
 
+    // --- ページング管理の初期化 ---
+    // UEFI が設定済みのページテーブルを OffsetPageTable でラップし、
+    // 物理フレームアロケータも初期化する。
+    // ヒープが必要（Vec を使うため）なので allocator::init() の後に呼ぶ。
+    paging::init(&memory_map);
+
     // --- グローバルフレームバッファライターの初期化 ---
     // これ以降は kprint!/kprintln! マクロでどこからでも画面に出力できる。
     // 割り込みハンドラ（キーボード）からも安全に書ける。
@@ -141,6 +149,7 @@ fn main() -> Status {
     kprintln!("IDT initialized.");
     kprintln!("PIC initialized.");
     kprintln!("Heap allocator initialized.");
+    kprintln!("Paging initialized (CR3: {:#x}).", paging::read_cr3().as_u64());
     kprintln!();
 
     // int3 テスト
@@ -149,6 +158,12 @@ fn main() -> Status {
     x86_64::instructions::interrupts::int3();
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("OK!");
+    kprintln!();
+
+    // ページングのテスト
+    // 仮想アドレスへのマッピング作成 → 変換確認 → 解除の一連を検証する。
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    paging::demo_mapping();
     kprintln!();
 
     // --- 割り込みを有効化 (sti 命令) ---
