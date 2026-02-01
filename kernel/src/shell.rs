@@ -119,9 +119,17 @@ impl Shell {
 
     /// mem コマンド: メモリ情報を表示する。
     fn cmd_mem(&self) {
+        let fa = FRAME_ALLOCATOR.lock();
+        let total = fa.total_frames();
+        let allocated = fa.allocated_count();
+        let free = fa.free_frames();
+
         kprintln!("Memory information:");
-        kprintln!("  Usable: {} MiB ({} pages)", self.usable_mib, self.usable_pages);
-        kprintln!("  Heap:   1024 KiB (static BSS allocation)");
+        kprintln!("  Usable:    {} MiB ({} pages)", self.usable_mib, self.usable_pages);
+        kprintln!("  Heap:      1024 KiB (static BSS allocation)");
+        kprintln!("  Frames:    {} total, {} allocated, {} free",
+            total, allocated, free);
+        kprintln!("  Free mem:  {} KiB", free * 4);
     }
 
     /// page コマンド: ページング情報を表示する。

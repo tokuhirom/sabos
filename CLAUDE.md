@@ -36,6 +36,7 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 
 - main ブランチにどんどんコミットしてプッシュする。PRやブランチ運用はしない
 - コミットはこまめに行い、動く状態を保つ
+- **1つの作業（機能追加・修正）が終わるたびにコミットする**。まとめてコミットしない
 
 ## Development Principles
 
@@ -43,6 +44,12 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 - 習作プロジェクトなので楽しさと学びを重視
 - 一度作った機能は壊さない。GitHub Actions でビルドの成功を常に保証する
 - コメントはマシマシで書く。学習用プロジェクトなので「なぜそうしているか」「何をしているか」を後から読んで理解できるよう丁寧にコメントを残す
+
+## Daily Workflow
+
+- 1日のはじめにその日の計画を `docs/YYYY-MM-DD.md` に書き、計画に沿って進める
+- 各タスクは実装計画を具体的に（変更ファイル・変更内容）書き出してから着手する
+- タスクは小さく分割する。大きすぎると planning mode に入ってコンテキストが失われるため
 
 ## Language
 
