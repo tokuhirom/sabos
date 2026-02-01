@@ -44,6 +44,12 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 - 一度作った機能は壊さない。GitHub Actions でビルドの成功を常に保証する
 - コメントはマシマシで書く。学習用プロジェクトなので「なぜそうしているか」「何をしているか」を後から読んで理解できるよう丁寧にコメントを残す
 
+## Language
+
+- ユーザーへの応答は日本語で行うこと
+- コミットメッセージも日本語で書く
+- コード内のコメントも日本語で書く（学習用プロジェクトのため）
+
 ## CI/CD
 
 - GitHub Actions で `cargo build --target x86_64-unknown-uefi` が通ることを保証
