@@ -1,7 +1,10 @@
 #![no_main]
 #![no_std]
+#![feature(abi_x86_interrupt)]
 
 mod framebuffer;
+mod gdt;
+mod interrupts;
 
 use core::fmt::Write;
 use uefi::prelude::*;
@@ -89,6 +92,16 @@ fn main() -> Status {
     // ここからはカーネルの世界。UEFI の助けはもう借りられない。
     // =================================================================
 
+    // --- GDT (Global Descriptor Table) の初期化 ---
+    // カーネルのコード/データセグメントと TSS（ダブルフォルト用スタック）を設定。
+    // IDT より先に初期化する必要がある（IST を使うため TSS が先に必要）。
+    gdt::init();
+
+    // --- IDT (Interrupt Descriptor Table) の初期化 ---
+    // CPU 例外（ゼロ除算、ページフォルト等）のハンドラを登録。
+    // これがないと例外 → ダブルフォルト → トリプルフォルト → CPU リセット。
+    interrupts::init();
+
     // Exit Boot Services 後でもフレームバッファは生きている。
     // 保存しておいた情報を使って FramebufferWriter を再構築する。
     let mut fb = FramebufferWriter::from_info(fb_info);
@@ -128,7 +141,25 @@ fn main() -> Status {
     write!(fb, "  Usable memory: {} MiB ({} pages)\n", usable_mib, usable_pages).unwrap();
     write!(fb, "  Total entries: {}\n", _memory_map.entries().len()).unwrap();
 
-    // カーネルとして停止。ここからページング、割り込み、ドライバへと進む。
+    // GDT/IDT 初期化の成功を表示
+    fb.write_str("\n");
+    fb.set_colors((0, 255, 0), (0, 0, 128));
+    fb.write_str("GDT initialized.\n");
+    fb.write_str("IDT initialized.\n\n");
+
+    // --- int3 テスト ---
+    // ブレークポイント例外を意図的に発生させて、IDT が正しく動いているか確認する。
+    // breakpoint_handler は panic しないので、ここから正常に戻ってくるはず。
+    fb.set_colors((255, 255, 255), (0, 0, 128));
+    fb.write_str("Testing int3 breakpoint... ");
+    x86_64::instructions::interrupts::int3();
+    fb.set_colors((0, 255, 0), (0, 0, 128));
+    fb.write_str("OK!\n");
+
+    fb.set_colors((255, 255, 255), (0, 0, 128));
+    fb.write_str("\nAll exception handlers are set up.\n");
+
+    // カーネルとして停止。ここからヒープ、ページング、ドライバへと進む。
     loop {
         unsafe {
             core::arch::asm!("hlt");
