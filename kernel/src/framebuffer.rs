@@ -8,6 +8,35 @@ use core::fmt;
 use font8x8::UnicodeFonts;
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 
+/// フレームバッファの情報を保持する構造体。
+/// Exit Boot Services の前に GOP から情報を取得して保存しておく。
+/// Exit 後は GOP が使えなくなるが、フレームバッファの物理アドレス自体は有効なまま残る。
+#[derive(Clone, Copy)]
+pub struct FramebufferInfo {
+    pub fb_addr: u64,
+    pub fb_size: usize,
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub pixel_format: PixelFormat,
+}
+
+impl FramebufferInfo {
+    /// GOP からフレームバッファ情報を取得する。
+    /// Exit Boot Services の前に呼ぶこと。
+    pub fn from_gop(gop: &mut GraphicsOutput) -> Self {
+        let mode_info = gop.current_mode_info();
+        let (width, height) = mode_info.resolution();
+        let stride = mode_info.stride();
+        let pixel_format = mode_info.pixel_format();
+        let mut fb = gop.frame_buffer();
+        let fb_addr = fb.as_mut_ptr() as u64;
+        let fb_size = fb.size();
+
+        Self { fb_addr, fb_size, width, height, stride, pixel_format }
+    }
+}
+
 /// フレームバッファへの描画を担当する構造体。
 ///
 /// GOP から取得したフレームバッファの生ポインタとメタ情報を持つ。
@@ -47,23 +76,20 @@ impl FramebufferWriter {
     /// GOP のフレームバッファに直接アクセスするため、
     /// この関数で取得したポインタが有効な間だけ使える。
     pub fn new(gop: &mut GraphicsOutput) -> Self {
-        let mode_info = gop.current_mode_info();
-        let (width, height) = mode_info.resolution();
-        let stride = mode_info.stride();
-        let pixel_format = mode_info.pixel_format();
+        let info = FramebufferInfo::from_gop(gop);
+        Self::from_info(info)
+    }
 
-        // フレームバッファの生ポインタとサイズを取得
-        let mut fb = gop.frame_buffer();
-        let fb_ptr = fb.as_mut_ptr();
-        let fb_size = fb.size();
-
+    /// 保存済みの FramebufferInfo から FramebufferWriter を作成する。
+    /// Exit Boot Services 後にフレームバッファを使い続けるために使う。
+    pub fn from_info(info: FramebufferInfo) -> Self {
         Self {
-            fb_ptr,
-            fb_size,
-            width,
-            height,
-            stride,
-            pixel_format,
+            fb_ptr: info.fb_addr as *mut u8,
+            fb_size: info.fb_size,
+            width: info.width,
+            height: info.height,
+            stride: info.stride,
+            pixel_format: info.pixel_format,
             cursor_x: 0,
             cursor_y: 0,
             fg_color: (255, 255, 255), // デフォルト白
