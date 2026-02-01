@@ -8,6 +8,7 @@ mod allocator;
 mod framebuffer;
 mod gdt;
 mod interrupts;
+mod serial;
 mod shell;
 
 // kprint! / kprintln! マクロを使えるようにする。

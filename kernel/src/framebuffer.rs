@@ -54,6 +54,7 @@ pub fn clear_global_screen() {
 }
 
 /// kprint!/kprintln! マクロの内部実装。
+/// フレームバッファとシリアルの両方に出力する。
 /// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。
 ///
 /// デッドロックの仕組み:
@@ -68,9 +69,17 @@ pub fn clear_global_screen() {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     x86_64::instructions::interrupts::without_interrupts(|| {
+        // フレームバッファに出力
         if let Some(writer) = WRITER.lock().as_mut() {
             writer.write_fmt(args).unwrap();
         }
+        // シリアルにも出力（デュアル出力）
+        // Exit Boot Services 後のデバッグに便利。
+        // make run のターミナルにカーネルログが表示される。
+        crate::serial::SERIAL1
+            .lock()
+            .write_fmt(args)
+            .ok();
     });
 }
 
