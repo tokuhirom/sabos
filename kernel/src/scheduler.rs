@@ -17,7 +17,21 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+
+/// preempt() が呼ばれた回数（タイマー割り込みごとに 1 回）。
+static PREEMPT_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+/// preempt() で実際にコンテキストスイッチした回数。
+static PREEMPT_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// preempt() の統計情報を返す（呼び出し回数, スイッチ回数）。
+pub fn preempt_stats() -> (u64, u64) {
+    (
+        PREEMPT_CALL_COUNT.load(Ordering::Relaxed),
+        PREEMPT_SWITCH_COUNT.load(Ordering::Relaxed),
+    )
+}
 
 /// タスクのスタックサイズ（16 KiB）。
 /// カーネルタスクなので大きなスタックは不要だが、
@@ -77,9 +91,13 @@ global_asm!(
 // （タスク作成時にスタック上の r12 保存位置に設定済み）。
 //
 // 処理の流れ:
-//   1. スタックを整えてシャドウスペースを確保（Microsoft x64 ABI 要件）
-//   2. r12 のエントリ関数を呼び出す
-//   3. エントリ関数が return したら task_exit_handler を呼んでタスクを終了
+//   1. sti で割り込みを有効化する
+//      （yield_now() や preempt() は割り込み無効状態で context_switch するため、
+//        新しいタスクが初めて実行される時点では割り込みが無効のまま。
+//        sti しないとタイマー割り込みが発火せず、プリエンプションが機能しない。）
+//   2. スタックを整えてシャドウスペースを確保（Microsoft x64 ABI 要件）
+//   3. r12 のエントリ関数を呼び出す
+//   4. エントリ関数が return したら task_exit_handler を呼んでタスクを終了
 //
 // アライメント:
 //   context_switch の ret でここに来た時点で rsp は 16n+8（関数エントリ規約）。
@@ -87,6 +105,7 @@ global_asm!(
 //   rsp を 16 バイトアラインにする。
 global_asm!(
     "task_trampoline:",
+    "sti",            // 割り込みを有効化（プリエンプションに必要）
     "sub rsp, 40",
     "call r12",
     "add rsp, 40",
@@ -372,6 +391,80 @@ pub fn yield_now() {
             // 戻ってきた = このタスクが再び Running になった
             x86_64::instructions::interrupts::enable();
         }
+    }
+}
+
+/// タイマー割り込みハンドラから呼ばれるプリエンプション関数。
+///
+/// yield_now() との違い:
+///   - try_lock() を使う（デッドロック防止）。
+///     タイマー割り込みは SCHEDULER のロック保持中にも発生しうるので、
+///     lock() で待つとデッドロックになる。try_lock() が失敗したら
+///     今回のプリエンプションはスキップし、次のタイマー割り込みに任せる。
+///   - 割り込みの有効/無効を操作しない。
+///     この関数は割り込みハンドラの中（= 割り込み無効状態）で呼ばれるため、
+///     自分で割り込みを操作する必要がない。
+///     戻り先のタスクの iretq で割り込みが再有効化される。
+///
+/// 呼び出し元（タイマー割り込みハンドラ）は、この関数を呼ぶ前に
+/// EOI (End Of Interrupt) を送っておくこと。
+/// context_switch で別タスクに切り替わった場合、そのタスクがタイマー割り込みを
+/// 受け取れるようにするため。
+pub fn preempt() {
+    PREEMPT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let switch_info = {
+        // try_lock(): ロック取得できなければプリエンプションをスキップ。
+        // SCHEDULER のロック保持中にタイマーが発火した場合のデッドロックを防ぐ。
+        let mut sched = match SCHEDULER.try_lock() {
+            Some(guard) => guard,
+            None => return, // ロック取得失敗 → 今回はスキップ
+        };
+
+        let current = sched.current;
+        let num_tasks = sched.tasks.len();
+
+        // タスクが 1 つ以下ならスイッチ不要
+        if num_tasks <= 1 {
+            return;
+        }
+
+        // 次の Ready タスクをラウンドロビンで探す
+        let mut next = None;
+        for i in 1..=num_tasks {
+            let idx = (current + i) % num_tasks;
+            if sched.tasks[idx].state == TaskState::Ready {
+                next = Some(idx);
+                break;
+            }
+        }
+
+        match next {
+            None => None, // 他に Ready タスクがない
+            Some(next_idx) => {
+                // 現在のタスクが Running なら Ready に戻す
+                if sched.tasks[current].state == TaskState::Running {
+                    sched.tasks[current].state = TaskState::Ready;
+                }
+                sched.tasks[next_idx].state = TaskState::Running;
+                sched.current = next_idx;
+
+                let old_rsp_ptr =
+                    &mut sched.tasks[current].context.rsp as *mut u64;
+                let new_rsp = sched.tasks[next_idx].context.rsp;
+
+                Some((old_rsp_ptr, new_rsp))
+            }
+        }
+    }; // Mutex はここで drop
+
+    if let Some((old_rsp_ptr, new_rsp)) = switch_info {
+        PREEMPT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            context_switch(old_rsp_ptr, new_rsp);
+        }
+        // 戻ってきた = このタスクが再び Running になった
+        // （割り込みハンドラ内なので iretq で割り込みが再有効化される）
     }
 }
 

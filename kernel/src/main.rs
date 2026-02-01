@@ -208,6 +208,32 @@ fn main() -> Status {
     kprintln!("All demo tasks finished!");
     kprintln!();
 
+    // --- プリエンプティブマルチタスクのデモ ---
+    // yield_now() を呼ばないビジーループタスクを2つ生成する。
+    // タイマー割り込みによる強制切り替え（プリエンプション）が正しく動いていれば、
+    // 各タスクが交互にメッセージを出力するはず。
+    // yield を使わずに切り替わることがプリエンプティブの証明。
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Spawning preemptive demo tasks (no yield)...");
+    scheduler::spawn("preempt_x", preemptive_task_x);
+    scheduler::spawn("preempt_y", preemptive_task_y);
+
+    kprintln!("Running preemptive demo tasks:");
+    // kernel タスクも yield_now() で Ready に戻り、
+    // タイマー割り込みがラウンドロビンで全タスクを切り替える。
+    // ただし kernel タスクはここで Ready タスクの完了を待つ必要があるので、
+    // yield_now() でループする。
+    while scheduler::has_ready_tasks() {
+        scheduler::yield_now();
+    }
+
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("All preemptive demo tasks finished!");
+    let (calls, switches) = scheduler::preempt_stats();
+    let ticks = interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    kprintln!("  timer ticks: {}, preempt() called: {}, switched: {}", ticks, calls, switches);
+    kprintln!();
+
     // --- シェルの起動 ---
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
     kprintln!("Welcome to SABOS shell! Type 'help' for commands.");
@@ -266,5 +292,63 @@ fn demo_task_b() {
     kprintln!("  [Task B] Running! (2/3)");
     scheduler::yield_now();
     kprintln!("  [Task B] Done! (3/3)");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+}
+
+// =================================================================
+// プリエンプティブマルチタスクのデモ用タスク
+// =================================================================
+//
+// これらのタスクは yield_now() を一切呼ばない。
+// それでもタイマー割り込み（IRQ 0）でプリエンプションが発生し、
+// 強制的に他のタスクに切り替わる。
+// 協調的デモと違い「自発的に譲らなくても切り替わる」ことを実証する。
+//
+// ビジーループで一定回数待ってからメッセージを表示する方式。
+// ループ回数は PIT の周波数（約 18.2 Hz = 約 55ms 間隔）を考慮して、
+// タイマー割り込みが何回か発火する程度の長さにしている。
+
+/// ビジーウェイト用のヘルパー関数。
+/// インラインアセンブリの nop ループで、コンパイラの最適化に左右されない
+/// 確実なビジーウェイトを行う。
+fn busy_wait(iterations: u64) {
+    // インラインアセンブリでカウントダウンループを実装する。
+    // コンパイラの最適化で消されることがない。
+    // `pause` 命令はスピンループ向けのヒントで、CPU のパイプラインを効率化する。
+    unsafe {
+        core::arch::asm!(
+            "2:",
+            "pause",
+            "sub {0}, 1",
+            "jnz 2b",
+            inout(reg) iterations => _,
+            options(nostack, nomem),
+        );
+    }
+}
+
+/// プリエンプティブデモタスク X:
+/// yield を使わずにメッセージを3回表示する。
+/// タイマー割り込みによるプリエンプションで強制的に切り替わる。
+fn preemptive_task_x() {
+    framebuffer::set_global_colors((200, 100, 255), (0, 0, 128));
+    kprintln!("  [Preempt X] Start (1/3)");
+    busy_wait(15_000_000);
+    kprintln!("  [Preempt X] Middle (2/3)");
+    busy_wait(15_000_000);
+    kprintln!("  [Preempt X] Done (3/3)");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+}
+
+/// プリエンプティブデモタスク Y:
+/// yield を使わずにメッセージを3回表示する。
+/// タイマー割り込みによるプリエンプションで強制的に切り替わる。
+fn preemptive_task_y() {
+    framebuffer::set_global_colors((255, 100, 200), (0, 0, 128));
+    kprintln!("  [Preempt Y] Start (1/3)");
+    busy_wait(15_000_000);
+    kprintln!("  [Preempt Y] Middle (2/3)");
+    busy_wait(15_000_000);
+    kprintln!("  [Preempt Y] Done (3/3)");
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 }

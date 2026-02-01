@@ -12,12 +12,17 @@
 // PIC が IRQ 0〜15 を IDT の 32〜47 番にマッピングする。
 
 use alloc::collections::VecDeque;
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 use crate::gdt;
+
+/// タイマー割り込みが発火した回数。
+/// プリエンプティブスケジューリングの動作確認や、システムの稼働時間の目安に使える。
+pub static TIMER_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 
 // =================================================================
 // キー入力キュー
@@ -145,7 +150,20 @@ pub fn init() {
     // PIC を初期化する。
     // IRQ 0〜15 が IDT の 32〜47 番にマッピングされるようにリマップする。
     unsafe {
-        PICS.lock().initialize();
+        let mut pics = PICS.lock();
+        pics.initialize();
+
+        // PIC のマスクを明示的に設定する。
+        // pic8259 の initialize() は初期化前のマスクを復元するが、
+        // UEFI が IRQ をマスクしている場合がある（特に IRQ 0 タイマー）。
+        // ここで明示的にタイマー (IRQ 0) とキーボード (IRQ 1) をアンマスクする。
+        //
+        // マスクは各ビットが 1 = マスク（無効）、0 = アンマスク（有効）。
+        // マスタ PIC: bit 0 = IRQ 0 (タイマー), bit 1 = IRQ 1 (キーボード)
+        //   0b11111100 → IRQ 0, 1 のみ有効
+        // スレーブ PIC: すべてマスク（IRQ 8〜15 は今は使わない）
+        //   0b11111111 → すべて無効
+        pics.write_masks(0b11111100, 0b11111111);
     }
 }
 
@@ -223,17 +241,29 @@ extern "x86-interrupt" fn double_fault_handler(
 
 /// IRQ 0: タイマー割り込みハンドラ。
 /// PIT (Programmable Interval Timer) から約 18.2 Hz で発火する。
-/// 今はカウントアップだけ。将来的にはプリエンプティブマルチタスクの
-/// タイムスライスに使う。
+///
+/// プリエンプティブマルチタスクの心臓部:
+///   1. EOI を先に送る（context_switch 後も他タスクがタイマー割り込みを受け取れるように）
+///   2. scheduler::preempt() で次の Ready タスクに強制切り替え
+///
+/// EOI を context_switch の前に送る理由:
+///   context_switch で別タスクに切り替わると、このハンドラの残りのコードは
+///   「このタスクが再スケジュールされるまで」実行されない。
+///   EOI を送らずに切り替えると、PIC がタイマー割り込みをブロックし続け、
+///   切り替え先タスクがタイマー割り込みを受け取れなくなる。
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // タイマー割り込みは頻繁に発生するので、今は何もしない。
-    // 将来はタスクスケジューラのトリガーになる。
+    TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    // PIC に EOI (End Of Interrupt) を送って「処理完了」を通知する。
+    // EOI を先に送る（プリエンプション前に PIC をクリアする）
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
+
+    // プリエンプティブスケジューリング:
+    // 現在のタスクを中断して、次の Ready タスクに切り替える。
+    // try_lock() を使うので、SCHEDULER がロック中なら何もせずスキップする。
+    crate::scheduler::preempt();
 }
 
 /// IRQ 1: キーボード割り込みハンドラ。
