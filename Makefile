@@ -17,6 +17,7 @@ run: build $(ESP_DIR)
 	qemu-system-x86_64 \
 		-nodefaults \
 		-machine q35 \
+		-vga std \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_DIR)/OVMF_CODE.fd \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_DIR)/OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:esp \

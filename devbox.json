@@ -3,13 +3,14 @@
   "packages": [
     "rustup@latest",
     "qemu@latest",
-    "OVMF@latest"
+    "OVMF@latest",
+    "imagemagick@latest"
   ],
   "shell": {
     "init_hook": [],
     "scripts": {
       "build": ["cd kernel && cargo build"],
-      "run": ["make run"]
+      "run":   ["make run"]
     }
   }
 }
