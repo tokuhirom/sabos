@@ -104,19 +104,21 @@ unsafe extern "C" {
 /// 手順:
 ///   1. ユーザースタックのトップアドレスを計算
 ///   2. カーネルスタックのトップを TSS rsp0 に設定
-///   3. jump_to_usermode() で iretq による Ring 3 遷移
+///   3. ユーザースタック・コード・データ領域に USER_ACCESSIBLE を設定
+///   4. jump_to_usermode() で iretq による Ring 3 遷移
+///   5. 戻り後に USER_ACCESSIBLE を解除
 ///
 /// SYS_EXIT システムコールが呼ばれると、exit_usermode() 経由で
 /// SAVED_RSP/SAVED_RBP を復元し、jump_to_usermode() の呼び出しから
 /// 正常に return する。結果的にこの関数も正常に return する。
-pub fn run_in_usermode(entry_point: fn()) {
+///
+/// Ring 3 でページフォルトが発生した場合も exit_usermode() で戻る。
+pub fn run_in_usermode(program: &UserProgram) {
     // ユーザースタックのトップアドレスを計算。
     // スタックは高いアドレスから低いアドレスに向かって伸びるので、
     // 配列の末尾がスタックトップになる。
-    let user_stack_top = {
-        let start = &raw const USER_STACK as u64;
-        start + USER_STACK_SIZE as u64
-    };
+    let user_stack_addr = &raw const USER_STACK as u64;
+    let user_stack_top = user_stack_addr + USER_STACK_SIZE as u64;
 
     // カーネルスタックのトップアドレスを計算。
     // Ring 3 で int 0x80 が発生したとき、CPU は TSS rsp0 のアドレスに
@@ -143,17 +145,71 @@ pub fn run_in_usermode(entry_point: fn()) {
     let rflags: u64 = 0x200; // IF=1
 
     // エントリポイントのアドレス
+    let entry_point = program.entry;
     let entry_addr = entry_point as *const () as u64;
+
+    // --- Ring 3 遷移前: 必要なページに USER_ACCESSIBLE を設定 ---
+
+    // 1. ユーザースタックを USER_ACCESSIBLE にする
+    crate::paging::set_user_accessible(
+        VirtAddr::new(user_stack_addr),
+        USER_STACK_SIZE,
+    );
+
+    // 2. ユーザーコードのページを USER_ACCESSIBLE にする
+    //    エントリポイントの関数を含むページ。関数サイズは正確にはわからないので、
+    //    余裕をもって 2 ページ (8KiB) 分を設定する。
+    //    関数コードが 4KiB ページ境界をまたぐ場合にも対応するため。
+    let code_size = 8192; // 2 ページ分
+    crate::paging::set_user_accessible(
+        VirtAddr::new(entry_addr),
+        code_size,
+    );
+
+    // 3. データ領域（文字列リテラル等）を USER_ACCESSIBLE にする
+    for &(data_addr, data_size) in program.data_regions {
+        if data_size > 0 {
+            crate::paging::set_user_accessible(
+                VirtAddr::new(data_addr),
+                data_size,
+            );
+        }
+    }
 
     // Ring 3 に遷移する。
     // jump_to_usermode() は内部で RSP/RBP を保存し、iretq で Ring 3 に飛ぶ。
     // SYS_EXIT → exit_usermode() で RSP/RBP が復元され、
     // jump_to_usermode() の呼び出しが正常に return したように見える。
+    // ページフォルトの場合も exit_usermode() で戻ってくる。
     unsafe {
         jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top, user_ss);
     }
 
     // ここに到達 = exit_usermode() 経由で Ring 3 から戻ってきた
+
+    // --- Ring 0 復帰後: USER_ACCESSIBLE を解除 ---
+
+    // 1. ユーザースタックの USER_ACCESSIBLE を解除
+    crate::paging::clear_user_accessible(
+        VirtAddr::new(user_stack_addr),
+        USER_STACK_SIZE,
+    );
+
+    // 2. ユーザーコードの USER_ACCESSIBLE を解除
+    crate::paging::clear_user_accessible(
+        VirtAddr::new(entry_addr),
+        code_size,
+    );
+
+    // 3. データ領域の USER_ACCESSIBLE を解除
+    for &(data_addr, data_size) in program.data_regions {
+        if data_size > 0 {
+            crate::paging::clear_user_accessible(
+                VirtAddr::new(data_addr),
+                data_size,
+            );
+        }
+    }
 }
 
 /// ユーザーモードからカーネルに戻る（SYS_EXIT から呼ばれる）。
@@ -188,16 +244,50 @@ pub fn exit_usermode() -> ! {
 // 文字列を出力するには int 0x80 でシステムコール SYS_WRITE を呼ぶ。
 // プログラムを終了するには SYS_EXIT を呼ぶ。
 
+/// ユーザープログラムの情報を保持する構造体。
+///
+/// エントリポイント（関数ポインタ）に加え、Ring 3 からアクセスが必要な
+/// データ領域（文字列リテラル等）のアドレスとサイズを保持する。
+/// run_in_usermode() はこの情報をもとに USER_ACCESSIBLE を設定する。
+pub struct UserProgram {
+    /// ユーザープログラムのエントリポイント
+    pub entry: fn(),
+    /// Ring 3 からアクセスが必要なデータ領域の一覧 (アドレス, サイズ)
+    /// 文字列リテラルなど .rodata に配置されるデータを含む
+    pub data_regions: &'static [(u64, usize)],
+}
+
+/// Hello World プログラムで使う文字列リテラル。
+/// static に置くことでアドレスが固定され、UserProgram から参照できる。
+static USER_HELLO_MSG: &[u8] = b"Hello from Ring 3!\n";
+
+
+/// Hello World ユーザープログラムの UserProgram を返す。
+pub fn get_user_hello() -> UserProgram {
+    UserProgram {
+        entry: user_hello,
+        data_regions: {
+            // データ領域のアドレスを動的に計算する。
+            // static 配列は変更できないので、代わりにスタック上で構築して
+            // 'static ライフタイムにリークする（学習用OSなのでメモリリークは許容）。
+            let regions = alloc::vec![
+                (USER_HELLO_MSG.as_ptr() as u64, USER_HELLO_MSG.len()),
+            ];
+            // Vec を Box<[T]> に変換して leak で 'static 参照にする
+            alloc::boxed::Box::leak(regions.into_boxed_slice())
+        },
+    }
+}
+
 /// Ring 3 で実行される Hello World プログラム。
 ///
 /// この関数はカーネルバイナリの一部としてコンパイルされるが、
 /// Ring 3 の特権レベルで実行される。
-/// 文字列リテラルはカーネルの .rodata セクションに配置されるが、
-/// 全ページを USER_ACCESSIBLE にしてあるのでアクセスできる。
+/// 文字列リテラルは USER_HELLO_MSG として static に配置され、
+/// run_in_usermode() が USER_ACCESSIBLE を設定してからアクセスする。
 pub fn user_hello() {
-    let msg = "Hello from Ring 3!\n";
-    let ptr = msg.as_ptr() as u64;
-    let len = msg.len() as u64;
+    let ptr = USER_HELLO_MSG.as_ptr() as u64;
+    let len = USER_HELLO_MSG.len() as u64;
 
     unsafe {
         // SYS_WRITE (1): カーネルコンソールに文字列を出力する。
@@ -220,5 +310,37 @@ pub fn user_hello() {
             in("rax") 60u64,   // SYS_EXIT
             options(noreturn),
         );
+    }
+}
+
+// =================================================================
+// テスト用: カーネルメモリへの不正アクセスプログラム
+// =================================================================
+
+/// カーネルメモリへの不正アクセスを試みるテストプログラムの UserProgram を返す。
+///
+/// このプログラムは Ring 3 からカーネル空間のメモリにアクセスしようとする。
+/// USER_ACCESSIBLE が設定されていないアドレスへの読み込みなので、
+/// ページフォルト (#PF) が発生し、graceful に終了するはず。
+pub fn get_user_illegal_access() -> UserProgram {
+    UserProgram {
+        entry: user_illegal_access,
+        // 不正アクセステストなのでデータ領域は不要
+        data_regions: &[],
+    }
+}
+
+/// カーネルメモリへの不正アクセスを試みるテストプログラム。
+///
+/// Ring 3 で実行され、USER_ACCESSIBLE が設定されていないアドレス (0x0) を
+/// 読み込もうとする。これにより Page Fault (#PF) が発生し、
+/// page_fault_handler が USER_MODE ビットを検出して exit_usermode() を呼ぶ。
+/// 結果的に run_in_usermode() が正常に return し、シェルに安全に戻る。
+pub fn user_illegal_access() {
+    // アドレス 0x0 はカーネル空間（USER_ACCESSIBLE なし）
+    // Ring 3 からここを読もうとすると Page Fault が発生する。
+    // → page_fault_handler → exit_usermode() で安全にカーネルに戻る。
+    unsafe {
+        core::ptr::read_volatile(0x0 as *const u8);
     }
 }

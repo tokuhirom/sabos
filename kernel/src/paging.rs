@@ -20,7 +20,7 @@ use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr3};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, Size4KiB,
+    FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
     Translate,
 };
 use x86_64::{PhysAddr, VirtAddr};
@@ -63,30 +63,25 @@ unsafe fn active_level_4_table() -> &'static mut PageTable {
     unsafe { &mut *page_table_ptr }
 }
 
-/// ページテーブルを書き込み可能かつユーザーアクセス可能にする。
+/// ページテーブルを書き込み可能にする。
 ///
 /// UEFI (OVMF) はページテーブルを 2MiB 巨大ページの読み取り専用領域に配置する。
 /// カーネルがページテーブルを変更するには、この保護を解除する必要がある。
-/// また、Ring 3（ユーザーモード）からメモリにアクセスできるよう
-/// USER_ACCESSIBLE フラグも全エントリに追加する。
 ///
 /// 手順:
 ///   1. CR0.WP (Write Protect) ビットを一時的にクリア
 ///      → ring 0 で読み取り専用ページに書き込めるようになる
-///   2. L4 → L3 → L2 → L1 テーブルを辿り、各エントリに
-///      WRITABLE と USER_ACCESSIBLE を追加する
+///   2. L4 → L3 → L2 → L1 テーブルを辿り、各エントリに WRITABLE を追加する
 ///   3. CR0.WP ビットを元に戻す
 ///   4. TLB をフラッシュして変更を反映
 ///
-/// USER_ACCESSIBLE (U/S ビット) は全階層 (L4, L3, L2, L1) に設定する必要がある。
-/// どれか1箇所でも欠けると Ring 3 からのアクセスが拒否される。
-/// セキュリティ的には全メモリが Ring 3 からアクセス可能になるが、
-/// 学習用プロジェクトの最初のステップとしては十分。
+/// USER_ACCESSIBLE は設定しない。Ring 3 からアクセスが必要なページには
+/// set_user_accessible() で個別に設定する。
 ///
 /// # Safety
 /// - CR0.WP を一時的に無効化するため、この間は全メモリが書き込み可能になる
 /// - 割り込みが無効化された状態で呼ぶべき（初期化時なので問題ない）
-unsafe fn make_page_tables_user_accessible() {
+unsafe fn make_page_tables_writable() {
     // CR0.WP を一時的にクリア（ring 0 での書き込み保護を無効化）
     let cr0 = Cr0::read();
     unsafe {
@@ -102,8 +97,8 @@ unsafe fn make_page_tables_user_accessible() {
             continue;
         }
 
-        // L4 エントリに WRITABLE と USER_ACCESSIBLE を追加
-        let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        // L4 エントリに WRITABLE を追加
+        let needed = PageTableFlags::WRITABLE;
         if !l4_entry.flags().contains(needed) {
             l4_entry.set_flags(l4_entry.flags() | needed);
         }
@@ -122,8 +117,8 @@ unsafe fn make_page_tables_user_accessible() {
                 continue;
             }
 
-            // L3 エントリに WRITABLE と USER_ACCESSIBLE を追加
-            let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+            // L3 エントリに WRITABLE を追加
+            let needed = PageTableFlags::WRITABLE;
             if !l3_entry.flags().contains(needed) {
                 l3_entry.set_flags(l3_entry.flags() | needed);
             }
@@ -142,8 +137,8 @@ unsafe fn make_page_tables_user_accessible() {
                     continue;
                 }
 
-                // L2 エントリに WRITABLE と USER_ACCESSIBLE を追加
-                let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                // L2 エントリに WRITABLE を追加
+                let needed = PageTableFlags::WRITABLE;
                 if !l2_entry.flags().contains(needed) {
                     l2_entry.set_flags(l2_entry.flags() | needed);
                 }
@@ -161,8 +156,8 @@ unsafe fn make_page_tables_user_accessible() {
                     if l1_entry.is_unused() {
                         continue;
                     }
-                    // L1 エントリにも WRITABLE と USER_ACCESSIBLE を追加
-                    let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                    // L1 エントリにも WRITABLE を追加
+                    let needed = PageTableFlags::WRITABLE;
                     if !l1_entry.flags().contains(needed) {
                         l1_entry.set_flags(l1_entry.flags() | needed);
                     }
@@ -231,13 +226,12 @@ pub fn init(memory_map: &MemoryMapOwned) {
     let total_frames: u64 = regions.iter().map(|r| r.page_count).sum();
     memory::init(regions);
 
-    // --- ページテーブル領域を書き込み可能 + ユーザーアクセス可能にする ---
+    // --- ページテーブル領域を書き込み可能にする ---
     // UEFI はページテーブルが配置された 2MiB ページを読み取り専用にしていることがある。
     // カーネルがページテーブルを変更するためには、これらを書き込み可能にする必要がある。
-    // さらに Ring 3（ユーザーモード）からメモリにアクセスできるよう
-    // USER_ACCESSIBLE フラグも全エントリに追加する。
+    // USER_ACCESSIBLE は設定しない（Ring 3 に必要なページだけ個別に設定する）。
     unsafe {
-        make_page_tables_user_accessible();
+        make_page_tables_writable();
     }
 
     // --- OffsetPageTable の作成 ---
@@ -379,4 +373,318 @@ pub fn demo_mapping() {
     }
 
     crate::kprintln!("OK!");
+}
+
+// =================================================================
+// 2MiB 巨大ページの分割
+// =================================================================
+
+/// 指定した仮想アドレスを含む L2 エントリが 2MiB 巨大ページ (Huge Page) の場合、
+/// 512 個の 4KiB ページテーブルエントリに分割する。
+///
+/// UEFI/OVMF は L2 レベルで 2MiB 単位の巨大ページを使うことが多い。
+/// 4KiB 単位で USER_ACCESSIBLE を個別制御するには、巨大ページを分割する必要がある。
+///
+/// 処理:
+///   1. L4 → L3 → L2 テーブルを辿り、対象の L2 エントリを見つける
+///   2. L2 エントリに HUGE_PAGE フラグが立っていなければ何もしない（既に 4KiB ページ）
+///   3. HUGE_PAGE の場合:
+///      a. フレームアロケータから 1 フレーム (4KiB) を確保 → 新しい L1 テーブル用
+///      b. 元の 2MiB 巨大ページの物理アドレスとフラグを取得
+///      c. 新 L1 テーブルの 512 エントリに、連続する 4KiB 物理フレームを設定
+///         （フラグは元の巨大ページと同じ、ただし HUGE_PAGE は除く）
+///      d. L2 エントリを新 L1 テーブルへのポインタに書き換え（HUGE_PAGE フラグ除去）
+///      e. TLB フラッシュ
+///
+/// # Safety
+/// - CR0.WP を一時的に無効化する
+/// - フレームアロケータから 1 フレーム消費する
+pub fn split_huge_page_if_needed(virt_addr: VirtAddr) {
+    // 仮想アドレスから L4/L3/L2 のインデックスを求める。
+    // x86_64 の仮想アドレスのビット構造:
+    //   [47:39] = L4 インデックス
+    //   [38:30] = L3 インデックス
+    //   [29:21] = L2 インデックス
+    //   [20:12] = L1 インデックス
+    //   [11:0]  = ページ内オフセット
+    let addr = virt_addr.as_u64();
+    let l4_idx = ((addr >> 39) & 0x1FF) as usize;
+    let l3_idx = ((addr >> 30) & 0x1FF) as usize;
+    let l2_idx = ((addr >> 21) & 0x1FF) as usize;
+
+    // CR0.WP を一時的にクリアして書き込みを許可
+    let cr0 = Cr0::read();
+    unsafe {
+        Cr0::write(cr0 & !Cr0Flags::WRITE_PROTECT);
+    }
+
+    let l4_table = unsafe { active_level_4_table() };
+
+    // L4 エントリを確認
+    let l4_entry = &l4_table[l4_idx];
+    if l4_entry.is_unused() || l4_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        unsafe { Cr0::write(cr0); }
+        return;
+    }
+
+    // L3 テーブルに進む
+    let l3_table: &mut PageTable =
+        unsafe { &mut *(l4_entry.addr().as_u64() as *mut PageTable) };
+    let l3_entry = &l3_table[l3_idx];
+    if l3_entry.is_unused() || l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        unsafe { Cr0::write(cr0); }
+        return;
+    }
+
+    // L2 テーブルに進む
+    let l2_table: &mut PageTable =
+        unsafe { &mut *(l3_entry.addr().as_u64() as *mut PageTable) };
+    let l2_entry = &mut l2_table[l2_idx];
+
+    // 巨大ページでなければ分割不要
+    if l2_entry.is_unused() || !l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        unsafe { Cr0::write(cr0); }
+        return;
+    }
+
+    // 2MiB 巨大ページを 512 個の 4KiB ページに分割する
+    let huge_phys = l2_entry.addr().as_u64(); // 巨大ページの物理ベースアドレス
+    let huge_flags = l2_entry.flags() & !PageTableFlags::HUGE_PAGE; // HUGE_PAGE ビットを除いたフラグ
+
+    // 新しい L1 テーブル用のフレームを確保
+    let new_frame = {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        fa.allocate_frame().expect("split_huge_page: フレーム確保に失敗")
+    };
+
+    // 新しい L1 テーブルをゼロ初期化
+    let new_l1_table: &mut PageTable =
+        unsafe { &mut *(new_frame.start_address().as_u64() as *mut PageTable) };
+    // まず全エントリをゼロクリア
+    for entry in new_l1_table.iter_mut() {
+        entry.set_unused();
+    }
+
+    // 512 個の 4KiB エントリを元の巨大ページの連続する物理フレームで埋める
+    for i in 0..512u64 {
+        let phys = PhysAddr::new(huge_phys + i * 4096);
+        let frame = PhysFrame::<Size4KiB>::containing_address(phys);
+        // 元の巨大ページのフラグを引き継ぐ（HUGE_PAGE は除去済み）
+        new_l1_table[i as usize].set_addr(frame.start_address(), huge_flags);
+    }
+
+    // L2 エントリを新 L1 テーブルへのポインタに書き換え
+    // PRESENT | WRITABLE は最低限必要。元のフラグから HUGE_PAGE を除いたものを使う。
+    let l2_flags = huge_flags & !PageTableFlags::HUGE_PAGE;
+    l2_entry.set_addr(new_frame.start_address(), l2_flags);
+
+    // CR0.WP を元に戻す
+    unsafe {
+        Cr0::write(cr0);
+    }
+
+    // TLB をフラッシュして変更を反映
+    let (frame, flags) = Cr3::read();
+    unsafe {
+        Cr3::write(frame, flags);
+    }
+}
+
+// =================================================================
+// USER_ACCESSIBLE の範囲設定/解除
+// =================================================================
+
+/// 指定した仮想アドレス範囲のページに USER_ACCESSIBLE フラグを追加する。
+///
+/// Ring 3（ユーザーモード）からアクセスが必要なメモリ領域に対して呼ぶ。
+/// 対象範囲の各 4KiB ページについて:
+///   1. 巨大ページがあれば split_huge_page_if_needed() で分割
+///   2. L4/L3/L2 の上位エントリにも USER_ACCESSIBLE を追加
+///      （全階層に設定が必要。1箇所でも欠けると Ring 3 からアクセス不可）
+///   3. L1 エントリに USER_ACCESSIBLE を追加
+///
+/// start は 4KiB アラインに切り下げられる。
+pub fn set_user_accessible(start: VirtAddr, size: usize) {
+    if size == 0 {
+        return;
+    }
+
+    // 開始アドレスを 4KiB 境界に切り下げ
+    let start_addr = start.as_u64() & !0xFFF;
+    // 終了アドレス（切り上げ）
+    let end_addr = (start.as_u64() + size as u64 + 0xFFF) & !0xFFF;
+
+    // CR0.WP を一時的にクリア
+    let cr0 = Cr0::read();
+    unsafe {
+        Cr0::write(cr0 & !Cr0Flags::WRITE_PROTECT);
+    }
+
+    let mut addr = start_addr;
+    while addr < end_addr {
+        let virt = VirtAddr::new(addr);
+
+        // 巨大ページがあれば 4KiB に分割する
+        // （CR0.WP はこの中で一時的に操作されるが、既にクリア済みなので問題ない）
+        // 注意: split_huge_page_if_needed は内部で CR0.WP を操作するので、
+        // ここでは一旦 WP を復帰してから呼び、再度クリアする
+        unsafe { Cr0::write(cr0); }
+        split_huge_page_if_needed(virt);
+        unsafe { Cr0::write(cr0 & !Cr0Flags::WRITE_PROTECT); }
+
+        // 仮想アドレスから各階層のインデックスを求める
+        let l4_idx = ((addr >> 39) & 0x1FF) as usize;
+        let l3_idx = ((addr >> 30) & 0x1FF) as usize;
+        let l2_idx = ((addr >> 21) & 0x1FF) as usize;
+        let l1_idx = ((addr >> 12) & 0x1FF) as usize;
+
+        let l4_table = unsafe { active_level_4_table() };
+
+        // L4 エントリに USER_ACCESSIBLE を追加
+        let l4_entry = &mut l4_table[l4_idx];
+        if l4_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        l4_entry.set_flags(l4_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        if l4_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        // L3 エントリに USER_ACCESSIBLE を追加
+        let l3_table: &mut PageTable =
+            unsafe { &mut *(l4_entry.addr().as_u64() as *mut PageTable) };
+        let l3_entry = &mut l3_table[l3_idx];
+        if l3_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        l3_entry.set_flags(l3_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        if l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        // L2 エントリに USER_ACCESSIBLE を追加
+        let l2_table: &mut PageTable =
+            unsafe { &mut *(l3_entry.addr().as_u64() as *mut PageTable) };
+        let l2_entry = &mut l2_table[l2_idx];
+        if l2_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        l2_entry.set_flags(l2_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            // 巨大ページがまだ残っている場合（分割に失敗した場合）はスキップ
+            addr += 4096;
+            continue;
+        }
+
+        // L1 エントリに USER_ACCESSIBLE を追加
+        let l1_table: &mut PageTable =
+            unsafe { &mut *(l2_entry.addr().as_u64() as *mut PageTable) };
+        let l1_entry = &mut l1_table[l1_idx];
+        if !l1_entry.is_unused() {
+            l1_entry.set_flags(l1_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+        }
+
+        addr += 4096;
+    }
+
+    // CR0.WP を元に戻す
+    unsafe {
+        Cr0::write(cr0);
+    }
+
+    // TLB をフラッシュして変更を反映
+    let (frame, flags) = Cr3::read();
+    unsafe {
+        Cr3::write(frame, flags);
+    }
+}
+
+/// 指定した仮想アドレス範囲のページから USER_ACCESSIBLE フラグを除去する。
+///
+/// Ring 3 からのアクセスが不要になったメモリ領域に対して呼ぶ。
+/// L1 エントリのみから USER_ACCESSIBLE を除去する。
+///
+/// L4/L3/L2 の上位エントリからは除去しない。
+/// 上位エントリの USER_ACCESSIBLE を外すと、その配下の全ページが
+/// Ring 3 からアクセス不可になり、他のユーザーページにも影響するため。
+///
+/// start は 4KiB アラインに切り下げられる。
+pub fn clear_user_accessible(start: VirtAddr, size: usize) {
+    if size == 0 {
+        return;
+    }
+
+    // 開始アドレスを 4KiB 境界に切り下げ
+    let start_addr = start.as_u64() & !0xFFF;
+    // 終了アドレス（切り上げ）
+    let end_addr = (start.as_u64() + size as u64 + 0xFFF) & !0xFFF;
+
+    // CR0.WP を一時的にクリア
+    let cr0 = Cr0::read();
+    unsafe {
+        Cr0::write(cr0 & !Cr0Flags::WRITE_PROTECT);
+    }
+
+    let mut addr = start_addr;
+    while addr < end_addr {
+        // 仮想アドレスから各階層のインデックスを求める
+        let l4_idx = ((addr >> 39) & 0x1FF) as usize;
+        let l3_idx = ((addr >> 30) & 0x1FF) as usize;
+        let l2_idx = ((addr >> 21) & 0x1FF) as usize;
+        let l1_idx = ((addr >> 12) & 0x1FF) as usize;
+
+        let l4_table = unsafe { active_level_4_table() };
+
+        // L4 → L3 → L2 → L1 を辿る（上位エントリの USER_ACCESSIBLE は触らない）
+        let l4_entry = &l4_table[l4_idx];
+        if l4_entry.is_unused() || l4_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        let l3_table: &mut PageTable =
+            unsafe { &mut *(l4_entry.addr().as_u64() as *mut PageTable) };
+        let l3_entry = &l3_table[l3_idx];
+        if l3_entry.is_unused() || l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        let l2_table: &mut PageTable =
+            unsafe { &mut *(l3_entry.addr().as_u64() as *mut PageTable) };
+        let l2_entry = &l2_table[l2_idx];
+        if l2_entry.is_unused() || l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        // L1 エントリから USER_ACCESSIBLE を除去
+        let l1_table: &mut PageTable =
+            unsafe { &mut *(l2_entry.addr().as_u64() as *mut PageTable) };
+        let l1_entry = &mut l1_table[l1_idx];
+        if !l1_entry.is_unused() {
+            l1_entry.set_flags(l1_entry.flags() & !PageTableFlags::USER_ACCESSIBLE);
+        }
+
+        addr += 4096;
+    }
+
+    // CR0.WP を元に戻す
+    unsafe {
+        Cr0::write(cr0);
+    }
+
+    // TLB をフラッシュして変更を反映
+    let (frame, flags) = Cr3::read();
+    unsafe {
+        Cr3::write(frame, flags);
+    }
 }

@@ -228,6 +228,23 @@ extern "x86-interrupt" fn page_fault_handler(
 ) {
     // CR2 レジスタにはページフォルトを起こしたアドレスが入っている。
     use x86_64::registers::control::Cr2;
+
+    // Ring 3（ユーザーモード）からの不正アクセスかどうかを判定する。
+    // PageFaultErrorCode の USER_MODE ビットが立っていれば Ring 3 からのアクセス。
+    // この場合はカーネルパニックではなく、ユーザープログラムを強制終了して
+    // カーネル（シェル）に安全に戻る。
+    if error_code.contains(PageFaultErrorCode::USER_MODE) {
+        crate::kprintln!();
+        crate::kprintln!("Page fault in user mode!");
+        crate::kprintln!("  Accessed address: {:?}", Cr2::read());
+        crate::kprintln!("  Error code: {:?}", error_code);
+        crate::kprintln!("  Terminating user program...");
+        // exit_usermode() で SAVED_RSP/SAVED_RBP を復元し、
+        // run_in_usermode() の呼び出し元に戻る。
+        crate::usermode::exit_usermode();
+    }
+
+    // Ring 0（カーネル）からのページフォルトは回復不能なので panic する。
     panic!(
         "CPU EXCEPTION: PAGE FAULT (#PF)\nAccessed address: {:?}\nError code: {:?}\n{:#?}",
         Cr2::read(),

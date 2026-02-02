@@ -94,6 +94,7 @@ impl Shell {
             "ps" => self.cmd_ps(),
             "echo" => self.cmd_echo(args),
             "usermode" => self.cmd_usermode(),
+            "usertest" => self.cmd_usertest(),
             "panic" => self.cmd_panic(),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -114,6 +115,7 @@ impl Shell {
         kprintln!("  ps              - Show task list");
         kprintln!("  echo <text>     - Echo text back");
         kprintln!("  usermode        - Run a user-mode (Ring 3) program");
+        kprintln!("  usertest        - Test memory protection (Ring 3 access violation)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
     }
 
@@ -212,10 +214,24 @@ impl Shell {
     /// usermode コマンド: Ring 3（ユーザーモード）でプログラムを実行する。
     /// iretq で Ring 3 に遷移し、int 0x80 システムコールで文字列を出力して、
     /// SYS_EXIT で Ring 0（カーネル）に戻ってくる。
+    /// 遷移前にユーザープログラムに必要なページだけ USER_ACCESSIBLE を設定し、
+    /// 戻り後に解除する。
     fn cmd_usermode(&self) {
         kprintln!("Entering user mode (Ring 3)...");
-        crate::usermode::run_in_usermode(crate::usermode::user_hello);
+        let program = crate::usermode::get_user_hello();
+        crate::usermode::run_in_usermode(&program);
         kprintln!("Returned from user mode!");
+    }
+
+    /// usertest コマンド: Ring 3 からカーネルメモリへのアクセスを試みる。
+    /// メモリ保護が正しく機能していれば、Page Fault が発生して
+    /// ユーザープログラムが強制終了され、シェルに安全に戻るはず。
+    fn cmd_usertest(&self) {
+        kprintln!("Testing user mode memory protection...");
+        kprintln!("Attempting illegal kernel memory access from Ring 3...");
+        let program = crate::usermode::get_user_illegal_access();
+        crate::usermode::run_in_usermode(&program);
+        kprintln!("Protection test passed! User program was terminated safely.");
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
