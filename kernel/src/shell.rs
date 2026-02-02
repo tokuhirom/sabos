@@ -95,6 +95,8 @@ impl Shell {
             "echo" => self.cmd_echo(args),
             "usermode" => self.cmd_usermode(),
             "usertest" => self.cmd_usertest(),
+            "isolate" => self.cmd_isolate(),
+            "elf" => self.cmd_elf(),
             "panic" => self.cmd_panic(),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -116,6 +118,8 @@ impl Shell {
         kprintln!("  echo <text>     - Echo text back");
         kprintln!("  usermode        - Run a user-mode (Ring 3) program");
         kprintln!("  usertest        - Test memory protection (Ring 3 access violation)");
+        kprintln!("  isolate         - Demo: process isolation with separate page tables");
+        kprintln!("  elf             - Load and run an ELF binary in user mode");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
     }
 
@@ -212,26 +216,177 @@ impl Shell {
     }
 
     /// usermode コマンド: Ring 3（ユーザーモード）でプログラムを実行する。
-    /// iretq で Ring 3 に遷移し、int 0x80 システムコールで文字列を出力して、
+    ///
+    /// プロセスごとの専用ページテーブルを作成し、CR3 を切り替えてから
+    /// iretq で Ring 3 に遷移する。int 0x80 システムコールで文字列を出力して、
     /// SYS_EXIT で Ring 0（カーネル）に戻ってくる。
-    /// 遷移前にユーザープログラムに必要なページだけ USER_ACCESSIBLE を設定し、
-    /// 戻り後に解除する。
+    /// 戻り後に CR3 をカーネルのページテーブルに復帰し、プロセスを破棄する。
     fn cmd_usermode(&self) {
-        kprintln!("Entering user mode (Ring 3)...");
+        kprintln!("Entering user mode (Ring 3) with process page table...");
         let program = crate::usermode::get_user_hello();
-        crate::usermode::run_in_usermode(&program);
+        let process = crate::usermode::create_user_process(&program);
+        kprintln!("  Process CR3: {:#x}", process.page_table_frame.start_address().as_u64());
+        crate::usermode::run_in_usermode(&process, &program);
         kprintln!("Returned from user mode!");
+        crate::usermode::destroy_user_process(process);
+        kprintln!("Process page table destroyed.");
     }
 
     /// usertest コマンド: Ring 3 からカーネルメモリへのアクセスを試みる。
+    ///
+    /// プロセスごとの専用ページテーブルを作成して CR3 を切り替え、
+    /// Ring 3 で USER_ACCESSIBLE のないアドレスにアクセスする。
     /// メモリ保護が正しく機能していれば、Page Fault が発生して
     /// ユーザープログラムが強制終了され、シェルに安全に戻るはず。
     fn cmd_usertest(&self) {
         kprintln!("Testing user mode memory protection...");
         kprintln!("Attempting illegal kernel memory access from Ring 3...");
         let program = crate::usermode::get_user_illegal_access();
-        crate::usermode::run_in_usermode(&program);
+        let process = crate::usermode::create_user_process(&program);
+        crate::usermode::run_in_usermode(&process, &program);
         kprintln!("Protection test passed! User program was terminated safely.");
+        crate::usermode::destroy_user_process(process);
+    }
+
+    /// isolate コマンド: プロセス分離のデモ。
+    ///
+    /// 2つのユーザープロセスを別々のページテーブル（異なる CR3）で実行し、
+    /// アドレス空間が分離されていることを示す。
+    /// 各プロセスが異なる CR3 値を持っていることを表示して、
+    /// ページテーブルが別物であることを視覚的に確認できる。
+    fn cmd_isolate(&self) {
+        kprintln!("=== Process Isolation Demo ===");
+        kprintln!("Kernel CR3: {:#x}", paging::kernel_cr3().as_u64());
+        kprintln!();
+
+        // プロセス A を作成・実行
+        let program_a = crate::usermode::get_user_hello();
+        let process_a = crate::usermode::create_user_process(&program_a);
+        let cr3_a = process_a.page_table_frame.start_address().as_u64();
+        kprintln!("Process A: CR3 = {:#x}", cr3_a);
+        kprintln!("  Running...");
+        crate::usermode::run_in_usermode(&process_a, &program_a);
+        kprintln!("  Done!");
+
+        // プロセス B を作成・実行
+        let program_b = crate::usermode::get_user_hello();
+        let process_b = crate::usermode::create_user_process(&program_b);
+        let cr3_b = process_b.page_table_frame.start_address().as_u64();
+        kprintln!("Process B: CR3 = {:#x}", cr3_b);
+        kprintln!("  Running...");
+        crate::usermode::run_in_usermode(&process_b, &program_b);
+        kprintln!("  Done!");
+
+        // 分離の証拠: CR3 が異なることを表示
+        kprintln!();
+        if cr3_a != cr3_b {
+            kprintln!("Result: CR3 A ({:#x}) != CR3 B ({:#x})", cr3_a, cr3_b);
+            kprintln!("  => Each process has its own page table!");
+            kprintln!("  => Address spaces are ISOLATED.");
+        } else {
+            kprintln!("Warning: CR3 values are the same (unexpected).");
+        }
+
+        // フレーム数の確認（プロセス破棄前）
+        let before_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+        kprintln!("Free frames before cleanup: {}", before_free);
+
+        // プロセスを破棄
+        crate::usermode::destroy_user_process(process_a);
+        crate::usermode::destroy_user_process(process_b);
+
+        // フレーム数の確認（プロセス破棄後）
+        let after_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+        kprintln!("Free frames after cleanup:  {}", after_free);
+        kprintln!("Frames reclaimed: {}", after_free - before_free);
+        kprintln!("=== Demo Complete ===");
+    }
+
+    /// elf コマンド: 埋め込み ELF バイナリをパースしてユーザーモードで実行する。
+    ///
+    /// 手順:
+    ///   1. ELF パース結果（エントリポイント、LOAD セグメント情報）を表示
+    ///   2. ELF プロセスを作成（ページテーブル + フレーム確保 + データロード）
+    ///   3. Ring 3 で実行
+    ///   4. プロセスを破棄してフレームを返却
+    fn cmd_elf(&self) {
+        kprintln!("=== ELF Binary Loader ===");
+
+        // 埋め込み ELF データを取得
+        let elf_data = crate::usermode::get_user_elf_data();
+        kprintln!("ELF binary size: {} bytes", elf_data.len());
+
+        // ELF パース結果を表示
+        match crate::elf::parse_elf(elf_data) {
+            Ok(info) => {
+                kprintln!("Entry point: {:#x}", info.entry_point);
+                kprintln!("LOAD segments: {}", info.load_segments.len());
+                for (i, seg) in info.load_segments.iter().enumerate() {
+                    kprintln!(
+                        "  [{}] vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x}",
+                        i, seg.vaddr, seg.filesz, seg.memsz, seg.flags
+                    );
+                }
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("ELF parse error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        }
+
+        // フレーム数の確認（プロセス作成前）
+        let before_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+
+        // ELF プロセスを作成
+        kprintln!("Creating ELF process...");
+        let (process, entry_point, user_stack_top) =
+            match crate::usermode::create_elf_process(elf_data) {
+                Ok(result) => result,
+                Err(e) => {
+                    framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                    kprintln!("Failed to create ELF process: {}", e);
+                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                    return;
+                }
+            };
+
+        kprintln!(
+            "  Process CR3: {:#x}, entry: {:#x}, stack_top: {:#x}",
+            process.page_table_frame.start_address().as_u64(),
+            entry_point,
+            user_stack_top
+        );
+        kprintln!("  Allocated frames: {}", process.allocated_frames.len());
+
+        // Ring 3 で実行
+        kprintln!("Running ELF binary in Ring 3...");
+        crate::usermode::run_elf_process(&process, entry_point, user_stack_top);
+
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("Returned from ELF binary!");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+
+        // プロセスを破棄
+        crate::usermode::destroy_user_process(process);
+
+        // フレーム数の確認（プロセス破棄後）
+        let after_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+        kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
+        kprintln!("=== Done ===");
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
