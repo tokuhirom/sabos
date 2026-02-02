@@ -414,3 +414,192 @@ pub fn user_illegal_access() {
         core::ptr::read_volatile(0x0 as *const u8);
     }
 }
+
+// =================================================================
+// ELF バイナリのロードと実行
+// =================================================================
+//
+// include_bytes! で埋め込んだ ELF バイナリをパースし、
+// PT_LOAD セグメントをプロセスのアドレス空間にロードして Ring 3 で実行する。
+//
+// 従来の create_user_process() + run_in_usermode() は、カーネルバイナリ内の
+// Rust 関数をユーザーコードとして実行する方式だった。
+// ELF ローダーでは外部バイナリを独立したアドレス空間にロードして実行する。
+//
+// ロードの流れ:
+//   1. ELF パース（elf::parse_elf）でエントリポイントと LOAD セグメントを取得
+//   2. プロセスページテーブルを作成
+//   3. 各 LOAD セグメントについて:
+//      a. map_user_pages_in_process() で物理フレームを確保しマッピング
+//      b. アイデンティティマッピング経由で物理フレームにデータをコピー
+//      c. BSS 領域（p_memsz > p_filesz の部分）はゼロ初期化
+//   4. ユーザースタック用のフレームも確保してマッピング
+//   5. iretq で Ring 3 に遷移
+
+/// ELF ユーザースタックの仮想アドレス（0x800000 = 8MiB）。
+/// ELF コードセクション（0x400000〜）とぶつからない位置に配置する。
+const ELF_USER_STACK_VADDR: u64 = 0x800000;
+
+/// ELF ユーザースタックのサイズ（16KiB = 4ページ）。
+const ELF_USER_STACK_SIZE: usize = 4096 * 4;
+
+/// 埋め込み ELF バイナリのデータを返す。
+///
+/// シェルから ELF パース結果を表示するために使う。
+pub fn get_user_elf_data() -> &'static [u8] {
+    USER_ELF_DATA
+}
+
+/// ELF バイナリからユーザープロセスを作成する。
+///
+/// 手順:
+///   1. ELF パース: エントリポイントと LOAD セグメントを取得
+///   2. プロセスページテーブルを作成（カーネルマッピングをコピー）
+///   3. 各 LOAD セグメントを物理フレームにロード
+///   4. ユーザースタック用の物理フレームを確保してマッピング
+///
+/// 返り値: (UserProcess, entry_point, user_stack_top)
+///   - UserProcess: プロセスの状態（ページテーブル、カーネルスタック、確保フレーム）
+///   - entry_point: ELF のエントリポイント仮想アドレス
+///   - user_stack_top: ユーザースタックのトップアドレス
+pub fn create_elf_process(
+    elf_data: &[u8],
+) -> Result<(UserProcess, u64, u64), &'static str> {
+    // 1. ELF パース
+    let elf_info = crate::elf::parse_elf(elf_data)?;
+
+    // 2. プロセスページテーブルを作成
+    let page_table_frame = crate::paging::create_process_page_table();
+
+    // 確保した全フレームを追跡するリスト
+    let mut all_allocated_frames: Vec<PhysFrame<Size4KiB>> = Vec::new();
+
+    // 3. 各 LOAD セグメントをプロセスのアドレス空間にロード
+    for seg in &elf_info.load_segments {
+        if seg.memsz == 0 {
+            continue;
+        }
+
+        // 物理フレームを確保してプロセスのページテーブルにマッピング
+        let frames = crate::paging::map_user_pages_in_process(
+            page_table_frame,
+            VirtAddr::new(seg.vaddr),
+            seg.memsz as usize,
+        );
+
+        // セグメントのファイルデータを物理フレームにコピーする。
+        // アイデンティティマッピング（仮想アドレス == 物理アドレス）のおかげで、
+        // 確保したフレームの物理アドレスをそのままポインタとして使える。
+        // CR3 を切り替える必要がないので、カーネルのページテーブルのまま書き込める。
+        if seg.filesz > 0 {
+            let src = &elf_data[seg.offset as usize..(seg.offset + seg.filesz) as usize];
+            let mut remaining = src;
+            let page_base = seg.vaddr & !0xFFF; // ページアラインされた開始アドレス
+            let offset_in_first_page = (seg.vaddr - page_base) as usize;
+
+            for (i, frame) in frames.iter().enumerate() {
+                // フレームの物理アドレス = アイデンティティマッピングでの仮想アドレス
+                let frame_ptr = frame.start_address().as_u64() as *mut u8;
+
+                // 最初のフレームではページ内オフセットを考慮する。
+                // 例: vaddr=0x400040 の場合、フレームは 0x400000 にマッピングされるが、
+                // データは 0x40 バイト目から書き込む。
+                let start_offset = if i == 0 { offset_in_first_page } else { 0 };
+                let available = 4096 - start_offset;
+                let to_copy = remaining.len().min(available);
+
+                if to_copy > 0 {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            remaining.as_ptr(),
+                            frame_ptr.add(start_offset),
+                            to_copy,
+                        );
+                    }
+                    remaining = &remaining[to_copy..];
+                }
+
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        // BSS 領域（p_memsz > p_filesz の部分）は map_user_pages_in_process() が
+        // 確保時にゼロクリア済みなので、追加の処理は不要。
+
+        all_allocated_frames.extend_from_slice(&frames);
+    }
+
+    // 4. ユーザースタック用のフレームを確保してマッピング
+    //    スタックは 0x800000 (8MiB) に 16KiB 分確保する。
+    //    スタックは高アドレスから低アドレスに向かって伸びるので、
+    //    スタックトップは ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE。
+    let stack_frames = crate::paging::map_user_pages_in_process(
+        page_table_frame,
+        VirtAddr::new(ELF_USER_STACK_VADDR),
+        ELF_USER_STACK_SIZE,
+    );
+    all_allocated_frames.extend_from_slice(&stack_frames);
+
+    // 5. カーネルスタックを確保（プロセスごとに独立）
+    let kernel_stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+
+    let process = UserProcess {
+        page_table_frame,
+        kernel_stack,
+        allocated_frames: all_allocated_frames,
+    };
+
+    let entry_point = elf_info.entry_point;
+    let user_stack_top = ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE as u64;
+
+    Ok((process, entry_point, user_stack_top))
+}
+
+/// ELF プロセスを Ring 3 で実行する。
+///
+/// create_elf_process() で作成したプロセスを実行する。
+/// run_in_usermode() と同様の手順だが、エントリポイントとスタックアドレスが
+/// ELF バイナリに基づく固定アドレス（カーネルバイナリ内の関数ポインタではない）。
+///
+/// # 引数
+/// - process: ELF プロセス
+/// - entry_point: ELF のエントリポイントアドレス
+/// - user_stack_top: ユーザースタックのトップアドレス
+pub fn run_elf_process(process: &UserProcess, entry_point: u64, user_stack_top: u64) {
+    // カーネルスタックのトップアドレスを計算
+    let kernel_stack_top = {
+        let start = process.kernel_stack.as_ptr() as u64;
+        start + process.kernel_stack.len() as u64
+    };
+
+    // TSS rsp0 にカーネルスタックのトップを設定する
+    unsafe {
+        gdt::set_tss_rsp0(VirtAddr::new(kernel_stack_top));
+    }
+
+    // セグメントセレクタを取得
+    let user_cs = gdt::user_code_selector().0 as u64;
+    let user_ss = gdt::user_data_selector().0 as u64;
+
+    // RFLAGS: IF (Interrupt Flag, bit 9) を立てておく
+    let rflags: u64 = 0x200;
+
+    // CR3 をプロセスのページテーブルに切り替え
+    unsafe {
+        crate::paging::switch_to_process_page_table(process.page_table_frame);
+    }
+
+    // Ring 3 に遷移
+    unsafe {
+        jump_to_usermode(entry_point, user_cs, rflags, user_stack_top, user_ss);
+    }
+
+    // exit_usermode() 経由で Ring 3 から戻ってきた
+
+    // CR3 をカーネルのページテーブルに復帰
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+}
