@@ -7,11 +7,11 @@ SABOS は x86_64 向け自作OS。Rust (no_std) + UEFI で構築する。
 ## Build & Run
 
 ```bash
-# devbox shell に入る（Rust nightly, QEMU, OVMF が使える）
-devbox shell
+# 初回セットアップ（Ubuntu）
+bash setup-ubuntu.sh
 
 # ビルド
-cd kernel && cargo build
+make build
 
 # QEMU で実行（シリアル出力のみ）
 make run
@@ -29,8 +29,9 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 ## Project Structure
 
 - `kernel/` - カーネル本体（Rust, no_std, UEFI target）
+- `user/` - ユーザープログラム（ELF バイナリ、x86_64-unknown-none target）
 - `docs/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
-- `devbox.json` - 開発環境定義（rustup, qemu, OVMF）
+- `setup-ubuntu.sh` - Ubuntu 向け開発環境セットアップスクリプト
 
 ## Git Workflow
 
