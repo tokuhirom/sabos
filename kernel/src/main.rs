@@ -14,6 +14,8 @@ mod panic;
 mod scheduler;
 mod serial;
 mod shell;
+mod syscall;
+mod usermode;
 
 // kprint! / kprintln! マクロを使えるようにする。
 // #[macro_export] で定義されたマクロはクレートルートに配置される。

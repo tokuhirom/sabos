@@ -138,6 +138,24 @@ lazy_static! {
         // IRQ 1: キーボード割り込み
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
 
+        // --- ソフトウェア割り込み: システムコール (int 0x80) ---
+        //
+        // int 0x80 はユーザーモード (Ring 3) からカーネル (Ring 0) への
+        // システムコール呼び出しに使うソフトウェア割り込み。
+        // Linux の伝統的な 32-bit システムコールインターフェースと同じ番号。
+        //
+        // set_handler_addr() で生のアドレスを設定する（x86-interrupt ABI ではなく
+        // 独自のアセンブリハンドラを使うため）。
+        // set_privilege_level(Ring3) で DPL=3 にする。
+        // DPL=3 にしないと、Ring 3 から int 0x80 を実行したとき
+        // General Protection Fault (#GP) が発生する。
+        unsafe {
+            idt[0x80].set_handler_addr(x86_64::VirtAddr::new(
+                crate::syscall::syscall_handler_asm as *const () as u64
+            ))
+            .set_privilege_level(x86_64::PrivilegeLevel::Ring3);
+        }
+
         idt
     };
 }

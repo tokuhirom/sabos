@@ -63,23 +63,30 @@ unsafe fn active_level_4_table() -> &'static mut PageTable {
     unsafe { &mut *page_table_ptr }
 }
 
-/// ページテーブルが配置されたメモリ領域を書き込み可能にする。
+/// ページテーブルを書き込み可能かつユーザーアクセス可能にする。
 ///
 /// UEFI (OVMF) はページテーブルを 2MiB 巨大ページの読み取り専用領域に配置する。
 /// カーネルがページテーブルを変更するには、この保護を解除する必要がある。
+/// また、Ring 3（ユーザーモード）からメモリにアクセスできるよう
+/// USER_ACCESSIBLE フラグも全エントリに追加する。
 ///
 /// 手順:
 ///   1. CR0.WP (Write Protect) ビットを一時的にクリア
 ///      → ring 0 で読み取り専用ページに書き込めるようになる
-///   2. L4 → L3 → L2 テーブルを辿り、WRITABLE フラグが立っていないエントリに
-///      WRITABLE を追加する
+///   2. L4 → L3 → L2 → L1 テーブルを辿り、各エントリに
+///      WRITABLE と USER_ACCESSIBLE を追加する
 ///   3. CR0.WP ビットを元に戻す
 ///   4. TLB をフラッシュして変更を反映
+///
+/// USER_ACCESSIBLE (U/S ビット) は全階層 (L4, L3, L2, L1) に設定する必要がある。
+/// どれか1箇所でも欠けると Ring 3 からのアクセスが拒否される。
+/// セキュリティ的には全メモリが Ring 3 からアクセス可能になるが、
+/// 学習用プロジェクトの最初のステップとしては十分。
 ///
 /// # Safety
 /// - CR0.WP を一時的に無効化するため、この間は全メモリが書き込み可能になる
 /// - 割り込みが無効化された状態で呼ぶべき（初期化時なので問題ない）
-unsafe fn make_page_tables_writable() {
+unsafe fn make_page_tables_user_accessible() {
     // CR0.WP を一時的にクリア（ring 0 での書き込み保護を無効化）
     let cr0 = Cr0::read();
     unsafe {
@@ -95,9 +102,10 @@ unsafe fn make_page_tables_writable() {
             continue;
         }
 
-        // L4 エントリに WRITABLE を追加
-        if !l4_entry.flags().contains(PageTableFlags::WRITABLE) {
-            l4_entry.set_flags(l4_entry.flags() | PageTableFlags::WRITABLE);
+        // L4 エントリに WRITABLE と USER_ACCESSIBLE を追加
+        let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        if !l4_entry.flags().contains(needed) {
+            l4_entry.set_flags(l4_entry.flags() | needed);
         }
 
         // HUGE_PAGE なら L3 テーブルはない（512GiB ページ、通常使われない）
@@ -114,9 +122,10 @@ unsafe fn make_page_tables_writable() {
                 continue;
             }
 
-            // L3 エントリに WRITABLE を追加
-            if !l3_entry.flags().contains(PageTableFlags::WRITABLE) {
-                l3_entry.set_flags(l3_entry.flags() | PageTableFlags::WRITABLE);
+            // L3 エントリに WRITABLE と USER_ACCESSIBLE を追加
+            let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+            if !l3_entry.flags().contains(needed) {
+                l3_entry.set_flags(l3_entry.flags() | needed);
             }
 
             // 1GiB 巨大ページなら L2 テーブルはない
@@ -133,9 +142,10 @@ unsafe fn make_page_tables_writable() {
                     continue;
                 }
 
-                // L2 エントリに WRITABLE を追加
-                if !l2_entry.flags().contains(PageTableFlags::WRITABLE) {
-                    l2_entry.set_flags(l2_entry.flags() | PageTableFlags::WRITABLE);
+                // L2 エントリに WRITABLE と USER_ACCESSIBLE を追加
+                let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                if !l2_entry.flags().contains(needed) {
+                    l2_entry.set_flags(l2_entry.flags() | needed);
                 }
 
                 // 2MiB 巨大ページなら L1 テーブルはない
@@ -151,8 +161,10 @@ unsafe fn make_page_tables_writable() {
                     if l1_entry.is_unused() {
                         continue;
                     }
-                    if !l1_entry.flags().contains(PageTableFlags::WRITABLE) {
-                        l1_entry.set_flags(l1_entry.flags() | PageTableFlags::WRITABLE);
+                    // L1 エントリにも WRITABLE と USER_ACCESSIBLE を追加
+                    let needed = PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+                    if !l1_entry.flags().contains(needed) {
+                        l1_entry.set_flags(l1_entry.flags() | needed);
                     }
                 }
             }
@@ -219,16 +231,13 @@ pub fn init(memory_map: &MemoryMapOwned) {
     let total_frames: u64 = regions.iter().map(|r| r.page_count).sum();
     memory::init(regions);
 
-    // --- ページテーブル領域を書き込み可能にする ---
+    // --- ページテーブル領域を書き込み可能 + ユーザーアクセス可能にする ---
     // UEFI はページテーブルが配置された 2MiB ページを読み取り専用にしていることがある。
     // カーネルがページテーブルを変更するためには、これらを書き込み可能にする必要がある。
-    //
-    // CR0 の WP (Write Protect) ビットを一時的にクリアすると、
-    // ring 0 (カーネル) では読み取り専用ページへの書き込みが許可される。
-    // これを利用してページテーブルエントリの WRITABLE フラグを立てた後、
-    // WP ビットを元に戻す。
+    // さらに Ring 3（ユーザーモード）からメモリにアクセスできるよう
+    // USER_ACCESSIBLE フラグも全エントリに追加する。
     unsafe {
-        make_page_tables_writable();
+        make_page_tables_user_accessible();
     }
 
     // --- OffsetPageTable の作成 ---

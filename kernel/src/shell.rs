@@ -93,6 +93,7 @@ impl Shell {
             "page" => self.cmd_page(args),
             "ps" => self.cmd_ps(),
             "echo" => self.cmd_echo(args),
+            "usermode" => self.cmd_usermode(),
             "panic" => self.cmd_panic(),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -112,6 +113,7 @@ impl Shell {
         kprintln!("  page [addr]     - Show paging info / translate address");
         kprintln!("  ps              - Show task list");
         kprintln!("  echo <text>     - Echo text back");
+        kprintln!("  usermode        - Run a user-mode (Ring 3) program");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
     }
 
@@ -205,6 +207,15 @@ impl Shell {
     /// echo コマンド: 引数をそのまま出力する。
     fn cmd_echo(&self, args: &str) {
         kprintln!("{}", args);
+    }
+
+    /// usermode コマンド: Ring 3（ユーザーモード）でプログラムを実行する。
+    /// iretq で Ring 3 に遷移し、int 0x80 システムコールで文字列を出力して、
+    /// SYS_EXIT で Ring 0（カーネル）に戻ってくる。
+    fn cmd_usermode(&self) {
+        kprintln!("Entering user mode (Ring 3)...");
+        crate::usermode::run_in_usermode(crate::usermode::user_hello);
+        kprintln!("Returned from user mode!");
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
