@@ -7,7 +7,13 @@
     "imagemagick@latest"
   ],
   "shell": {
-    "init_hook": [],
+    "init_hook": [
+      "rustup install nightly 2>/dev/null",
+      "rustup target add x86_64-unknown-uefi --toolchain nightly 2>/dev/null",
+      "rustup target add x86_64-unknown-none --toolchain nightly 2>/dev/null",
+      "rustup component add rust-src --toolchain nightly 2>/dev/null",
+      "export RUSTUP_TOOLCHAIN=nightly"
+    ],
     "scripts": {
       "build": ["cd kernel && cargo build"],
       "run":   ["make run"]
