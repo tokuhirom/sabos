@@ -1,3 +1,7 @@
+# RUSTUP_TOOLCHAIN 環境変数が設定されていると rust-toolchain.toml が無視されるので、
+# Make の子プロセスには渡さないようにする
+unexport RUSTUP_TOOLCHAIN
+
 .PHONY: build build-user run run-gui screenshot clean
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
