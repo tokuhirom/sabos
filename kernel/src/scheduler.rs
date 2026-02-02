@@ -159,6 +159,9 @@ pub enum TaskState {
     Ready,
     /// 現在実行中。
     Running,
+    /// スリープ中。指定したティック数に達するまでスケジュールされない。
+    /// 中の値は起床するタイマーティック数（TIMER_TICK_COUNT がこの値以上になったら Ready に戻る）。
+    Sleeping(u64),
     /// 実行完了。もうスケジュールされない。
     Finished,
 }
@@ -421,6 +424,18 @@ pub fn preempt() {
             None => return, // ロック取得失敗 → 今回はスキップ
         };
 
+        // スリープ中のタスクの起床チェック。
+        // 現在のタイマーティック数を取得して、起床時刻に達した Sleeping タスクを
+        // Ready に戻す。これによりタイマーティックごとにスリープの解除判定が行われる。
+        let now = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+        for task in sched.tasks.iter_mut() {
+            if let TaskState::Sleeping(wake_at) = task.state {
+                if now >= wake_at {
+                    task.state = TaskState::Ready;
+                }
+            }
+        }
+
         let current = sched.current;
         let num_tasks = sched.tasks.len();
 
@@ -468,10 +483,47 @@ pub fn preempt() {
     }
 }
 
-/// Ready 状態のタスクがあるかどうかを返す。
+/// 現在のタスクを指定ティック数だけスリープさせる。
+///
+/// PIT は約 18.2 Hz で発火するので、1 ティック ≈ 55ms。
+/// タスクを Sleeping 状態にして yield_now() で他のタスクに切り替える。
+/// preempt() のタイマーティックごとの起床チェックで、
+/// 指定ティック数が経過したら自動的に Ready に戻される。
+pub fn sleep_ticks(ticks: u64) {
+    let wake_at = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed) + ticks;
+
+    {
+        let mut sched = SCHEDULER.lock();
+        let current = sched.current;
+        sched.tasks[current].state = TaskState::Sleeping(wake_at);
+    }
+
+    // 他のタスクに切り替える。
+    // このタスクが Ready に戻されるのは preempt() の起床チェックで wake_at に達したとき。
+    yield_now();
+}
+
+/// 現在のタスクを指定ミリ秒だけスリープさせる。
+///
+/// PIT のデフォルト周波数は約 18.2 Hz（≈ 55ms 間隔）なので、
+/// ミリ秒をティック数に変換してから sleep_ticks() を呼ぶ。
+/// 精度は PIT の周波数に依存する（最大 55ms の誤差がある）。
+pub fn sleep_ms(ms: u64) {
+    // PIT のデフォルト周波数: 1193182 Hz / 65536 ≈ 18.2065 Hz
+    // 1 ティック ≈ 54.925 ms
+    // ticks = ms / 54.925 ≈ ms * 182 / 10000
+    // 最低でも 1 ティックはスリープする（0 だと即座に起きてしまう）
+    let ticks = (ms * 182 / 10000).max(1);
+    sleep_ticks(ticks);
+}
+
+/// Ready または Sleeping 状態のタスクがあるかどうかを返す。
+/// Sleeping タスクはいずれ Ready に戻るので、まだ終わっていないタスクがある扱い。
 pub fn has_ready_tasks() -> bool {
     let sched = SCHEDULER.lock();
-    sched.tasks.iter().any(|t| t.state == TaskState::Ready)
+    sched.tasks.iter().any(|t| {
+        matches!(t.state, TaskState::Ready | TaskState::Sleeping(_))
+    })
 }
 
 /// 全タスクの情報を取得する（ps コマンド用）。

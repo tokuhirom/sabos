@@ -234,6 +234,24 @@ fn main() -> Status {
     kprintln!("  timer ticks: {}, preempt() called: {}, switched: {}", ticks, calls, switches);
     kprintln!();
 
+    // --- sleep デモ ---
+    // sleep_ms() を使ってタスクを一定時間停止させるデモ。
+    // busy-wait ではなくタスクを Sleeping 状態にするので、
+    // スリープ中は CPU を他のタスクに譲れる（CPU 時間を無駄にしない）。
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!("Spawning sleep demo tasks...");
+    scheduler::spawn("sleep_1", sleep_demo_1);
+    scheduler::spawn("sleep_2", sleep_demo_2);
+
+    kprintln!("Running sleep demo tasks:");
+    while scheduler::has_ready_tasks() {
+        scheduler::yield_now();
+    }
+
+    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+    kprintln!("All sleep demo tasks finished!");
+    kprintln!();
+
     // --- シェルの起動 ---
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
     kprintln!("Welcome to SABOS shell! Type 'help' for commands.");
@@ -350,5 +368,36 @@ fn preemptive_task_y() {
     kprintln!("  [Preempt Y] Middle (2/3)");
     busy_wait(15_000_000);
     kprintln!("  [Preempt Y] Done (3/3)");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+}
+
+// =================================================================
+// sleep デモ用タスク
+// =================================================================
+//
+// sleep_ms() を使って一定時間スリープしてからメッセージを表示する。
+// busy-wait と違い、スリープ中は CPU を他のタスクに譲る。
+// タイマーティックで起床時刻に達すると自動的に Ready に戻される。
+
+/// sleep デモタスク 1: 500ms スリープを挟んでメッセージを表示する。
+fn sleep_demo_1() {
+    framebuffer::set_global_colors((100, 255, 100), (0, 0, 128));
+    kprintln!("  [Sleep 1] Start, sleeping 500ms...");
+    scheduler::sleep_ms(500);
+    kprintln!("  [Sleep 1] Woke up! Sleeping 500ms more...");
+    scheduler::sleep_ms(500);
+    kprintln!("  [Sleep 1] Done!");
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+}
+
+/// sleep デモタスク 2: 300ms スリープを挟んでメッセージを表示する。
+/// タスク 1 より短い間隔でスリープするので、先に起きることがある。
+fn sleep_demo_2() {
+    framebuffer::set_global_colors((255, 255, 100), (0, 0, 128));
+    kprintln!("  [Sleep 2] Start, sleeping 300ms...");
+    scheduler::sleep_ms(300);
+    kprintln!("  [Sleep 2] Woke up! Sleeping 300ms more...");
+    scheduler::sleep_ms(300);
+    kprintln!("  [Sleep 2] Done!");
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 }

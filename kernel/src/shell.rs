@@ -194,6 +194,7 @@ impl Shell {
             let state_str = match t.state {
                 scheduler::TaskState::Ready => "Ready",
                 scheduler::TaskState::Running => "Running",
+                scheduler::TaskState::Sleeping(_) => "Sleeping",
                 scheduler::TaskState::Finished => "Finished",
             };
             kprintln!("  {:2}  {:10}  {}", t.id, state_str, t.name);
