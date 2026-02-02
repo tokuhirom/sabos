@@ -1,6 +1,7 @@
-.PHONY: build run run-gui screenshot clean
+.PHONY: build build-user run run-gui screenshot clean
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
+USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
 ESP_DIR = esp/EFI/BOOT
 
 # Find OVMF firmware from nix store (installed via devbox)
@@ -21,8 +22,15 @@ SCREENSHOT_OUT ?= docs/images/screenshot.png
 # QEMU が起動してからスクリーンショットを撮るまでの待ち時間（秒）
 SCREENSHOT_WAIT ?= 6
 
-build:
+# ユーザープログラムを先にビルドしてから、カーネルをビルドする。
+# カーネルは include_bytes! でユーザー ELF バイナリを埋め込むため、
+# ユーザーバイナリが存在しないとカーネルのビルドが失敗する。
+build: build-user
 	cd kernel && cargo build
+
+# ユーザープログラム (x86_64-unknown-none ELF) のビルド
+build-user:
+	cd user && cargo build
 
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
@@ -66,4 +74,5 @@ screenshot: build $(ESP_DIR)
 
 clean:
 	cd kernel && cargo clean
+	cd user && cargo clean
 	rm -rf esp

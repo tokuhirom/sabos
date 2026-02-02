@@ -25,6 +25,14 @@ use x86_64::VirtAddr;
 
 use crate::gdt;
 
+/// ユーザープログラムの ELF バイナリ。
+/// user/ crate をビルドした結果の ELF64 バイナリを、include_bytes! でカーネルに埋め込む。
+/// UEFI Boot Services 終了後はファイルシステムにアクセスできないため、
+/// コンパイル時にカーネルバイナリに含めておく方式をとる。
+///
+/// ビルド順序: make build-user → make build (cargo build が include_bytes! を処理)
+static USER_ELF_DATA: &[u8] = include_bytes!("../../user/target/x86_64-unknown-none/debug/sabos-user");
+
 /// ユーザーモード用のスタック（16KiB）。
 /// Ring 3 で実行されるコードが使うスタック領域。
 /// カーネルスタックとは別に用意する必要がある。

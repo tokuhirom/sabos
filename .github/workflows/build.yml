@@ -15,7 +15,10 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: x86_64-unknown-uefi
+          targets: x86_64-unknown-uefi,x86_64-unknown-none
+
+      - name: Build user program
+        run: cd user && cargo build --target x86_64-unknown-none
 
       - name: Build kernel
         run: cd kernel && cargo build --target x86_64-unknown-uefi
