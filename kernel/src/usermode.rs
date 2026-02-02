@@ -154,12 +154,18 @@ static mut SAVED_RBP: u64 = 0;
 //   rdx = user_cs (CS)
 //   r8  = rflags (RFLAGS)
 //   r9  = user_stack_top (RSP)
-//   スタック上 [rsp+40] = user_ss (SS)  ← 5番目の引数
+//
+// user_ss (SS) は 5番目の引数として渡さず、user_cs - 8 で計算する。
+// GDT 配置が User Data → User Code の順なので、
+// user_data_selector = user_code_selector - 8 が常に成り立つ。
+// これにより、スタック上の5番目引数 [rsp+40] を読む必要がなくなり、
+// コンパイラの最適化によるスタックレイアウトの違いに影響されない。
 //
 // 手順:
 //   1. 現在の RSP/RBP を SAVED_RSP/SAVED_RBP に保存
-//   2. iretq 用スタックフレームを構築
-//   3. iretq で Ring 3 に遷移
+//   2. user_ss を user_cs - 8 で計算
+//   3. iretq 用スタックフレームを構築
+//   4. iretq で Ring 3 に遷移
 //
 // exit_usermode() が SAVED_RSP/SAVED_RBP を復元して ret すると、
 // この関数の呼び出し元（run_in_usermode 内）に戻る。
@@ -172,16 +178,18 @@ global_asm!(
     "mov [rip + {saved_rsp}], rsp",
     "mov [rip + {saved_rbp}], rbp",
 
-    // 5番目の引数 (user_ss) はスタック上にある。
-    // Microsoft x64 ABI では、call 命令でリターンアドレスが push されるので、
-    // [rsp+8] がシャドウスペース開始、[rsp+40] が5番目の引数。
-    "mov rax, [rsp + 40]",
+    // user_ss = user_cs - 8 で計算する。
+    // GDT 配置: User Data (index 3) → User Code (index 4)
+    // セレクタ値: User Data = 0x1b, User Code = 0x23
+    // 差は常に 8 バイト（1 GDT エントリ分）。
+    "mov rax, rdx",
+    "sub rax, 8",
 
     // iretq 用スタックフレームを構築する。
     // iretq は以下の順で pop する:
     //   RIP → CS → RFLAGS → RSP → SS
     // なので push は逆順:
-    "push rax",    // SS = user_ss
+    "push rax",    // SS = user_ss (= user_cs - 8)
     "push r9",     // RSP = user_stack_top
     "push r8",     // RFLAGS (IF=1)
     "push rdx",    // CS = user_cs
@@ -193,13 +201,13 @@ global_asm!(
 
 unsafe extern "C" {
     /// アセンブリで定義した Ring 3 遷移関数。
-    /// Microsoft x64 ABI: jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top, user_ss)
+    /// Microsoft x64 ABI: jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top)
+    /// user_ss はアセンブリ内で user_cs - 8 から計算する。
     fn jump_to_usermode(
         entry_addr: u64,
         user_cs: u64,
         rflags: u64,
         user_stack_top: u64,
-        user_ss: u64,
     );
 }
 
@@ -243,9 +251,9 @@ pub fn run_in_usermode(process: &UserProcess, program: &UserProgram) {
     }
 
     // セグメントセレクタを取得。
-    // iretq で push する CS/SS の値。RPL=3 が含まれている。
+    // iretq で push する CS の値。RPL=3 が含まれている。
+    // SS は jump_to_usermode 内で CS - 8 から計算する。
     let user_cs = gdt::user_code_selector().0 as u64;
-    let user_ss = gdt::user_data_selector().0 as u64;
 
     // RFLAGS: IF (Interrupt Flag, bit 9) を立てておく。
     // IF=0 だと Ring 3 でタイマー割り込みが無効のままになり、
@@ -269,7 +277,7 @@ pub fn run_in_usermode(process: &UserProcess, program: &UserProgram) {
     // jump_to_usermode() の呼び出しが正常に return したように見える。
     // ページフォルトの場合も exit_usermode() で戻ってくる。
     unsafe {
-        jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top, user_ss);
+        jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top);
     }
 
     // ここに到達 = exit_usermode() 経由で Ring 3 から戻ってきた
@@ -480,11 +488,14 @@ pub fn create_elf_process(
             continue;
         }
 
-        // 物理フレームを確保してプロセスのページテーブルにマッピング
+        // 物理フレームを確保してプロセスのページテーブルにマッピング。
+        // all_allocated_frames を渡すことで、前のセグメントで既にマッピング済みの
+        // ページ（同じページに複数セグメントがある場合）を再利用する。
         let frames = crate::paging::map_user_pages_in_process(
             page_table_frame,
             VirtAddr::new(seg.vaddr),
             seg.memsz as usize,
+            &all_allocated_frames,
         );
 
         // セグメントのファイルデータを物理フレームにコピーする。
@@ -528,7 +539,15 @@ pub fn create_elf_process(
         // BSS 領域（p_memsz > p_filesz の部分）は map_user_pages_in_process() が
         // 確保時にゼロクリア済みなので、追加の処理は不要。
 
-        all_allocated_frames.extend_from_slice(&frames);
+        // フレームリストに追加する（重複を除く）。
+        // 同じページに複数の LOAD セグメントがまたがる場合、map_user_pages_in_process() が
+        // 既存マッピングのフレームを返すため、重複が発生しうる。
+        // 重複フレームを解放リストに入れると二重解放になるので除去する。
+        for frame in &frames {
+            if !all_allocated_frames.iter().any(|f| f.start_address() == frame.start_address()) {
+                all_allocated_frames.push(*frame);
+            }
+        }
     }
 
     // 4. ユーザースタック用のフレームを確保してマッピング
@@ -539,7 +558,9 @@ pub fn create_elf_process(
         page_table_frame,
         VirtAddr::new(ELF_USER_STACK_VADDR),
         ELF_USER_STACK_SIZE,
+        &all_allocated_frames,
     );
+    // スタックフレームは新規確保なので重複の心配なし
     all_allocated_frames.extend_from_slice(&stack_frames);
 
     // 5. カーネルスタックを確保（プロセスごとに独立）
@@ -580,8 +601,8 @@ pub fn run_elf_process(process: &UserProcess, entry_point: u64, user_stack_top: 
     }
 
     // セグメントセレクタを取得
+    // SS は jump_to_usermode 内で CS - 8 から計算する。
     let user_cs = gdt::user_code_selector().0 as u64;
-    let user_ss = gdt::user_data_selector().0 as u64;
 
     // RFLAGS: IF (Interrupt Flag, bit 9) を立てておく
     let rflags: u64 = 0x200;
@@ -593,7 +614,7 @@ pub fn run_elf_process(process: &UserProcess, entry_point: u64, user_stack_top: 
 
     // Ring 3 に遷移
     unsafe {
-        jump_to_usermode(entry_point, user_cs, rflags, user_stack_top, user_ss);
+        jump_to_usermode(entry_point, user_cs, rflags, user_stack_top);
     }
 
     // exit_usermode() 経由で Ring 3 から戻ってきた
