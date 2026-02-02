@@ -17,7 +17,7 @@
 use lazy_static::lazy_static;
 use spin::Mutex;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
-use x86_64::registers::control::{Cr0, Cr0Flags, Cr3};
+use x86_64::registers::control::{Cr0, Cr0Flags, Cr3, Cr3Flags};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
@@ -244,6 +244,10 @@ pub fn init(memory_map: &MemoryMapOwned) {
 
     *PAGE_TABLE.lock() = Some(page_table);
 
+    // カーネルの CR3 を保存する。
+    // プロセスページテーブルの作成・破棄時にカーネルのテーブルと比較するために使う。
+    save_kernel_cr3();
+
     // 初期化完了のログ
     let cr3 = read_cr3();
     crate::kprintln!(
@@ -399,6 +403,7 @@ pub fn demo_mapping() {
 /// # Safety
 /// - CR0.WP を一時的に無効化する
 /// - フレームアロケータから 1 フレーム消費する
+#[allow(dead_code)]
 pub fn split_huge_page_if_needed(virt_addr: VirtAddr) {
     // 仮想アドレスから L4/L3/L2 のインデックスを求める。
     // x86_64 の仮想アドレスのビット構造:
@@ -504,6 +509,7 @@ pub fn split_huge_page_if_needed(virt_addr: VirtAddr) {
 ///   3. L1 エントリに USER_ACCESSIBLE を追加
 ///
 /// start は 4KiB アラインに切り下げられる。
+#[allow(dead_code)]
 pub fn set_user_accessible(start: VirtAddr, size: usize) {
     if size == 0 {
         return;
@@ -617,6 +623,7 @@ pub fn set_user_accessible(start: VirtAddr, size: usize) {
 /// Ring 3 からアクセス不可になり、他のユーザーページにも影響するため。
 ///
 /// start は 4KiB アラインに切り下げられる。
+#[allow(dead_code)]
 pub fn clear_user_accessible(start: VirtAddr, size: usize) {
     if size == 0 {
         return;
@@ -687,4 +694,661 @@ pub fn clear_user_accessible(start: VirtAddr, size: usize) {
     unsafe {
         Cr3::write(frame, flags);
     }
+}
+
+// =================================================================
+// プロセスごとのページテーブル管理
+// =================================================================
+//
+// プロセス分離のために、プロセスごとに専用の L4 ページテーブルを持たせる。
+// カーネル空間のマッピングは全プロセスで共有し（L4 エントリのコピー）、
+// ユーザー空間のページだけプロセス固有の権限（USER_ACCESSIBLE）を設定する。
+//
+// 中間テーブル (L3/L2/L1) はカーネルと共有しているものを「分岐コピー」して
+// プロセス専用の権限設定を可能にする。CR3 レジスタを切り替えることで
+// アドレス空間を丸ごと切り替える。
+
+/// カーネルの L4 ページテーブルの物理アドレスを保存するグローバル変数。
+/// paging::init() で設定される。プロセスページテーブルの作成・破棄時に
+/// カーネルのテーブルと比較するために使う。
+static KERNEL_CR3: spin::Once<PhysAddr> = spin::Once::new();
+
+/// カーネルの CR3 アドレスを記録する。paging::init() の最後に呼ぶ。
+fn save_kernel_cr3() {
+    let cr3 = read_cr3();
+    KERNEL_CR3.call_once(|| cr3);
+}
+
+/// カーネルの CR3（L4 ページテーブルの物理アドレス）を返す。
+pub fn kernel_cr3() -> PhysAddr {
+    *KERNEL_CR3.get().expect("kernel CR3 not saved yet")
+}
+
+/// プロセス用のページテーブルを作成する。
+///
+/// 新しい L4 テーブルを確保し、カーネルの L4 エントリをすべてコピーする。
+/// これにより、プロセスのページテーブルでもカーネル空間のマッピングが
+/// そのまま使える（L3 以下のテーブルはポインタで共有される）。
+///
+/// 返り値はプロセス固有の L4 ページテーブルが配置された物理フレーム。
+/// CR3 にこのフレームのアドレスを書き込むとアドレス空間が切り替わる。
+pub fn create_process_page_table() -> PhysFrame<Size4KiB> {
+    // 1. フレームアロケータから 1 フレーム確保 → 新 L4 テーブル
+    let new_l4_frame = {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        fa.allocate_frame()
+            .expect("create_process_page_table: フレーム確保に失敗")
+    };
+
+    // 2. 新 L4 テーブルをゼロクリア
+    let new_l4: &mut PageTable = unsafe {
+        &mut *(new_l4_frame.start_address().as_u64() as *mut PageTable)
+    };
+    for entry in new_l4.iter_mut() {
+        entry.set_unused();
+    }
+
+    // 3. カーネルの L4 テーブルの全エントリを新 L4 にコピー
+    //    L4 エントリは L3 テーブルの物理アドレスを指すポインタなので、
+    //    コピーするだけで L3 以下の木構造全体を共有できる。
+    let kernel_l4: &PageTable = unsafe {
+        &*(kernel_cr3().as_u64() as *const PageTable)
+    };
+    for i in 0..512 {
+        if !kernel_l4[i].is_unused() {
+            // エントリの内容（物理アドレス + フラグ）をそのままコピー
+            new_l4[i].set_addr(kernel_l4[i].addr(), kernel_l4[i].flags());
+        }
+    }
+
+    new_l4_frame
+}
+
+/// プロセスのページテーブルで指定範囲に USER_ACCESSIBLE を設定する。
+///
+/// カーネルと共有している中間テーブル (L3/L2/L1) は自動的に分岐コピーする。
+/// 分岐コピーとは: カーネルのテーブルと同じアドレスを指しているエントリを見つけたら、
+/// 新しいフレームを確保してテーブルの内容をコピーし、エントリを新フレームに差し替える。
+/// これにより、カーネルのページテーブルに影響を与えずにプロセス固有の権限を設定できる。
+///
+/// 2MiB 巨大ページがある場合は split_huge_page_for_process() で 4KiB に分割する。
+pub fn set_user_accessible_in_process(
+    process_l4_frame: PhysFrame<Size4KiB>,
+    start: VirtAddr,
+    size: usize,
+) {
+    if size == 0 {
+        return;
+    }
+
+    // 開始アドレスを 4KiB 境界に切り下げ
+    let start_addr = start.as_u64() & !0xFFF;
+    // 終了アドレス（切り上げ）
+    let end_addr = (start.as_u64() + size as u64 + 0xFFF) & !0xFFF;
+
+    // カーネルの L4 テーブルへの参照
+    let kernel_l4: &PageTable = unsafe {
+        &*(kernel_cr3().as_u64() as *const PageTable)
+    };
+
+    // プロセスの L4 テーブルへの可変参照
+    let process_l4: &mut PageTable = unsafe {
+        &mut *(process_l4_frame.start_address().as_u64() as *mut PageTable)
+    };
+
+    let mut addr = start_addr;
+    while addr < end_addr {
+        // 仮想アドレスから各階層のインデックスを求める
+        let l4_idx = ((addr >> 39) & 0x1FF) as usize;
+        let l3_idx = ((addr >> 30) & 0x1FF) as usize;
+        let l2_idx = ((addr >> 21) & 0x1FF) as usize;
+        let l1_idx = ((addr >> 12) & 0x1FF) as usize;
+
+        // --- L4 エントリの処理 ---
+        let l4_entry = &mut process_l4[l4_idx];
+        if l4_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        // L4 エントリに USER_ACCESSIBLE を追加
+        l4_entry.set_flags(l4_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        if l4_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        // --- L3 テーブルの分岐コピー ---
+        // プロセス L4 がカーネル L4 と同じ L3 を指しているなら、L3 をコピーする
+        let kernel_l3_addr = if !kernel_l4[l4_idx].is_unused() {
+            Some(kernel_l4[l4_idx].addr())
+        } else {
+            None
+        };
+
+        if let Some(k_l3_addr) = kernel_l3_addr {
+            if l4_entry.addr() == k_l3_addr {
+                // カーネルと同じ L3 を指している → 分岐コピー
+                let new_l3_frame = {
+                    let mut fa = FRAME_ALLOCATOR.lock();
+                    fa.allocate_frame()
+                        .expect("set_user_accessible_in_process: L3 フレーム確保に失敗")
+                };
+                // カーネル L3 の内容をコピー
+                let kernel_l3: &PageTable = unsafe {
+                    &*(k_l3_addr.as_u64() as *const PageTable)
+                };
+                let new_l3: &mut PageTable = unsafe {
+                    &mut *(new_l3_frame.start_address().as_u64() as *mut PageTable)
+                };
+                for i in 0..512 {
+                    if !kernel_l3[i].is_unused() {
+                        new_l3[i].set_addr(kernel_l3[i].addr(), kernel_l3[i].flags());
+                    } else {
+                        new_l3[i].set_unused();
+                    }
+                }
+                // L4 エントリを新 L3 に差し替え
+                let l4_flags = l4_entry.flags();
+                l4_entry.set_addr(new_l3_frame.start_address(), l4_flags);
+            }
+        }
+
+        let l3_table: &mut PageTable = unsafe {
+            &mut *(l4_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L3 エントリの処理 ---
+        let l3_entry = &mut l3_table[l3_idx];
+        if l3_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        // L3 エントリに USER_ACCESSIBLE を追加
+        l3_entry.set_flags(l3_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        if l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            addr += 4096;
+            continue;
+        }
+
+        // --- L2 テーブルの分岐コピー ---
+        // カーネルの L3 から対応する L2 アドレスを取得
+        let kernel_l2_addr = if let Some(k_l3_addr) = kernel_l3_addr {
+            let kernel_l3: &PageTable = unsafe {
+                &*(k_l3_addr.as_u64() as *const PageTable)
+            };
+            if !kernel_l3[l3_idx].is_unused() {
+                Some(kernel_l3[l3_idx].addr())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(k_l2_addr) = kernel_l2_addr {
+            if l3_entry.addr() == k_l2_addr {
+                // カーネルと同じ L2 を指している → 分岐コピー
+                let new_l2_frame = {
+                    let mut fa = FRAME_ALLOCATOR.lock();
+                    fa.allocate_frame()
+                        .expect("set_user_accessible_in_process: L2 フレーム確保に失敗")
+                };
+                let kernel_l2: &PageTable = unsafe {
+                    &*(k_l2_addr.as_u64() as *const PageTable)
+                };
+                let new_l2: &mut PageTable = unsafe {
+                    &mut *(new_l2_frame.start_address().as_u64() as *mut PageTable)
+                };
+                for i in 0..512 {
+                    if !kernel_l2[i].is_unused() {
+                        new_l2[i].set_addr(kernel_l2[i].addr(), kernel_l2[i].flags());
+                    } else {
+                        new_l2[i].set_unused();
+                    }
+                }
+                let l3_flags = l3_entry.flags();
+                l3_entry.set_addr(new_l2_frame.start_address(), l3_flags);
+            }
+        }
+
+        let l2_table: &mut PageTable = unsafe {
+            &mut *(l3_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L2 エントリの処理 ---
+        let l2_entry = &mut l2_table[l2_idx];
+        if l2_entry.is_unused() {
+            addr += 4096;
+            continue;
+        }
+        // L2 エントリに USER_ACCESSIBLE を追加
+        l2_entry.set_flags(l2_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+
+        // 2MiB 巨大ページの場合、4KiB に分割する
+        if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            split_huge_page_for_process(l2_entry);
+            // 分割後にもう一度 USER_ACCESSIBLE を設定（下の L1 処理に進む）
+            if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                // 分割に失敗した場合はスキップ
+                addr += 4096;
+                continue;
+            }
+        }
+
+        // --- L1 テーブルの分岐コピー ---
+        // カーネルの L2 から対応する L1 アドレスを取得
+        let kernel_l1_addr = if let Some(k_l2_addr) = kernel_l2_addr {
+            let kernel_l2: &PageTable = unsafe {
+                &*(k_l2_addr.as_u64() as *const PageTable)
+            };
+            if !kernel_l2[l2_idx].is_unused()
+                && !kernel_l2[l2_idx].flags().contains(PageTableFlags::HUGE_PAGE)
+            {
+                Some(kernel_l2[l2_idx].addr())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(k_l1_addr) = kernel_l1_addr {
+            if l2_entry.addr() == k_l1_addr {
+                // カーネルと同じ L1 を指している → 分岐コピー
+                let new_l1_frame = {
+                    let mut fa = FRAME_ALLOCATOR.lock();
+                    fa.allocate_frame()
+                        .expect("set_user_accessible_in_process: L1 フレーム確保に失敗")
+                };
+                let kernel_l1: &PageTable = unsafe {
+                    &*(k_l1_addr.as_u64() as *const PageTable)
+                };
+                let new_l1: &mut PageTable = unsafe {
+                    &mut *(new_l1_frame.start_address().as_u64() as *mut PageTable)
+                };
+                for i in 0..512 {
+                    if !kernel_l1[i].is_unused() {
+                        new_l1[i].set_addr(kernel_l1[i].addr(), kernel_l1[i].flags());
+                    } else {
+                        new_l1[i].set_unused();
+                    }
+                }
+                let l2_flags = l2_entry.flags();
+                l2_entry.set_addr(new_l1_frame.start_address(), l2_flags);
+            }
+        }
+
+        let l1_table: &mut PageTable = unsafe {
+            &mut *(l2_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L1 エントリの処理 ---
+        let l1_entry = &mut l1_table[l1_idx];
+        if !l1_entry.is_unused() {
+            l1_entry.set_flags(l1_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
+        }
+
+        addr += 4096;
+    }
+}
+
+/// プロセスのページテーブル内で 2MiB 巨大ページを 512 個の 4KiB ページに分割する。
+///
+/// split_huge_page_if_needed() と同様だが、プロセスのページテーブル内の
+/// L2 エントリに対して直接操作する。CR0.WP の操作は不要（プロセスのテーブルは
+/// 書き込み可能なフレーム上にあるため）。
+fn split_huge_page_for_process(l2_entry: &mut x86_64::structures::paging::page_table::PageTableEntry) {
+    if !l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return;
+    }
+
+    let huge_phys = l2_entry.addr().as_u64();
+    let huge_flags = l2_entry.flags() & !PageTableFlags::HUGE_PAGE;
+
+    // 新しい L1 テーブル用のフレームを確保
+    let new_frame = {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        fa.allocate_frame()
+            .expect("split_huge_page_for_process: フレーム確保に失敗")
+    };
+
+    // 新しい L1 テーブルを初期化
+    let new_l1_table: &mut PageTable = unsafe {
+        &mut *(new_frame.start_address().as_u64() as *mut PageTable)
+    };
+    for entry in new_l1_table.iter_mut() {
+        entry.set_unused();
+    }
+
+    // 512 個の 4KiB エントリを元の巨大ページの連続する物理フレームで埋める
+    for i in 0..512u64 {
+        let phys = PhysAddr::new(huge_phys + i * 4096);
+        let frame = PhysFrame::<Size4KiB>::containing_address(phys);
+        new_l1_table[i as usize].set_addr(frame.start_address(), huge_flags);
+    }
+
+    // L2 エントリを新 L1 テーブルへのポインタに書き換え
+    let l2_flags = huge_flags & !PageTableFlags::HUGE_PAGE;
+    l2_entry.set_addr(new_frame.start_address(), l2_flags);
+}
+
+/// プロセスのページテーブルを破棄し、プロセス固有に作成したフレームを解放する。
+///
+/// カーネルと共有しているテーブル（L3/L2/L1）は解放しない。
+/// プロセスの L4 エントリがカーネルの L4 エントリと異なるアドレスを指している場合、
+/// そのテーブルはプロセス固有の分岐コピーなので解放対象。
+/// 同様に、分岐コピーされた L3/L2 の中で、カーネルのものと異なるフレームも解放する。
+pub fn destroy_process_page_table(process_l4_frame: PhysFrame<Size4KiB>) {
+    let kernel_l4: &PageTable = unsafe {
+        &*(kernel_cr3().as_u64() as *const PageTable)
+    };
+    let process_l4: &PageTable = unsafe {
+        &*(process_l4_frame.start_address().as_u64() as *const PageTable)
+    };
+
+    for l4_idx in 0..512 {
+        if process_l4[l4_idx].is_unused() {
+            continue;
+        }
+        if process_l4[l4_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+            continue;
+        }
+
+        let proc_l3_addr = process_l4[l4_idx].addr();
+        let kernel_l3_addr = if !kernel_l4[l4_idx].is_unused() {
+            kernel_l4[l4_idx].addr()
+        } else {
+            // カーネルにないエントリがプロセスにある（通常ないが念のため）
+            PhysAddr::new(0)
+        };
+
+        // プロセス固有の L3 テーブルでなければスキップ（カーネルと共有）
+        if proc_l3_addr == kernel_l3_addr {
+            continue;
+        }
+
+        // プロセス固有の L3 テーブルの中身を走査して、さらに分岐コピーされた L2/L1 を解放
+        let proc_l3: &PageTable = unsafe {
+            &*(proc_l3_addr.as_u64() as *const PageTable)
+        };
+        let kernel_l3: &PageTable = if !kernel_l4[l4_idx].is_unused()
+            && !kernel_l4[l4_idx].flags().contains(PageTableFlags::HUGE_PAGE)
+        {
+            unsafe { &*(kernel_l3_addr.as_u64() as *const PageTable) }
+        } else {
+            // カーネルに L3 がない場合 → L3 テーブルだけ解放
+            let frame = PhysFrame::<Size4KiB>::containing_address(proc_l3_addr);
+            let mut fa = FRAME_ALLOCATOR.lock();
+            unsafe { fa.deallocate_frame(frame); }
+            continue;
+        };
+
+        for l3_idx in 0..512 {
+            if proc_l3[l3_idx].is_unused() {
+                continue;
+            }
+            if proc_l3[l3_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+                continue;
+            }
+
+            let proc_l2_addr = proc_l3[l3_idx].addr();
+            let kernel_l2_addr = if !kernel_l3[l3_idx].is_unused() {
+                kernel_l3[l3_idx].addr()
+            } else {
+                PhysAddr::new(0)
+            };
+
+            // カーネルと共有している L2 ならスキップ
+            if proc_l2_addr == kernel_l2_addr {
+                continue;
+            }
+
+            // プロセス固有の L2 テーブルの中身を走査して、分岐コピーされた L1 を解放
+            let proc_l2: &PageTable = unsafe {
+                &*(proc_l2_addr.as_u64() as *const PageTable)
+            };
+            let kernel_l2: &PageTable = if !kernel_l3[l3_idx].is_unused()
+                && !kernel_l3[l3_idx].flags().contains(PageTableFlags::HUGE_PAGE)
+            {
+                unsafe { &*(kernel_l2_addr.as_u64() as *const PageTable) }
+            } else {
+                // カーネルに L2 がない → L2 テーブルだけ解放
+                let frame = PhysFrame::<Size4KiB>::containing_address(proc_l2_addr);
+                let mut fa = FRAME_ALLOCATOR.lock();
+                unsafe { fa.deallocate_frame(frame); }
+                continue;
+            };
+
+            for l2_idx in 0..512 {
+                if proc_l2[l2_idx].is_unused() {
+                    continue;
+                }
+                if proc_l2[l2_idx].flags().contains(PageTableFlags::HUGE_PAGE) {
+                    continue;
+                }
+
+                let proc_l1_addr = proc_l2[l2_idx].addr();
+                let kernel_l1_addr = if !kernel_l2[l2_idx].is_unused()
+                    && !kernel_l2[l2_idx].flags().contains(PageTableFlags::HUGE_PAGE)
+                {
+                    kernel_l2[l2_idx].addr()
+                } else {
+                    PhysAddr::new(0)
+                };
+
+                // カーネルと共有している L1 ならスキップ
+                if proc_l1_addr == kernel_l1_addr {
+                    continue;
+                }
+
+                // プロセス固有の L1 テーブルを解放
+                let frame = PhysFrame::<Size4KiB>::containing_address(proc_l1_addr);
+                let mut fa = FRAME_ALLOCATOR.lock();
+                unsafe { fa.deallocate_frame(frame); }
+            }
+
+            // プロセス固有の L2 テーブルを解放
+            let frame = PhysFrame::<Size4KiB>::containing_address(proc_l2_addr);
+            let mut fa = FRAME_ALLOCATOR.lock();
+            unsafe { fa.deallocate_frame(frame); }
+        }
+
+        // プロセス固有の L3 テーブルを解放
+        let frame = PhysFrame::<Size4KiB>::containing_address(proc_l3_addr);
+        let mut fa = FRAME_ALLOCATOR.lock();
+        unsafe { fa.deallocate_frame(frame); }
+    }
+
+    // 最後に L4 テーブル自体を解放
+    {
+        let mut fa = FRAME_ALLOCATOR.lock();
+        unsafe { fa.deallocate_frame(process_l4_frame); }
+    }
+}
+
+/// CR3 レジスタをプロセスのページテーブルに切り替える。
+///
+/// カーネルマッピングは共有されているので、切り替え後もカーネルコードは
+/// 正常に動作する。TLB は CR3 書き込み時に自動フラッシュされる。
+///
+/// # Safety
+/// - process_l4_frame が有効なページテーブルを指していること
+/// - カーネルマッピングが含まれていること
+pub unsafe fn switch_to_process_page_table(process_l4_frame: PhysFrame<Size4KiB>) {
+    unsafe {
+        Cr3::write(process_l4_frame, Cr3Flags::empty());
+    }
+}
+
+/// CR3 レジスタをカーネルのページテーブルに復帰する。
+///
+/// # Safety
+/// - カーネルの CR3 が save_kernel_cr3() で保存済みであること
+pub unsafe fn switch_to_kernel_page_table() {
+    let kernel_l4 = PhysFrame::containing_address(kernel_cr3());
+    unsafe {
+        Cr3::write(kernel_l4, Cr3Flags::empty());
+    }
+}
+
+// =================================================================
+// ELF ローダー用: 新規物理フレームの確保とマッピング
+// =================================================================
+//
+// ELF バイナリのセグメントをプロセスのアドレス空間にロードするには、
+// 新しい物理フレームを確保してプロセスのページテーブルにマッピングする必要がある。
+// 既存の set_user_accessible_in_process() は「カーネルの既存マッピングの
+// フラグを変更する」だけだが、ELF ローダーでは「まだマッピングされていない
+// 仮想アドレスに新しいフレームを割り当てる」機能が必要。
+
+/// プロセスのページテーブルに新しい物理フレームをマッピングする。
+///
+/// 指定した仮想アドレス範囲に対して:
+///   1. 必要なページ数分の物理フレームを確保
+///   2. プロセスの L4 → L3 → L2 → L1 テーブルを辿り（なければ新規作成）
+///   3. L1 エントリに確保したフレームをマッピング
+///   4. 全階層に PRESENT | WRITABLE | USER_ACCESSIBLE を設定
+///
+/// 確保した物理フレームのリストを返す（呼び出し元でデータのコピーや解放に使う）。
+///
+/// # 引数
+/// - `process_l4_frame`: プロセスの L4 ページテーブルフレーム
+/// - `virt_start`: マッピング先の仮想アドレス（4KiB アラインに切り下げ）
+/// - `size`: マッピングするサイズ（バイト）
+///
+/// # 戻り値
+/// 確保した物理フレームのリスト。先頭が virt_start に対応し、以降は連続ページ。
+pub fn map_user_pages_in_process(
+    process_l4_frame: PhysFrame<Size4KiB>,
+    virt_start: VirtAddr,
+    size: usize,
+) -> alloc::vec::Vec<PhysFrame<Size4KiB>> {
+    if size == 0 {
+        return alloc::vec::Vec::new();
+    }
+
+    // 開始アドレスを 4KiB 境界に切り下げ
+    let start_addr = virt_start.as_u64() & !0xFFF;
+    // 終了アドレス（切り上げ）
+    let end_addr = (virt_start.as_u64() + size as u64 + 0xFFF) & !0xFFF;
+    let page_count = ((end_addr - start_addr) / 4096) as usize;
+
+    let mut allocated_frames = alloc::vec::Vec::with_capacity(page_count);
+
+    // ページテーブル操作に使うフラグ
+    // 全階層に PRESENT | WRITABLE | USER_ACCESSIBLE を設定する。
+    // 中間テーブル (L4/L3/L2 エントリ) にも USER_ACCESSIBLE が必要。
+    // 1つでも USER_ACCESSIBLE がない階層があると Ring 3 からアクセスできない。
+    let user_flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::USER_ACCESSIBLE;
+
+    let process_l4: &mut PageTable = unsafe {
+        &mut *(process_l4_frame.start_address().as_u64() as *mut PageTable)
+    };
+
+    let mut addr = start_addr;
+    for _ in 0..page_count {
+        // 仮想アドレスから各階層のインデックスを求める
+        let l4_idx = ((addr >> 39) & 0x1FF) as usize;
+        let l3_idx = ((addr >> 30) & 0x1FF) as usize;
+        let l2_idx = ((addr >> 21) & 0x1FF) as usize;
+        let l1_idx = ((addr >> 12) & 0x1FF) as usize;
+
+        // --- L4 → L3 ---
+        // L4 エントリが空ならば、新しい L3 テーブルを確保して設定
+        let l4_entry = &mut process_l4[l4_idx];
+        if l4_entry.is_unused() {
+            let new_l3_frame = {
+                let mut fa = FRAME_ALLOCATOR.lock();
+                fa.allocate_frame()
+                    .expect("map_user_pages_in_process: L3 テーブル用フレーム確保に失敗")
+            };
+            // 新テーブルをゼロクリア
+            let new_table: &mut PageTable = unsafe {
+                &mut *(new_l3_frame.start_address().as_u64() as *mut PageTable)
+            };
+            for e in new_table.iter_mut() {
+                e.set_unused();
+            }
+            l4_entry.set_addr(new_l3_frame.start_address(), user_flags);
+        } else {
+            // 既存エントリに USER_ACCESSIBLE を追加（不足している場合）
+            l4_entry.set_flags(l4_entry.flags() | user_flags);
+        }
+
+        let l3_table: &mut PageTable = unsafe {
+            &mut *(l4_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L3 → L2 ---
+        let l3_entry = &mut l3_table[l3_idx];
+        if l3_entry.is_unused() {
+            let new_l2_frame = {
+                let mut fa = FRAME_ALLOCATOR.lock();
+                fa.allocate_frame()
+                    .expect("map_user_pages_in_process: L2 テーブル用フレーム確保に失敗")
+            };
+            let new_table: &mut PageTable = unsafe {
+                &mut *(new_l2_frame.start_address().as_u64() as *mut PageTable)
+            };
+            for e in new_table.iter_mut() {
+                e.set_unused();
+            }
+            l3_entry.set_addr(new_l2_frame.start_address(), user_flags);
+        } else {
+            l3_entry.set_flags(l3_entry.flags() | user_flags);
+        }
+
+        let l2_table: &mut PageTable = unsafe {
+            &mut *(l3_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L2 → L1 ---
+        let l2_entry = &mut l2_table[l2_idx];
+        if l2_entry.is_unused() {
+            let new_l1_frame = {
+                let mut fa = FRAME_ALLOCATOR.lock();
+                fa.allocate_frame()
+                    .expect("map_user_pages_in_process: L1 テーブル用フレーム確保に失敗")
+            };
+            let new_table: &mut PageTable = unsafe {
+                &mut *(new_l1_frame.start_address().as_u64() as *mut PageTable)
+            };
+            for e in new_table.iter_mut() {
+                e.set_unused();
+            }
+            l2_entry.set_addr(new_l1_frame.start_address(), user_flags);
+        } else {
+            l2_entry.set_flags(l2_entry.flags() | user_flags);
+        }
+
+        let l1_table: &mut PageTable = unsafe {
+            &mut *(l2_entry.addr().as_u64() as *mut PageTable)
+        };
+
+        // --- L1 エントリにデータ用フレームをマッピング ---
+        let l1_entry = &mut l1_table[l1_idx];
+        let data_frame = {
+            let mut fa = FRAME_ALLOCATOR.lock();
+            fa.allocate_frame()
+                .expect("map_user_pages_in_process: データ用フレーム確保に失敗")
+        };
+
+        // フレームの内容をゼロクリア（BSS 用、データコピー前の初期状態）
+        // アイデンティティマッピングのおかげで物理アドレスをそのまま仮想アドレスとして使える
+        unsafe {
+            let ptr = data_frame.start_address().as_u64() as *mut u8;
+            core::ptr::write_bytes(ptr, 0, 4096);
+        }
+
+        l1_entry.set_addr(data_frame.start_address(), user_flags);
+        allocated_frames.push(data_frame);
+
+        addr += 4096;
+    }
+
+    allocated_frames
 }
