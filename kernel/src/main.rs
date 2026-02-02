@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod allocator;
+mod elf;
 mod framebuffer;
 mod gdt;
 mod interrupts;
