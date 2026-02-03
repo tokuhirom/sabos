@@ -101,6 +101,7 @@ impl Shell {
             "blkread" => self.cmd_blkread(args),
             "ls" => self.cmd_ls(),
             "cat" => self.cmd_cat(args),
+            "run" => self.cmd_run(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -129,6 +130,7 @@ impl Shell {
         kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
         kprintln!("  ls              - List files on FAT16 disk");
         kprintln!("  cat <file>      - Display file contents from FAT16 disk");
+        kprintln!("  run <file>      - Load and run ELF binary from FAT16 disk");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -563,6 +565,103 @@ impl Shell {
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
+    }
+
+    /// run コマンド: FAT16 ディスクから ELF バイナリを読み込んでユーザーモードで実行する。
+    ///
+    /// ファイル名は大文字の 8.3 形式で指定（例: run HELLO.ELF）
+    ///
+    /// 手順:
+    ///   1. FAT16 からファイルを読み込む
+    ///   2. ELF パース → LOAD セグメント情報を取得
+    ///   3. プロセス作成 → ページテーブル + フレーム確保 + データロード
+    ///   4. Ring 3 で実行
+    ///   5. プロセスを破棄してフレームを返却
+    fn cmd_run(&self, args: &str) {
+        let filename = args.trim();
+        if filename.is_empty() {
+            kprintln!("Usage: run <FILENAME>");
+            kprintln!("  Example: run HELLO.ELF");
+            return;
+        }
+
+        // ファイル名を大文字に変換（FAT16 は大文字のみ）
+        let filename_upper: alloc::string::String = filename.chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        // FAT16 からファイルを読み込む
+        kprintln!("Loading {} from disk...", filename_upper);
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        let elf_data = match fs.read_file(&filename_upper) {
+            Ok(data) => data,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error reading file: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+        kprintln!("  Loaded {} bytes", elf_data.len());
+
+        // ELF パース結果を表示
+        match crate::elf::parse_elf(&elf_data) {
+            Ok(info) => {
+                kprintln!("  Entry point: {:#x}", info.entry_point);
+                kprintln!("  LOAD segments: {}", info.load_segments.len());
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("ELF parse error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        }
+
+        // フレーム数の確認（プロセス作成前）
+        let before_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+
+        // ELF プロセスを作成
+        let (process, entry_point, user_stack_top) =
+            match crate::usermode::create_elf_process(&elf_data) {
+                Ok(result) => result,
+                Err(e) => {
+                    framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                    kprintln!("Failed to create ELF process: {}", e);
+                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                    return;
+                }
+            };
+
+        // Ring 3 で実行
+        kprintln!("Running in Ring 3...");
+        crate::usermode::run_elf_process(&process, entry_point, user_stack_top);
+
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("Program exited.");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+
+        // プロセスを破棄
+        crate::usermode::destroy_user_process(process);
+
+        // フレーム数の確認（プロセス破棄後）
+        let after_free = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.free_frames()
+        };
+        kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
