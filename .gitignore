@@ -1,4 +1,2 @@
-/kernel/target/
-/user/target/
-/esp/
-/result*
+disk.img
+disk_test.img
