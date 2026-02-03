@@ -33,7 +33,6 @@
 // 開始クラスタ番号を保持する。
 
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use crate::serial_println;
 use crate::virtio_blk;
@@ -43,7 +42,6 @@ const SECTOR_SIZE: usize = 512;
 
 /// FAT16 のディレクトリエントリの属性フラグ。
 /// これらは OR で組み合わせて使われる。
-const ATTR_READ_ONLY: u8 = 0x01;
 const _ATTR_HIDDEN: u8 = 0x02;
 const _ATTR_SYSTEM: u8 = 0x04;
 const ATTR_VOLUME_ID: u8 = 0x08;
@@ -144,10 +142,16 @@ impl Fat16 {
             total_sectors_32,
         };
 
+        let total_sectors = if bpb.total_sectors_16 != 0 {
+            bpb.total_sectors_16 as u32
+        } else {
+            bpb.total_sectors_32
+        };
+
         serial_println!(
-            "FAT16: bps={}, spc={}, reserved={}, fats={}, root_entries={}, fat_size={}",
+            "FAT16: bps={}, spc={}, reserved={}, fats={}, root_entries={}, fat_size={}, total_sectors={}",
             bpb.bytes_per_sector, bpb.sectors_per_cluster, bpb.reserved_sectors,
-            bpb.num_fats, bpb.root_entry_count, bpb.fat_size_16
+            bpb.num_fats, bpb.root_entry_count, bpb.fat_size_16, total_sectors
         );
 
         // 各領域の開始セクタを計算する

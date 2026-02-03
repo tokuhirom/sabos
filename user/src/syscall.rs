@@ -44,7 +44,6 @@ pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソール�
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
 
 // ファイルシステム (10-19)
-pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len)
 pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len)
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
@@ -58,7 +57,6 @@ pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, functio
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
 pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
-pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 
 // ネットワーク (40-49)
@@ -77,14 +75,10 @@ pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 // ファイルハンドル (70-79)
 pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, rights)
 pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
-pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
 
 /// Handle の読み取り権限
 pub const HANDLE_RIGHT_READ: u32 = 0x01;
-/// Handle の書き込み権限
-pub const HANDLE_RIGHT_WRITE: u32 = 0x02;
-
 /// ユーザー空間に渡されるハンドル
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -98,22 +92,6 @@ pub struct Handle {
 /// 正の値: 成功（戻り値）
 /// 負の値: エラー（errno の負値）
 pub type SyscallResult = i64;
-
-/// エラーコード（カーネルの SyscallError と対応）
-#[allow(dead_code)]
-pub const EFAULT: i64 = -14;   // 不正なアドレス
-#[allow(dead_code)]
-pub const EINVAL: i64 = -22;   // 不正な引数
-#[allow(dead_code)]
-pub const ENOENT: i64 = -2;    // ファイルが見つからない
-#[allow(dead_code)]
-pub const ENOSYS: i64 = -38;   // 未実装のシステムコール
-#[allow(dead_code)]
-pub const EREADONLY: i64 = -1001;       // 書き込み禁止
-#[allow(dead_code)]
-pub const EINVALID_HANDLE: i64 = -1002; // 不正なハンドル
-#[allow(dead_code)]
-pub const ENOT_SUPPORTED: i64 = -1003;  // 未対応
 
 /// 戻り値がエラーかどうかをチェック
 #[inline]
@@ -331,13 +309,7 @@ pub fn _exit() -> ! {
 /// # 戻り値
 /// - 読み取ったバイト数（成功時）
 /// - 負の値（エラー時）
-pub fn file_read(path: &str, buf: &mut [u8]) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall4(SYS_FILE_READ, path_ptr, path_len, buf_ptr, buf_len) as i64 }
-}
+#[allow(dead_code)]
 
 /// ファイルを作成または上書き
 ///
@@ -416,12 +388,7 @@ pub fn handle_read(handle: &Handle, buf: &mut [u8]) -> SyscallResult {
 }
 
 /// Handle に書き込む
-pub fn handle_write(handle: &Handle, buf: &[u8]) -> SyscallResult {
-    let handle_ptr = handle as *const Handle as u64;
-    let buf_ptr = buf.as_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_HANDLE_WRITE, handle_ptr, buf_ptr, buf_len) as i64 }
-}
+#[allow(dead_code)]
 
 /// Handle を閉じる
 pub fn handle_close(handle: &Handle) -> SyscallResult {
@@ -555,9 +522,7 @@ pub fn spawn(path: &str) -> SyscallResult {
 /// CPU を譲る
 ///
 /// 現在のタスクの実行を中断し、他の ready なタスクに CPU を譲る。
-pub fn yield_cpu() {
-    unsafe { syscall0(SYS_YIELD); }
-}
+#[allow(dead_code)]
 
 /// 指定ミリ秒スリープ
 ///

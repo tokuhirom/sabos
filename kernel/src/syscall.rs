@@ -31,6 +31,7 @@
 
 use core::arch::global_asm;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 
@@ -420,7 +421,7 @@ fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sys
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    use crate::handle::{self, Handle, HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE};
+    use crate::handle::{Handle, HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE};
 
     let path_len = arg2 as usize;
     let rights = arg4 as u32;
@@ -692,7 +693,7 @@ pub(crate) fn procfs_list_dir(path: &str, buf: &mut [u8]) -> Result<usize, Sysca
     }
 
     let mut offset = 0;
-    let entries = [b"meminfo", b"tasks"];
+    let entries: [&[u8]; 2] = [b"meminfo", b"tasks"];
 
     for name in entries {
         let needed = name.len() + 1;
@@ -888,7 +889,7 @@ fn sys_pci_config_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64
     }
 
     // 範囲チェック
-    if arg1 > 0xFF || arg2 > 31 || arg3 > 7 || offset > 0xFF {
+    if arg1 > 0xFF || arg2 > 31 || arg3 > 7 {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -1215,6 +1216,8 @@ impl<'a> core::fmt::Write for SliceWriter<'a> {
 
 /// JSON 文字列用のエスケープ付き書き込み
 fn write_json_string(writer: &mut SliceWriter<'_>, s: &str) -> core::fmt::Result {
+    use core::fmt::Write;
+
     let mut buf = [0u8; 4];
     for ch in s.chars() {
         match ch {

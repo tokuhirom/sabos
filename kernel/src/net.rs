@@ -173,11 +173,6 @@ impl Ipv4Header {
     pub fn header_length(&self) -> usize {
         ((self.version_ihl & 0x0F) as usize) * 4
     }
-
-    /// 全長 (バイト単位)
-    pub fn total_length_u16(&self) -> u16 {
-        u16::from_be_bytes(self.total_length)
-    }
 }
 
 // ============================================================
@@ -225,10 +220,6 @@ impl UdpHeader {
 
     pub fn dst_port_u16(&self) -> u16 {
         u16::from_be_bytes(self.dst_port)
-    }
-
-    pub fn length_u16(&self) -> u16 {
-        u16::from_be_bytes(self.length)
     }
 }
 
@@ -411,7 +402,7 @@ pub fn handle_packet(data: &[u8]) {
 }
 
 /// ARP パケットを処理する
-fn handle_arp(eth_header: &EthernetHeader, payload: &[u8]) {
+fn handle_arp(_eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 28 {
         return;
     }

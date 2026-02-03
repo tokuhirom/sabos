@@ -57,7 +57,6 @@ const _VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 // Virtqueue ディスクリプタのフラグ
 // ============================================================
 
-const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 // ============================================================

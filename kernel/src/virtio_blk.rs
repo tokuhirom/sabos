@@ -120,53 +120,6 @@ const _VIRTIO_BLK_S_IOERR: u8 = 1;
 // データ構造体
 // ============================================================
 
-/// Virtqueue のディスクリプタ（1 エントリ = 16 バイト）。
-/// I/O バッファの情報を保持する。複数のディスクリプタを next でチェーンできる。
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct VirtqDesc {
-    /// バッファの物理アドレス
-    addr: u64,
-    /// バッファの長さ（バイト数）
-    len: u32,
-    /// フラグ (VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE)
-    flags: u16,
-    /// 次のディスクリプタのインデックス（flags に NEXT がある場合のみ有効）
-    next: u16,
-}
-
-/// Available Ring のヘッダー。
-/// ゲストがデバイスに「新しいリクエストを追加した」ことを伝えるリング。
-#[repr(C)]
-struct VirtqAvail {
-    /// フラグ（1 = 割り込み抑制）
-    flags: u16,
-    /// 次に書き込む位置（単調増加、queue_size で mod して使う）
-    idx: u16,
-    // この後に ring[queue_size] が続く（可変長なので構造体に含めない）
-}
-
-/// Used Ring のヘッダー。
-/// デバイスがゲストに「リクエスト完了」を伝えるリング。
-#[repr(C)]
-struct VirtqUsed {
-    /// フラグ（1 = 通知抑制）
-    flags: u16,
-    /// 次にデバイスが書き込む位置（単調増加）
-    idx: u16,
-    // この後に VirtqUsedElem[queue_size] が続く
-}
-
-/// Used Ring の各エントリ。
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtqUsedElem {
-    /// 完了したディスクリプタチェーンの先頭インデックス
-    id: u32,
-    /// デバイスが書き込んだ合計バイト数
-    len: u32,
-}
-
 /// virtio-blk のリクエストヘッダー。
 /// 各ブロック I/O リクエストの先頭に置く。
 #[repr(C)]
@@ -189,8 +142,6 @@ pub struct VirtioBlk {
     /// Virtqueue メモリの先頭ポインタ（ページアラインで確保済み）
     /// UEFI 環境ではアイデンティティマッピングなので仮想アドレス = 物理アドレス
     vq_ptr: *mut u8,
-    /// Virtqueue メモリのサイズ（解放用に保持）
-    vq_size: usize,
     /// 次に使うディスクリプタのインデックス
     next_desc: u16,
     /// 前回 Used Ring から読んだ idx（新しい完了を検出するために使う）
@@ -339,7 +290,6 @@ impl VirtioBlk {
             io_base,
             queue_size,
             vq_ptr,
-            vq_size: total_size_aligned,
             next_desc: 0,
             last_used_idx: 0,
             capacity,

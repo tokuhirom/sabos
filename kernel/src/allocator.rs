@@ -24,9 +24,11 @@ const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
 /// BSS セクションに配置されるので、バイナリサイズには影響しない。
 /// アラインメントを 16 バイトにしておく（x86_64 の SSE 要件）。
 #[repr(align(16))]
-struct HeapMemory([u8; HEAP_SIZE]);
+struct HeapMemory {
+    _data: [u8; HEAP_SIZE],
+}
 
-static mut HEAP_MEMORY: HeapMemory = HeapMemory([0; HEAP_SIZE]);
+static mut HEAP_MEMORY: HeapMemory = HeapMemory { _data: [0; HEAP_SIZE] };
 
 /// グローバルアロケータ。
 /// #[global_allocator] で指定すると、alloc crate（Vec, Box, String 等）が

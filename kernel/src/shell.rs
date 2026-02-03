@@ -1335,7 +1335,7 @@ impl Shell {
         }
 
         // タスクを spawn
-        let task_id = scheduler::spawn("selftest_task", test_task);
+        let _task_id = scheduler::spawn("selftest_task", test_task);
 
         // タスクが完了するまで yield（最大 100 回）
         for _ in 0..100 {
@@ -1441,7 +1441,7 @@ impl Shell {
         };
         let _ = crate::handle::close(&handle);
 
-        if !mem.contains(&b"\"total_frames\""[..]) {
+        if !mem.windows(b"\"total_frames\"".len()).any(|w| w == b"\"total_frames\"") {
             return false;
         }
 

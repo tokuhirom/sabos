@@ -126,11 +126,6 @@ impl<T> UserPtr<T> {
         })
     }
 
-    /// 検証済みアドレスを取得
-    pub fn addr(&self) -> u64 {
-        self.addr
-    }
-
     /// ポインタとして取得（unsafe が必要な操作の準備）
     pub fn as_ptr(&self) -> *const T {
         self.addr as *const T
@@ -237,21 +232,6 @@ impl<T> UserSlice<T> {
             len,
             _marker: PhantomData,
         })
-    }
-
-    /// 検証済みアドレスを取得
-    pub fn addr(&self) -> u64 {
-        self.addr
-    }
-
-    /// 要素数を取得
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// スライスが空かどうか
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// Rust のスライスとして取得

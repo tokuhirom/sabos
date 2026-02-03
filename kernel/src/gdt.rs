@@ -63,7 +63,7 @@ lazy_static! {
         // カーネルモードのデータセグメント（Ring 0）
         let kernel_data_selector = gdt.append(Descriptor::kernel_data_segment());
         // ユーザーモードのデータセグメント（Ring 3）
-        let user_data_selector = gdt.append(Descriptor::user_data_segment());
+        let _user_data_selector = gdt.append(Descriptor::user_data_segment());
         // ユーザーモードのコードセグメント（Ring 3, 64-bit）
         let user_code_selector = gdt.append(Descriptor::user_code_segment());
 
@@ -77,7 +77,6 @@ lazy_static! {
             kernel_code_selector,
             kernel_data_selector,
             user_code_selector,
-            user_data_selector,
             tss_selector,
         })
     };
@@ -89,7 +88,6 @@ struct Selectors {
     kernel_code_selector: SegmentSelector,
     kernel_data_selector: SegmentSelector,
     user_code_selector: SegmentSelector,
-    user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -134,13 +132,6 @@ pub fn init() {
 /// RPL=3（Ring 3）が自動的に含まれている（GDT の append が DPL から設定する）。
 pub fn user_code_selector() -> SegmentSelector {
     GDT.1.user_code_selector
-}
-
-/// ユーザーモードのデータセグメントセレクタを返す。
-/// iretq でユーザーモードに遷移する際、SS レジスタにセットする値。
-/// RPL=3（Ring 3）が自動的に含まれている。
-pub fn user_data_selector() -> SegmentSelector {
-    GDT.1.user_data_selector
 }
 
 /// TSS の rsp0（privilege_stack_table[0]）を設定する。

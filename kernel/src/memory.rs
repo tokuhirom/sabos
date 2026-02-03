@@ -151,15 +151,6 @@ impl BitmapFrameAllocator {
         (self.bitmap[word] >> bit) & 1 == 1
     }
 
-    /// ビットマップの指定インデックスのビットをセットする（使用中にする）。
-    fn set_allocated(&mut self, index: u64) {
-        let word = (index / 64) as usize;
-        let bit = (index % 64) as u32;
-        if word < self.bitmap.len() {
-            self.bitmap[word] |= 1u64 << bit;
-        }
-    }
-
     /// ビットマップの指定インデックスのビットをクリアする（空きにする）。
     fn set_free(&mut self, index: u64) {
         let word = (index / 64) as usize;

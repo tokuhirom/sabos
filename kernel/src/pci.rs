@@ -86,24 +86,6 @@ pub fn pci_config_read16(bus: u8, device: u8, function: u8, offset: u8) -> u16 {
     ((val32 >> ((offset & 2) * 8)) & 0xFFFF) as u16
 }
 
-/// PCI Configuration Space に 32 ビット値を書き込む。
-///
-/// CONFIG_ADDRESS にアドレスを書き込み、CONFIG_DATA に 32 ビット書く。
-pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
-    let address: u32 = (1 << 31)
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | ((offset as u32) & 0xFC);
-
-    unsafe {
-        let mut addr_port = Port::<u32>::new(CONFIG_ADDRESS);
-        let mut data_port = Port::<u32>::new(CONFIG_DATA);
-        addr_port.write(address);
-        data_port.write(value);
-    }
-}
-
 /// BAR (Base Address Register) の値を読み取る。
 ///
 /// BAR は PCI デバイスが使用するメモリ領域または I/O ポート領域のベースアドレスを格納する。

@@ -167,15 +167,6 @@ const CHAR_WIDTH: usize = 8;
 const CHAR_HEIGHT: usize = 8;
 
 impl FramebufferWriter {
-    /// GOP から FramebufferWriter を作成する。
-    ///
-    /// GOP のフレームバッファに直接アクセスするため、
-    /// この関数で取得したポインタが有効な間だけ使える。
-    pub fn new(gop: &mut GraphicsOutput) -> Self {
-        let info = FramebufferInfo::from_gop(gop);
-        Self::from_info(info)
-    }
-
     /// 保存済みの FramebufferInfo から FramebufferWriter を作成する。
     /// Exit Boot Services 後にフレームバッファを使い続けるために使う。
     pub fn from_info(info: FramebufferInfo) -> Self {
