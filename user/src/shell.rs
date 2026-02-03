@@ -313,36 +313,33 @@ fn cmd_mem() {
 
     syscall::write_str("Memory Information:\n");
 
-    // 結果をパースして表示
+    // 結果をパースして表示（JSON）
     let len = result as usize;
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
-        // "key=value" 形式の行を整形して表示
-        for line in s.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                match key {
-                    "total_frames" => {
-                        syscall::write_str("  Total frames:     ");
-                        syscall::write_str(value);
-                        syscall::write_str("\n");
-                    }
-                    "allocated_frames" => {
-                        syscall::write_str("  Allocated frames: ");
-                        syscall::write_str(value);
-                        syscall::write_str("\n");
-                    }
-                    "free_frames" => {
-                        syscall::write_str("  Free frames:      ");
-                        syscall::write_str(value);
-                        syscall::write_str("\n");
-                    }
-                    "free_kib" => {
-                        syscall::write_str("  Free memory:      ");
-                        syscall::write_str(value);
-                        syscall::write_str(" KiB\n");
-                    }
-                    _ => {}
-                }
-            }
+        let total = json_find_u64(s, "total_frames");
+        let allocated = json_find_u64(s, "allocated_frames");
+        let free = json_find_u64(s, "free_frames");
+        let free_kib = json_find_u64(s, "free_kib");
+
+        if let Some(v) = total {
+            syscall::write_str("  Total frames:     ");
+            write_number(v);
+            syscall::write_str("\n");
+        }
+        if let Some(v) = allocated {
+            syscall::write_str("  Allocated frames: ");
+            write_number(v);
+            syscall::write_str("\n");
+        }
+        if let Some(v) = free {
+            syscall::write_str("  Free frames:      ");
+            write_number(v);
+            syscall::write_str("\n");
+        }
+        if let Some(v) = free_kib {
+            syscall::write_str("  Free memory:      ");
+            write_number(v);
+            syscall::write_str(" KiB\n");
         }
     }
 }
@@ -359,35 +356,54 @@ fn cmd_ps() {
         return;
     }
 
-    // 結果を表示（CSV 形式をテーブル形式に変換）
+    // 結果を表示（JSON 形式をテーブル形式に変換）
     let len = result as usize;
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
         // ヘッダを表示
         syscall::write_str("  ID  STATE       TYPE    NAME\n");
         syscall::write_str("  --  ----------  ------  ----------\n");
 
-        // 各行をパース（最初の行はヘッダなのでスキップ）
-        for (i, line) in s.lines().enumerate() {
-            if i == 0 {
-                continue;  // ヘッダ行をスキップ
+        let Some((tasks_start, tasks_end)) = json_find_array_bounds(s, "tasks") else {
+            return;
+        };
+
+        let mut i = tasks_start;
+        while i < tasks_end {
+            // 次のオブジェクト開始を探す
+            let bytes = s.as_bytes();
+            while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
+                i += 1;
+            }
+            if i >= tasks_end || bytes[i] == b']' {
+                break;
             }
 
-            // CSV 形式: id,state,type,name
-            let parts: [&str; 4] = parse_csv_line(line);
-            if parts[0].is_empty() {
-                continue;
+            let Some(obj_end) = find_matching_brace(s, i) else {
+                break;
+            };
+            if obj_end > tasks_end {
+                break;
             }
 
-            // 整形して表示
-            syscall::write_str("  ");
-            write_padded(parts[0], 2);   // ID
-            syscall::write_str("  ");
-            write_padded(parts[1], 10);  // STATE
-            syscall::write_str("  ");
-            write_padded(parts[2], 6);   // TYPE
-            syscall::write_str("  ");
-            syscall::write_str(parts[3]); // NAME
-            syscall::write_str("\n");
+            let obj = &s[i + 1..obj_end];
+            let id = json_find_u64(obj, "id");
+            let state = json_find_str(obj, "state");
+            let ty = json_find_str(obj, "type");
+            let name = json_find_str(obj, "name");
+
+            if let (Some(id), Some(state), Some(ty), Some(name)) = (id, state, ty, name) {
+                syscall::write_str("  ");
+                write_number(id);
+                syscall::write_str("  ");
+                write_padded(state, 10);
+                syscall::write_str("  ");
+                write_padded(ty, 6);
+                syscall::write_str("  ");
+                syscall::write_str(name);
+                syscall::write_str("\n");
+            }
+
+            i = obj_end + 1;
         }
     }
 }
@@ -661,18 +677,6 @@ fn parse_u64(s: &str) -> Option<u64> {
     Some(result)
 }
 
-/// CSV 行を4つのフィールドにパース
-///
-/// カンマで区切って最大4つのフィールドを返す。
-/// フィールドが足りない場合は空文字列になる。
-fn parse_csv_line(line: &str) -> [&str; 4] {
-    let mut parts = [""; 4];
-    for (i, part) in line.splitn(4, ',').enumerate() {
-        parts[i] = part;
-    }
-    parts
-}
-
 /// 文字列を指定幅で出力（左寄せ、スペースで埋める）
 fn write_padded(s: &str, width: usize) {
     syscall::write_str(s);
@@ -682,6 +686,153 @@ fn write_padded(s: &str, width: usize) {
             syscall::write_str(" ");
         }
     }
+}
+
+// =================================================================
+// JSON パーサ（最小実装）
+// =================================================================
+
+/// JSON のキーに対応する値の開始位置を返す
+fn json_find_key_value_start(s: &str, key: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut i = 0;
+    while i + key_bytes.len() + 2 <= bytes.len() {
+        if bytes[i] == b'"'
+            && bytes[i + 1..i + 1 + key_bytes.len()] == *key_bytes
+            && bytes[i + 1 + key_bytes.len()] == b'"'
+        {
+            let mut j = i + 1 + key_bytes.len() + 1;
+            // 空白をスキップ
+            while j < bytes.len() && is_json_space(bytes[j]) {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b':' {
+                j += 1;
+                while j < bytes.len() && is_json_space(bytes[j]) {
+                    j += 1;
+                }
+                return Some(j);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// JSON から数値を取り出す
+fn json_find_u64(s: &str, key: &str) -> Option<u64> {
+    let start = json_find_key_value_start(s, key)?;
+    let tail = &s[start..];
+    parse_u64_prefix(tail)
+}
+
+/// JSON から文字列を取り出す（エスケープは展開しない）
+fn json_find_str<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let start = json_find_key_value_start(s, key)?;
+    let bytes = s.as_bytes();
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut escape = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            escape = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            return Some(&s[start + 1..i]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// JSON 配列の範囲を取得する
+fn json_find_array_bounds(s: &str, key: &str) -> Option<(usize, usize)> {
+    let start = json_find_key_value_start(s, key)?;
+    let bytes = s.as_bytes();
+    if bytes.get(start) != Some(&b'[') {
+        return None;
+    }
+    let end = find_matching_delim(s, start, b'[', b']')?;
+    Some((start + 1, end))
+}
+
+/// { ... } の対応する } を探す
+fn find_matching_brace(s: &str, start: usize) -> Option<usize> {
+    find_matching_delim(s, start, b'{', b'}')
+}
+
+/// 対応する閉じ括弧を探す（最小実装）
+fn find_matching_delim(s: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.get(start) != Some(&open) {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b == open {
+            depth += 1;
+        } else if b == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// JSON の空白判定
+fn is_json_space(b: u8) -> bool {
+    b == b' ' || b == b'\n' || b == b'\r' || b == b'\t'
+}
+
+/// 文字列先頭の数値を u64 にパース
+fn parse_u64_prefix(s: &str) -> Option<u64> {
+    let mut result: u64 = 0;
+    let mut found = false;
+    for b in s.bytes() {
+        if b < b'0' || b > b'9' {
+            break;
+        }
+        found = true;
+        result = result.checked_mul(10)?;
+        result = result.checked_add((b - b'0') as u64)?;
+    }
+    if found { Some(result) } else { None }
 }
 
 /// 16 進数の 1 桁を出力
