@@ -1205,7 +1205,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 5. スケジューラのテスト
+        // 5. ハンドル open/read のテスト
+        if self.test_handle_open_read() {
+            Self::print_pass("handle_open");
+            passed += 1;
+        } else {
+            Self::print_fail("handle_open");
+            failed += 1;
+        }
+
+        // 6. スケジューラのテスト
         if self.test_scheduler() {
             Self::print_pass("scheduler");
             passed += 1;
@@ -1214,7 +1223,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 6. virtio-blk のテスト
+        // 7. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1223,7 +1232,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 7. FAT16 のテスト
+        // 8. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1232,7 +1241,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 8. ネットワーク (DNS) のテスト
+        // 9. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1410,6 +1419,66 @@ impl Shell {
         }
 
         true
+    }
+
+    /// ハンドル open/read のテスト
+    /// /proc/meminfo と HELLO.TXT を open して読めることを確認
+    fn test_handle_open_read(&self) -> bool {
+        use crate::handle::HANDLE_RIGHT_READ;
+
+        // /proc/meminfo を open
+        let handle = match crate::syscall::open_path_to_handle("/proc/meminfo", HANDLE_RIGHT_READ) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+
+        let mem = match self.read_all_handle(&handle) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+        let _ = crate::handle::close(&handle);
+
+        if !mem.contains(&b"\"total_frames\""[..]) {
+            return false;
+        }
+
+        // HELLO.TXT を open
+        let handle = match crate::syscall::open_path_to_handle("HELLO.TXT", HANDLE_RIGHT_READ) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+
+        let hello = match self.read_all_handle(&handle) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+        let _ = crate::handle::close(&handle);
+
+        hello.starts_with(b"Hello from FAT16!")
+    }
+
+    /// Handle から EOF まで読み取る
+    fn read_all_handle(&self, handle: &crate::handle::Handle) -> Result<Vec<u8>, crate::user_ptr::SyscallError> {
+        use alloc::vec::Vec;
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 256];
+
+        loop {
+            let n = crate::handle::read(handle, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+
+        Ok(out)
     }
 
     /// virtio-blk のテスト

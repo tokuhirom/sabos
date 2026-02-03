@@ -239,22 +239,39 @@ fn cmd_cat(args: &str) {
         &args  // とりあえずそのまま渡す（FAT16側で対応）
     };
 
-    let mut buf = [0u8; FILE_BUFFER_SIZE];
-    let result = syscall::file_read(path, &mut buf);
-
+    let mut handle = syscall::Handle { id: 0, token: 0 };
+    let result = syscall::open(path, syscall::HANDLE_RIGHT_READ, &mut handle);
     if result < 0 {
         syscall::write_str("Error: File not found or cannot be read\n");
         return;
     }
 
-    // ファイル内容を表示
-    let len = result as usize;
-    if len > 0 {
-        syscall::write(&buf[..len]);
-        // 最後が改行でなければ改行を追加
-        if buf[len - 1] != b'\n' {
-            syscall::write_str("\n");
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let mut last_byte: u8 = b'\n';
+    let mut read_any = false;
+
+    loop {
+        let n = syscall::handle_read(&handle, &mut buf);
+        if n < 0 {
+            syscall::write_str("Error: Failed to read file\n");
+            let _ = syscall::handle_close(&handle);
+            return;
         }
+        let n = n as usize;
+        if n == 0 {
+            break;
+        }
+
+        read_any = true;
+        last_byte = buf[n - 1];
+        syscall::write(&buf[..n]);
+    }
+
+    let _ = syscall::handle_close(&handle);
+
+    // 最後が改行でなければ改行を追加
+    if read_any && last_byte != b'\n' {
+        syscall::write_str("\n");
     }
 }
 

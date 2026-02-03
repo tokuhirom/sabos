@@ -10,6 +10,7 @@ mod elf;
 mod fat16;
 mod framebuffer;
 mod gdt;
+mod handle;
 mod interrupts;
 mod memory;
 mod paging;

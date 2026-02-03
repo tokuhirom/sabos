@@ -37,6 +37,7 @@ use core::arch::asm;
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
+/// - ファイルハンドル: 70-79
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
@@ -73,6 +74,25 @@ pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
+// ファイルハンドル (70-79)
+pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, rights)
+pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
+
+/// Handle の読み取り権限
+pub const HANDLE_RIGHT_READ: u32 = 0x01;
+/// Handle の書き込み権限
+pub const HANDLE_RIGHT_WRITE: u32 = 0x02;
+
+/// ユーザー空間に渡されるハンドル
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Handle {
+    pub id: u64,
+    pub token: u64,
+}
+
 /// システムコールの戻り値を表す型
 ///
 /// 正の値: 成功（戻り値）
@@ -88,6 +108,12 @@ pub const EINVAL: i64 = -22;   // 不正な引数
 pub const ENOENT: i64 = -2;    // ファイルが見つからない
 #[allow(dead_code)]
 pub const ENOSYS: i64 = -38;   // 未実装のシステムコール
+#[allow(dead_code)]
+pub const EREADONLY: i64 = -1001;       // 書き込み禁止
+#[allow(dead_code)]
+pub const EINVALID_HANDLE: i64 = -1002; // 不正なハンドル
+#[allow(dead_code)]
+pub const ENOT_SUPPORTED: i64 = -1003;  // 未対応
 
 /// 戻り値がエラーかどうかをチェック
 #[inline]
@@ -362,6 +388,45 @@ pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+// =================================================================
+// ハンドル関連
+// =================================================================
+
+/// ファイルを開いて Handle を取得する
+///
+/// # 引数
+/// - `path`: ファイルパス
+/// - `rights`: 権限ビット（HANDLE_RIGHT_READ など）
+/// - `handle_out`: 取得した Handle の書き込み先
+pub fn open(path: &str, rights: u32, handle_out: &mut Handle) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let handle_ptr = handle_out as *mut Handle as u64;
+    unsafe { syscall4(SYS_OPEN, path_ptr, path_len, handle_ptr, rights as u64) as i64 }
+}
+
+/// Handle から読み取る
+pub fn handle_read(handle: &Handle, buf: &mut [u8]) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_READ, handle_ptr, buf_ptr, buf_len) as i64 }
+}
+
+/// Handle に書き込む
+pub fn handle_write(handle: &Handle, buf: &[u8]) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    let buf_ptr = buf.as_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_WRITE, handle_ptr, buf_ptr, buf_len) as i64 }
+}
+
+/// Handle を閉じる
+pub fn handle_close(handle: &Handle) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    unsafe { syscall1(SYS_HANDLE_CLOSE, handle_ptr) as i64 }
 }
 
 // =================================================================

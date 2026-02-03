@@ -36,14 +36,20 @@ pub enum SyscallError {
     MisalignedPointer,
     /// 不正な引数
     InvalidArgument,
+    /// 書き込み禁止
+    ReadOnly,
     /// バッファがユーザー空間をオーバーフロー
     BufferOverflow,
     /// 不正な UTF-8 文字列
     InvalidUtf8,
     /// ファイルが見つからない
     FileNotFound,
+    /// 不正なハンドル
+    InvalidHandle,
     /// 不明なシステムコール
     UnknownSyscall,
+    /// 未対応
+    NotSupported,
     /// その他のエラー
     Other,
 }
@@ -59,10 +65,13 @@ impl SyscallError {
             SyscallError::InvalidAddress => -14,      // EFAULT
             SyscallError::MisalignedPointer => -22,   // EINVAL
             SyscallError::InvalidArgument => -22,     // EINVAL
+            SyscallError::ReadOnly => -1001,          // SABOS: ReadOnly
             SyscallError::BufferOverflow => -14,      // EFAULT
             SyscallError::InvalidUtf8 => -22,         // EINVAL
             SyscallError::FileNotFound => -2,         // ENOENT
+            SyscallError::InvalidHandle => -1002,     // SABOS: InvalidHandle
             SyscallError::UnknownSyscall => -38,      // ENOSYS
+            SyscallError::NotSupported => -1003,      // SABOS: NotSupported
             SyscallError::Other => -1,                // EPERM
         };
         code as u64

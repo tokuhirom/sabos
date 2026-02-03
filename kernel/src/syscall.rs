@@ -31,7 +31,8 @@
 
 use core::arch::global_asm;
 use alloc::string::String;
-use crate::user_ptr::{UserSlice, SyscallError};
+use alloc::vec::Vec;
+use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 
 /// システムコール番号の定義
 ///
@@ -43,6 +44,7 @@ use crate::user_ptr::{UserSlice, SyscallError};
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
+/// - ファイルハンドル: 70-79
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
@@ -78,6 +80,12 @@ pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
+
+// ファイルハンドル (70-79)
+pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, rights)
+pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
 
 // =================================================================
 // アセンブリエントリポイント
@@ -228,6 +236,11 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_TCP_SEND => sys_tcp_send(arg1, arg2),
         SYS_TCP_RECV => sys_tcp_recv(arg1, arg2, arg3),
         SYS_TCP_CLOSE => sys_tcp_close(),
+        // ハンドル
+        SYS_OPEN => sys_open(arg1, arg2, arg3, arg4),
+        SYS_HANDLE_READ => sys_handle_read(arg1, arg2, arg3),
+        SYS_HANDLE_WRITE => sys_handle_write(arg1, arg2, arg3),
+        SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         // システム制御
         SYS_HALT => sys_halt(),
         SYS_EXIT => {
@@ -381,7 +394,7 @@ fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sys
 
     // /proc 配下は読み取り専用
     if path.starts_with("/proc") {
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::ReadOnly);
     }
 
     // FAT16 にファイルを書き込む
@@ -389,6 +402,116 @@ fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sys
     fat16.create_file(path, data).map_err(|_| SyscallError::Other)?;
 
     Ok(data_len as u64)
+}
+
+// =================================================================
+// ハンドル関連システムコール
+// =================================================================
+
+/// SYS_OPEN: ファイルを開いて Handle を返す
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///   arg3 — Handle の書き込み先ポインタ（ユーザー空間）
+///   arg4 — rights（READ/WRITE 等のビット）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{self, Handle, HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE};
+
+    let path_len = arg2 as usize;
+    let rights = arg4 as u32;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // Handle の書き込み先
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg3)?;
+
+    // 現状は READ だけ許可
+    if (rights & HANDLE_RIGHT_READ) == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if (rights & HANDLE_RIGHT_WRITE) != 0 {
+        if path.starts_with("/proc") {
+            return Err(SyscallError::ReadOnly);
+        }
+        return Err(SyscallError::NotSupported);
+    }
+
+    let handle = open_path_to_handle(path, rights)?;
+    handle_ptr.write(handle);
+    Ok(0)
+}
+
+/// SYS_HANDLE_READ: Handle から読み取る
+///
+/// 引数:
+///   arg1 — Handle のポインタ（ユーザー空間）
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ
+///
+/// 戻り値:
+///   読み取ったバイト数（成功時）
+///   負の値（エラー時）
+fn sys_handle_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::Handle;
+
+    let buf_len = arg3 as usize;
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle = handle_ptr.read();
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let n = crate::handle::read(&handle, buf)?;
+    Ok(n as u64)
+}
+
+/// SYS_HANDLE_WRITE: Handle に書き込む
+///
+/// 引数:
+///   arg1 — Handle のポインタ（ユーザー空間）
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+fn sys_handle_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::Handle;
+
+    let buf_len = arg3 as usize;
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle = handle_ptr.read();
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf = buf_slice.as_slice();
+
+    let n = crate::handle::write(&handle, buf)?;
+    Ok(n as u64)
+}
+
+/// SYS_HANDLE_CLOSE: Handle を閉じる
+///
+/// 引数:
+///   arg1 — Handle のポインタ（ユーザー空間）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
+    use crate::handle::Handle;
+
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle = handle_ptr.read();
+
+    crate::handle::close(&handle)?;
+    Ok(0)
 }
 
 /// SYS_FILE_DELETE: ファイルを削除
@@ -409,7 +532,7 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 
     // /proc 配下は読み取り専用
     if path.starts_with("/proc") {
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::ReadOnly);
     }
 
     // FAT16 からファイルを削除
@@ -524,6 +647,40 @@ pub(crate) fn procfs_read(path: &str, buf: &mut [u8]) -> Result<usize, SyscallEr
         PROC_TASKS => Ok(write_task_list(buf)),
         _ => Err(SyscallError::FileNotFound),
     }
+}
+
+/// procfs の内容を Vec に読み取る（必要ならバッファを拡張）
+fn procfs_read_to_vec(path: &str) -> Result<Vec<u8>, SyscallError> {
+    let mut size = 256usize;
+    loop {
+        let mut buf = vec![0u8; size];
+        let written = procfs_read(path, &mut buf)?;
+        if written < size {
+            buf.truncate(written);
+            return Ok(buf);
+        }
+        size = size.saturating_mul(2);
+        if size > 64 * 1024 {
+            return Err(SyscallError::Other);
+        }
+    }
+}
+
+/// パスから Handle を作成する
+pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::handle::Handle, SyscallError> {
+    if path == PROC_ROOT || path == "/proc/" {
+        return Err(SyscallError::NotSupported);
+    }
+
+    if path.starts_with("/proc") {
+        let data = procfs_read_to_vec(path)?;
+        return Ok(crate::handle::create_handle(data, rights));
+    }
+
+    // FAT16 から読み取り
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    Ok(crate::handle::create_handle(data, rights))
 }
 
 /// procfs のディレクトリ一覧を取得する
