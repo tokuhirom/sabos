@@ -53,6 +53,12 @@ pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — �
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報
 
+// プロセス管理 (30-39)
+pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
+pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
+pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
+pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
+
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
@@ -414,4 +420,59 @@ pub fn get_net_info(buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall2(SYS_GET_NET_INFO, buf_ptr, buf_len) as i64 }
+}
+
+// =================================================================
+// プロセス管理関連
+// =================================================================
+
+/// プログラムを同期実行（フォアグラウンド）
+///
+/// # 引数
+/// - `path`: 実行する ELF ファイルのパス
+///
+/// # 戻り値
+/// - 0（成功時、プログラム終了後）
+/// - 負の値（エラー時）
+///
+/// 指定した ELF ファイルを読み込んで同期実行する。
+/// プログラムが終了するまでこの関数はブロックする。
+pub fn exec(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_EXEC, path_ptr, path_len) as i64 }
+}
+
+/// バックグラウンドでプロセスを起動
+///
+/// # 引数
+/// - `path`: 実行する ELF ファイルのパス
+///
+/// # 戻り値
+/// - タスク ID（成功時）
+/// - 負の値（エラー時）
+///
+/// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
+/// 即座に戻り、プロセスはスケジューラで管理される。
+pub fn spawn(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_SPAWN, path_ptr, path_len) as i64 }
+}
+
+/// CPU を譲る
+///
+/// 現在のタスクの実行を中断し、他の ready なタスクに CPU を譲る。
+pub fn yield_cpu() {
+    unsafe { syscall0(SYS_YIELD); }
+}
+
+/// 指定ミリ秒スリープ
+///
+/// # 引数
+/// - `ms`: スリープ時間（ミリ秒）
+///
+/// 指定した時間だけ現在のタスクをスリープ状態にする。
+pub fn sleep(ms: u64) {
+    unsafe { syscall1(SYS_SLEEP, ms); }
 }

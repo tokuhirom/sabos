@@ -30,6 +30,7 @@
 // - SyscallError で明確なエラー型: 生の数値ではなく型付きエラーを使用
 
 use core::arch::global_asm;
+use alloc::string::String;
 use crate::user_ptr::{UserSlice, SyscallError};
 
 /// システムコール番号の定義
@@ -57,6 +58,12 @@ pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, bu
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報取得
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧取得
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報取得
+
+// プロセス管理 (30-39)
+pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
+pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
+pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
+pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
@@ -198,6 +205,11 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_GET_MEM_INFO => sys_get_mem_info(arg1, arg2),
         SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
         SYS_GET_NET_INFO => sys_get_net_info(arg1, arg2),
+        // プロセス管理
+        SYS_EXEC => sys_exec(arg1, arg2),
+        SYS_SPAWN => sys_spawn(arg1, arg2),
+        SYS_YIELD => sys_yield(),
+        SYS_SLEEP => sys_sleep(arg1),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
@@ -568,6 +580,118 @@ fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     }
 
     Ok(writer.written() as u64)
+}
+
+// =================================================================
+// プロセス管理関連システムコール
+// =================================================================
+
+/// SYS_EXEC: プログラムを同期実行（フォアグラウンド）
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///
+/// 戻り値:
+///   0（成功時、プログラム終了後）
+///   負の値（エラー時）
+///
+/// 指定した ELF ファイルを読み込んで同期実行する。
+/// プログラムが終了するまでこのシステムコールはブロックする。
+fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // ファイル名を大文字に変換（FAT16 は大文字のみ）
+    let path_upper: String = path.chars()
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+
+    // FAT16 からファイルを読み込む
+    let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
+
+    // ELF プロセスを作成
+    let (process, entry_point, user_stack_top) =
+        crate::usermode::create_elf_process(&elf_data).map_err(|_| SyscallError::Other)?;
+
+    // Ring 3 で同期実行（完了するまでブロック）
+    crate::usermode::run_elf_process(&process, entry_point, user_stack_top);
+
+    // プロセスを破棄
+    crate::usermode::destroy_user_process(process);
+
+    Ok(0)
+}
+
+/// SYS_SPAWN: バックグラウンドでプロセスを起動
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///
+/// 戻り値:
+///   タスク ID（成功時）
+///   負の値（エラー時）
+///
+/// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
+/// 即座に戻り、プロセスはスケジューラで管理される。
+fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // ファイル名を大文字に変換（FAT16 は大文字のみ）
+    let path_upper: String = path.chars()
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+
+    // プロセス名を作成（パスからファイル名部分を抽出）
+    let process_name = path_upper
+        .rsplit('/')
+        .next()
+        .unwrap_or(&path_upper);
+
+    // FAT16 からファイルを読み込む
+    let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
+
+    // スケジューラにユーザープロセスとして登録
+    let task_id = crate::scheduler::spawn_user(process_name, &elf_data)
+        .map_err(|_| SyscallError::Other)?;
+
+    Ok(task_id)
+}
+
+/// SYS_YIELD: CPU を譲る
+///
+/// 戻り値:
+///   0（常に成功）
+///
+/// 現在のタスクの実行を中断し、他の ready なタスクに CPU を譲る。
+fn sys_yield() -> Result<u64, SyscallError> {
+    crate::scheduler::yield_now();
+    Ok(0)
+}
+
+/// SYS_SLEEP: 指定ミリ秒スリープ
+///
+/// 引数:
+///   arg1 — スリープ時間（ミリ秒）
+///
+/// 戻り値:
+///   0（成功時）
+///
+/// 指定した時間だけ現在のタスクをスリープ状態にする。
+fn sys_sleep(arg1: u64) -> Result<u64, SyscallError> {
+    let ms = arg1;
+    crate::scheduler::sleep_ms(ms);
+    Ok(0)
 }
 
 // =================================================================

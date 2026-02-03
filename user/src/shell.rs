@@ -16,6 +16,9 @@
 // - mem: メモリ情報を表示
 // - ps: タスク一覧を表示
 // - ip: ネットワーク情報を表示
+// - run <file>: ELF プログラムをフォアグラウンドで実行
+// - spawn <file>: ELF プログラムをバックグラウンドで実行
+// - sleep <ms>: 指定ミリ秒スリープ
 
 use crate::syscall;
 
@@ -124,6 +127,9 @@ fn execute_command(line: &[u8]) {
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
         "ip" => cmd_ip(),
+        "run" => cmd_run(args),
+        "spawn" => cmd_spawn(args),
+        "sleep" => cmd_sleep(args),
         "" => {}  // 空のコマンドは無視
         _ => {
             syscall::write_str("Unknown command: ");
@@ -164,6 +170,9 @@ fn cmd_help() {
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
     syscall::write_str("  ip                - Show network information\n");
+    syscall::write_str("  run <file>        - Run ELF program (foreground)\n");
+    syscall::write_str("  spawn <file>      - Run ELF program (background)\n");
+    syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("\n");
 }
 
@@ -419,8 +428,133 @@ fn cmd_ip() {
 }
 
 // =================================================================
+// プロセス実行コマンド
+// =================================================================
+
+/// run コマンド: ELF プログラムをフォアグラウンドで実行
+///
+/// 指定した ELF ファイルを読み込んで同期実行する。
+/// プログラムが終了するまでシェルはブロックする。
+fn cmd_run(args: &str) {
+    let filename = args.trim();
+    if filename.is_empty() {
+        syscall::write_str("Usage: run <FILENAME>\n");
+        syscall::write_str("  Example: run HELLO.ELF\n");
+        return;
+    }
+
+    syscall::write_str("Running ");
+    syscall::write_str(filename);
+    syscall::write_str("...\n");
+
+    let result = syscall::exec(filename);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to run program\n");
+        return;
+    }
+
+    syscall::write_str("Program exited.\n");
+}
+
+/// spawn コマンド: ELF プログラムをバックグラウンドで実行
+///
+/// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
+/// 即座にシェルに戻り、プログラムはスケジューラで管理される。
+fn cmd_spawn(args: &str) {
+    let filename = args.trim();
+    if filename.is_empty() {
+        syscall::write_str("Usage: spawn <FILENAME>\n");
+        syscall::write_str("  Example: spawn HELLO.ELF\n");
+        syscall::write_str("  The process runs in the background. Use 'ps' to see tasks.\n");
+        return;
+    }
+
+    syscall::write_str("Spawning ");
+    syscall::write_str(filename);
+    syscall::write_str("...\n");
+
+    let result = syscall::spawn(filename);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to spawn process\n");
+        return;
+    }
+
+    syscall::write_str("Process spawned as task ");
+    write_number(result as u64);
+    syscall::write_str(" (background)\n");
+    syscall::write_str("Use 'ps' to see running tasks.\n");
+}
+
+/// sleep コマンド: 指定ミリ秒スリープ
+fn cmd_sleep(args: &str) {
+    let ms_str = args.trim();
+    if ms_str.is_empty() {
+        syscall::write_str("Usage: sleep <milliseconds>\n");
+        syscall::write_str("  Example: sleep 1000  (sleep for 1 second)\n");
+        return;
+    }
+
+    // 文字列を数値に変換
+    let ms = match parse_u64(ms_str) {
+        Some(n) => n,
+        None => {
+            syscall::write_str("Error: Invalid number\n");
+            return;
+        }
+    };
+
+    syscall::write_str("Sleeping for ");
+    write_number(ms);
+    syscall::write_str(" ms...\n");
+
+    syscall::sleep(ms);
+
+    syscall::write_str("Done.\n");
+}
+
+// =================================================================
 // ユーティリティ関数
 // =================================================================
+
+/// 数値を文字列として出力
+fn write_number(n: u64) {
+    if n == 0 {
+        syscall::write_str("0");
+        return;
+    }
+
+    // 数字を逆順に格納
+    let mut buf = [0u8; 20];  // u64 最大は 20 桁
+    let mut i = 0;
+    let mut num = n;
+
+    while num > 0 {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+
+    // 逆順に出力
+    while i > 0 {
+        i -= 1;
+        syscall::write(&[buf[i]]);
+    }
+}
+
+/// 文字列を u64 にパース
+fn parse_u64(s: &str) -> Option<u64> {
+    let mut result: u64 = 0;
+    for c in s.chars() {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?;
+        result = result.checked_add((c as u64) - ('0' as u64))?;
+    }
+    Some(result)
+}
 
 /// CSV 行を4つのフィールドにパース
 ///
