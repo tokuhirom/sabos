@@ -58,6 +58,7 @@ pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, bu
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報取得
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧取得
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報取得
+pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -215,6 +216,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_GET_MEM_INFO => sys_get_mem_info(arg1, arg2),
         SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
         SYS_GET_NET_INFO => sys_get_net_info(arg1, arg2),
+        SYS_PCI_CONFIG_READ => sys_pci_config_read(arg1, arg2, arg3, arg4),
         // プロセス管理
         SYS_EXEC => sys_exec(arg1, arg2),
         SYS_SPAWN => sys_spawn(arg1, arg2),
@@ -598,6 +600,73 @@ fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     }
 
     Ok(writer.written() as u64)
+}
+
+/// SYS_PCI_CONFIG_READ: PCI Configuration Space を読み取る
+///
+/// 引数:
+///   arg1 — バス番号 (0-255)
+///   arg2 — デバイス番号 (0-31)
+///   arg3 — ファンクション番号 (0-7)
+///   arg4 — offset と size を詰めた値
+///          - 下位 8 ビット: offset
+///          - 上位 8 ビット: size (1/2/4)
+///
+/// 戻り値:
+///   読み取った値（下位 32 ビットに格納）
+///   負の値（エラー時）
+fn sys_pci_config_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let bus = arg1 as u8;
+    let device = arg2 as u8;
+    let function = arg3 as u8;
+
+    // arg4 の下位 16 ビットに offset/size を詰める
+    let offset = (arg4 & 0xFF) as u8;
+    let size = ((arg4 >> 8) & 0xFF) as u8;
+
+    // 余分なビットが立っている場合は不正扱い
+    if (arg4 >> 16) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // 範囲チェック
+    if arg1 > 0xFF || arg2 > 31 || arg3 > 7 || offset > 0xFF {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // サイズとアライメントのチェック
+    match size {
+        1 => {}
+        2 => {
+            if (offset & 1) != 0 || offset > 0xFE {
+                return Err(SyscallError::InvalidArgument);
+            }
+        }
+        4 => {
+            if (offset & 3) != 0 || offset > 0xFC {
+                return Err(SyscallError::InvalidArgument);
+            }
+        }
+        _ => {
+            return Err(SyscallError::InvalidArgument);
+        }
+    }
+
+    let val32 = crate::pci::pci_config_read32(bus, device, function, offset & 0xFC);
+    let value = match size {
+        1 => {
+            let shift = (offset & 3) * 8;
+            (val32 >> shift) & 0xFF
+        }
+        2 => {
+            let shift = (offset & 2) * 8;
+            (val32 >> shift) & 0xFFFF
+        }
+        4 => val32,
+        _ => 0,
+    };
+
+    Ok(value as u64)
 }
 
 // =================================================================

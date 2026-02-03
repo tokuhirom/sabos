@@ -52,6 +52,7 @@ pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, bu
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報
+pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -430,6 +431,22 @@ pub fn get_net_info(buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall2(SYS_GET_NET_INFO, buf_ptr, buf_len) as i64 }
+}
+
+/// PCI Configuration Space を読み取る
+///
+/// size は 1/2/4 のみ許可。戻り値は下位 32 ビットに格納される。
+pub fn pci_config_read(bus: u8, device: u8, function: u8, offset: u8, size: u8) -> SyscallResult {
+    let packed = (offset as u64) | ((size as u64) << 8);
+    unsafe {
+        syscall4(
+            SYS_PCI_CONFIG_READ,
+            bus as u64,
+            device as u64,
+            function as u64,
+            packed,
+        ) as i64
+    }
 }
 
 // =================================================================

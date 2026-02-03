@@ -1187,7 +1187,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 3. スケジューラのテスト
+        // 3. PCI 列挙のテスト
+        if self.test_pci_enum() {
+            Self::print_pass("pci_enum");
+            passed += 1;
+        } else {
+            Self::print_fail("pci_enum");
+            failed += 1;
+        }
+
+        // 4. スケジューラのテスト
         if self.test_scheduler() {
             Self::print_pass("scheduler");
             passed += 1;
@@ -1196,7 +1205,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 4. virtio-blk のテスト
+        // 5. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1205,7 +1214,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 5. FAT16 のテスト
+        // 6. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1214,7 +1223,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 6. ネットワーク (DNS) のテスト
+        // 7. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1319,6 +1328,29 @@ impl Shell {
         }
 
         false
+    }
+
+    /// PCI 列挙のテスト
+    /// バス 0 に 1 つ以上のデバイスが存在することを確認する
+    fn test_pci_enum(&self) -> bool {
+        let devices = crate::pci::enumerate_bus();
+        if devices.is_empty() {
+            return false;
+        }
+
+        // 取得したベンダー ID が妥当か確認（0xFFFF は空スロット）
+        for dev in devices {
+            if dev.vendor_id == 0xFFFF {
+                return false;
+            }
+
+            let vid = crate::pci::pci_config_read16(dev.bus, dev.device, dev.function, 0x00);
+            if vid != dev.vendor_id {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// virtio-blk のテスト

@@ -16,6 +16,7 @@
 // - mem: メモリ情報を表示
 // - ps: タスク一覧を表示
 // - ip: ネットワーク情報を表示
+// - lspci: PCI デバイス一覧を表示
 // - run <file>: ELF プログラムをフォアグラウンドで実行
 // - spawn <file>: ELF プログラムをバックグラウンドで実行
 // - sleep <ms>: 指定ミリ秒スリープ
@@ -130,6 +131,7 @@ fn execute_command(line: &[u8]) {
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
         "ip" => cmd_ip(),
+        "lspci" => cmd_lspci(),
         "run" => cmd_run(args),
         "spawn" => cmd_spawn(args),
         "sleep" => cmd_sleep(args),
@@ -176,6 +178,7 @@ fn cmd_help() {
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
     syscall::write_str("  ip                - Show network information\n");
+    syscall::write_str("  lspci             - List PCI devices\n");
     syscall::write_str("  run <file>        - Run ELF program (foreground)\n");
     syscall::write_str("  spawn <file>      - Run ELF program (background)\n");
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
@@ -436,6 +439,99 @@ fn cmd_ip() {
     }
 }
 
+/// lspci コマンド: PCI デバイス一覧を表示
+///
+/// PCI Configuration Space を読み取って、バス 0 のデバイスを列挙する。
+/// 直接 I/O ポートを叩かず、システムコール経由で読み取る。
+fn cmd_lspci() {
+    syscall::write_str("PCI devices on bus 0:\n");
+    syscall::write_str("  BDF       Vendor Device Class\n");
+    syscall::write_str("  --------- ------ ------ --------\n");
+
+    let mut count: u64 = 0;
+
+    for device in 0..32u8 {
+        // ファンクション 0 のベンダー ID で存在確認
+        let vendor0 = match pci_config_read_u16(0, device, 0, 0x00) {
+            Some(v) => v,
+            None => {
+                syscall::write_str("Error: PCI config read failed\n");
+                return;
+            }
+        };
+        if vendor0 == 0xFFFF {
+            continue;
+        }
+
+        // ヘッダータイプでマルチファンクション判定
+        let header_type = match pci_config_read_u8(0, device, 0, 0x0E) {
+            Some(v) => v,
+            None => {
+                syscall::write_str("Error: PCI config read failed\n");
+                return;
+            }
+        };
+        let is_multi = (header_type & 0x80) != 0;
+        let max_func = if is_multi { 8 } else { 1 };
+
+        for function in 0..max_func {
+            let vendor_id = match pci_config_read_u16(0, device, function, 0x00) {
+                Some(v) => v,
+                None => {
+                    syscall::write_str("Error: PCI config read failed\n");
+                    return;
+                }
+            };
+            if vendor_id == 0xFFFF {
+                continue;
+            }
+
+            let device_id = match pci_config_read_u16(0, device, function, 0x02) {
+                Some(v) => v,
+                None => {
+                    syscall::write_str("Error: PCI config read failed\n");
+                    return;
+                }
+            };
+
+            let class_reg = match pci_config_read_u32(0, device, function, 0x08) {
+                Some(v) => v,
+                None => {
+                    syscall::write_str("Error: PCI config read failed\n");
+                    return;
+                }
+            };
+            let class_code = ((class_reg >> 24) & 0xFF) as u8;
+            let subclass = ((class_reg >> 16) & 0xFF) as u8;
+            let prog_if = ((class_reg >> 8) & 0xFF) as u8;
+
+            syscall::write_str("  ");
+            write_hex_u8(0);
+            syscall::write_str(":");
+            write_hex_u8(device);
+            syscall::write_str(".");
+            write_number(function as u64);
+            syscall::write_str("   ");
+            write_hex_u16(vendor_id);
+            syscall::write_str("   ");
+            write_hex_u16(device_id);
+            syscall::write_str("   ");
+            write_hex_u8(class_code);
+            syscall::write_str(":");
+            write_hex_u8(subclass);
+            syscall::write_str(".");
+            write_hex_u8(prog_if);
+            syscall::write_str("\n");
+
+            count += 1;
+        }
+    }
+
+    syscall::write_str("  Total: ");
+    write_number(count);
+    syscall::write_str(" devices\n");
+}
+
 // =================================================================
 // プロセス実行コマンド
 // =================================================================
@@ -585,6 +681,54 @@ fn write_padded(s: &str, width: usize) {
         for _ in 0..(width - len) {
             syscall::write_str(" ");
         }
+    }
+}
+
+/// 16 進数の 1 桁を出力
+fn write_hex_digit(v: u8) {
+    let c = if v < 10 { b'0' + v } else { b'a' + (v - 10) };
+    syscall::write(&[c]);
+}
+
+/// 16 進数の 2 桁を出力（u8）
+fn write_hex_u8(v: u8) {
+    write_hex_digit((v >> 4) & 0x0F);
+    write_hex_digit(v & 0x0F);
+}
+
+/// 16 進数の 4 桁を出力（u16）
+fn write_hex_u16(v: u16) {
+    write_hex_u8((v >> 8) as u8);
+    write_hex_u8((v & 0xFF) as u8);
+}
+
+/// PCI Configuration Space を 1 バイト読み取る
+fn pci_config_read_u8(bus: u8, device: u8, function: u8, offset: u8) -> Option<u8> {
+    let result = syscall::pci_config_read(bus, device, function, offset, 1);
+    if result < 0 {
+        None
+    } else {
+        Some(result as u8)
+    }
+}
+
+/// PCI Configuration Space を 2 バイト読み取る
+fn pci_config_read_u16(bus: u8, device: u8, function: u8, offset: u8) -> Option<u16> {
+    let result = syscall::pci_config_read(bus, device, function, offset, 2);
+    if result < 0 {
+        None
+    } else {
+        Some(result as u16)
+    }
+}
+
+/// PCI Configuration Space を 4 バイト読み取る
+fn pci_config_read_u32(bus: u8, device: u8, function: u8, offset: u8) -> Option<u32> {
+    let result = syscall::pci_config_read(bus, device, function, offset, 4);
+    if result < 0 {
+        None
+    } else {
+        Some(result as u32)
     }
 }
 

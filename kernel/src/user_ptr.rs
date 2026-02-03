@@ -34,6 +34,8 @@ pub enum SyscallError {
     InvalidAddress,
     /// アラインメントが不正
     MisalignedPointer,
+    /// 不正な引数
+    InvalidArgument,
     /// バッファがユーザー空間をオーバーフロー
     BufferOverflow,
     /// 不正な UTF-8 文字列
@@ -56,6 +58,7 @@ impl SyscallError {
             SyscallError::NullPointer => -1,
             SyscallError::InvalidAddress => -14,      // EFAULT
             SyscallError::MisalignedPointer => -22,   // EINVAL
+            SyscallError::InvalidArgument => -22,     // EINVAL
             SyscallError::BufferOverflow => -14,      // EFAULT
             SyscallError::InvalidUtf8 => -22,         // EINVAL
             SyscallError::FileNotFound => -2,         // ENOENT
