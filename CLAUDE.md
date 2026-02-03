@@ -4,6 +4,45 @@
 
 SABOS は x86_64 向け自作OS。Rust (no_std) + UEFI で構築する。
 
+## Design Philosophy
+
+SABOS はセキュリティと型安全性を重視した設計を採用する。
+
+### 基本原則
+
+1. **POSIX 互換は目指さない**
+   - レガシーな制約に縛られず、より良い API を設計する
+   - 必要に応じて独自のシステムコール体系を構築する
+
+2. **null 終端文字列をカーネル API から排除する**
+   - すべての文字列・バッファは長さ付き（スライス形式）で渡す
+   - バッファオーバーフローを構造的に防止する
+   - 例: `(ptr, len)` 形式を使い、C の `char*` 形式は使わない
+
+3. **システムコール境界で型安全性を保証する**
+   - ユーザー空間からのポインタは `UserPtr<T>` / `UserSlice<T>` でラップする
+   - カーネル側で必ず検証してからアクセスする
+   - 不正なアドレスはコンパイル時または実行時に弾く
+
+4. **Rust のメモリ安全性をカーネルレベルで活かす**
+   - `unsafe` ブロックは最小限に閉じ込める
+   - 所有権システムでリソースリークを防止する
+   - 生ポインタ操作は明示的な型でラップする
+
+### システムコール設計指針
+
+```rust
+// NG: POSIX 風（危険）
+ssize_t write(int fd, const void *buf, size_t count);
+
+// OK: SABOS 風（型安全）
+struct WriteArgs {
+    handle: Handle,       // fd の代わりに型付きハンドル
+    buf: UserSlice<u8>,   // 検証済みユーザー空間スライス
+}
+fn sys_write(args: &WriteArgs) -> Result<usize, SyscallError>;
+```
+
 ## Build & Run
 
 ```bash
