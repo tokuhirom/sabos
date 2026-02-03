@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod allocator;
+mod console;
 mod elf;
 mod fat16;
 mod framebuffer;

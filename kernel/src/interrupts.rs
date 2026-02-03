@@ -303,7 +303,11 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
 
 /// IRQ 1: キーボード割り込みハンドラ。
 /// PS/2 キーボードからスキャンコードが I/O ポート 0x60 に届く。
-/// スキャンコードを読み取って文字に変換し、画面に表示する。
+/// スキャンコードを読み取って文字に変換し、入力バッファに追加する。
+///
+/// 入力は2箇所に通知される:
+/// 1. KEY_QUEUE — カーネルシェル用（後方互換性）
+/// 2. console::push_input_char() — ユーザー空間 SYS_READ 用
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use pc_keyboard::{layouts, DecodedKey, HandleControl, Keyboard, ScancodeSet1};
     use x86_64::instructions::port::Port;
@@ -335,9 +339,10 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         if let Some(key) = keyboard.process_keyevent(key_event) {
             match key {
                 DecodedKey::Unicode(character) => {
-                    // 文字をキー入力キューに追加する。
-                    // シェルのメインループがここから読み取って処理する。
+                    // 文字をキー入力キューに追加する（カーネルシェル用）
                     KEY_QUEUE.lock().push_back(character);
+                    // コンソール入力バッファにも追加（ユーザー空間 SYS_READ 用）
+                    crate::console::push_input_char(character);
                 }
                 DecodedKey::RawKey(key) => {
                     // 特殊キー（矢印キー、F1-F12等）は今は無視。

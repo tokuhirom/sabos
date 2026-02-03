@@ -42,6 +42,7 @@ use crate::user_ptr::{UserSlice, SyscallError};
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
+pub const SYS_READ: u64 = 0;   // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
 pub const SYS_EXIT: u64 = 60;  // exit() — ユーザープログラムを終了してカーネルに戻る
 
@@ -159,6 +160,7 @@ extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64) -> u64 {
 /// ? 演算子でエラーを早期リターンできる。
 fn dispatch_inner(nr: u64, arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     match nr {
+        SYS_READ => sys_read(arg1, arg2),
         SYS_WRITE => sys_write(arg1, arg2),
         SYS_EXIT => {
             // exit()
@@ -174,6 +176,37 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
             Err(SyscallError::UnknownSyscall)
         }
     }
+}
+
+/// SYS_READ: コンソールから読み取り
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ（最大読み取りバイト数）
+///
+/// 戻り値:
+///   読み取ったバイト数
+///
+/// 少なくとも1バイト読み取れるまでブロックする。
+/// その後、利用可能なデータがあれば最大 len バイトまで読み取って返す。
+fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let len = arg2 as usize;
+
+    // 長さ 0 の場合は何もしない
+    if len == 0 {
+        return Ok(0);
+    }
+
+    // UserSlice で型安全にユーザー空間のバッファを取得
+    let user_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+
+    // 可変スライスとしてアクセス（書き込み用）
+    let buf = user_slice.as_mut_slice();
+
+    // コンソール入力バッファから読み取り（ブロッキング）
+    let bytes_read = crate::console::read_input(buf, len);
+
+    Ok(bytes_read as u64)
 }
 
 /// SYS_WRITE: コンソールに文字列を出力

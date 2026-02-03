@@ -37,8 +37,9 @@ use core::arch::asm;
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
-pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len)
-pub const SYS_EXIT: u64 = 60;  // exit()
+pub const SYS_READ: u64 = 0;   // read(buf_ptr, len) — コンソールから読み取り
+pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — コンソールに出力
+pub const SYS_EXIT: u64 = 60;  // exit() — プログラム終了
 
 /// システムコールの戻り値を表す型
 ///
@@ -169,6 +170,43 @@ unsafe fn syscall4(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
 // =================================================================
 // 高レベル API: ユーザーが使うラッパー関数
 // =================================================================
+
+/// コンソールからバイト列を読み取る
+///
+/// # 引数
+/// - `buf`: 読み取ったデータを格納するバッファ
+///
+/// # 戻り値
+/// - 読み取ったバイト数（成功時）
+/// - 負の値（エラー時）
+///
+/// # 動作
+/// - 少なくとも1バイト読み取れるまでブロックする
+/// - その後、利用可能なデータがあれば最大 buf.len() バイトまで読み取る
+///
+/// # 例
+/// ```
+/// let mut buf = [0u8; 64];
+/// let n = read(&mut buf);
+/// if n > 0 {
+///     // buf[0..n] に読み取ったデータが入っている
+/// }
+/// ```
+pub fn read(buf: &mut [u8]) -> SyscallResult {
+    let ptr = buf.as_mut_ptr() as u64;
+    let len = buf.len() as u64;
+    unsafe { syscall2(SYS_READ, ptr, len) as i64 }
+}
+
+/// コンソールから1文字を読み取る
+///
+/// 1文字読み取れるまでブロックする。
+/// 非 ASCII 文字は '?' に置換される。
+pub fn read_char() -> char {
+    let mut buf = [0u8; 1];
+    read(&mut buf);
+    buf[0] as char
+}
 
 /// コンソールにバイト列を出力する
 ///
