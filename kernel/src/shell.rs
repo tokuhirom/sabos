@@ -105,6 +105,7 @@ impl Shell {
             "write" => self.cmd_write(args),
             "rm" => self.cmd_rm(args),
             "run" => self.cmd_run(args),
+            "spawn" => self.cmd_spawn(args),
             "netpoll" => self.cmd_netpoll(args),
             "ip" => self.cmd_ip(),
             "panic" => self.cmd_panic(),
@@ -139,6 +140,7 @@ impl Shell {
         kprintln!("  write <name> <text> - Create a file with text content");
         kprintln!("  rm <name>       - Delete a file");
         kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
+        kprintln!("  spawn <path>    - Spawn ELF as background process (e.g., spawn HELLO.ELF)");
         kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
         kprintln!("  ip              - Show IP configuration");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
@@ -218,8 +220,8 @@ impl Shell {
     /// ps コマンド: タスク一覧を表示する。
     fn cmd_ps(&self) {
         let tasks = scheduler::task_list();
-        kprintln!("  ID  STATE       NAME");
-        kprintln!("  --  ----------  ----------");
+        kprintln!("  ID  STATE       TYPE    NAME");
+        kprintln!("  --  ----------  ------  ----------");
         for t in &tasks {
             let state_str = match t.state {
                 scheduler::TaskState::Ready => "Ready",
@@ -227,9 +229,12 @@ impl Shell {
                 scheduler::TaskState::Sleeping(_) => "Sleeping",
                 scheduler::TaskState::Finished => "Finished",
             };
-            kprintln!("  {:2}  {:10}  {}", t.id, state_str, t.name);
+            let type_str = if t.is_user_process { "user" } else { "kernel" };
+            kprintln!("  {:2}  {:10}  {:6}  {}", t.id, state_str, type_str, t.name);
         }
-        kprintln!("  Total: {} tasks", tasks.len());
+        // 終了済みタスクを除いた数を表示
+        let active = tasks.iter().filter(|t| t.state != scheduler::TaskState::Finished).count();
+        kprintln!("  Total: {} tasks ({} active)", tasks.len(), active);
     }
 
     /// echo コマンド: 引数をそのまま出力する。
@@ -870,6 +875,72 @@ impl Shell {
             fa.free_frames()
         };
         kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
+    }
+
+    /// spawn コマンド: FAT16 ディスクから ELF バイナリを読み込んで、
+    /// バックグラウンドでユーザープロセスとして実行する。
+    ///
+    /// run コマンドと異なり、プロセスはブロックせずに即座に戻る。
+    /// プロセスはスケジューラに登録され、タイムスライスで他のタスクと並行実行される。
+    ///
+    /// 使い方: spawn HELLO.ELF
+    fn cmd_spawn(&self, args: &str) {
+        let filename = args.trim();
+        if filename.is_empty() {
+            kprintln!("Usage: spawn <FILENAME>");
+            kprintln!("  Example: spawn HELLO.ELF");
+            kprintln!("  The process runs in the background. Use 'ps' to see tasks.");
+            return;
+        }
+
+        // ファイル名を大文字に変換（FAT16 は大文字のみ）
+        let filename_upper: alloc::string::String = filename.chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        // FAT16 からファイルを読み込む
+        kprintln!("Loading {} from disk...", filename_upper);
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        let elf_data = match fs.read_file(&filename_upper) {
+            Ok(data) => data,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error reading file: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+        kprintln!("  Loaded {} bytes", elf_data.len());
+
+        // プロセス名を作成（パスからファイル名部分を抽出）
+        let process_name = filename_upper
+            .rsplit('/')
+            .next()
+            .unwrap_or(&filename_upper);
+
+        // ユーザープロセスとして spawn
+        match scheduler::spawn_user(process_name, &elf_data) {
+            Ok(task_id) => {
+                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                kprintln!("Process '{}' spawned as task {} (background)", process_name, task_id);
+                kprintln!("Use 'ps' to see running tasks.");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Failed to spawn process: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
     }
 
     /// netpoll コマンド: ネットワークパケットをポーリングして処理する。

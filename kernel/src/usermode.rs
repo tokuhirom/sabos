@@ -203,7 +203,9 @@ unsafe extern "C" {
     /// アセンブリで定義した Ring 3 遷移関数。
     /// Microsoft x64 ABI: jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top)
     /// user_ss はアセンブリ内で user_cs - 8 から計算する。
-    fn jump_to_usermode(
+    ///
+    /// この関数は scheduler モジュールからも使用される（マルチプロセス対応）。
+    pub fn jump_to_usermode(
         entry_addr: u64,
         user_cs: u64,
         rflags: u64,
