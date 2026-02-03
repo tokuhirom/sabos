@@ -381,8 +381,12 @@ pub fn yield_now() {
 
     match switch_info {
         None => {
-            // 切り替え先がない → そのまま戻る
-            x86_64::instructions::interrupts::enable();
+            // 切り替え先がない。
+            // 全タスクが Sleeping の場合、割り込みを有効化して hlt で待機する。
+            // enable_and_hlt() はアトミックに sti + hlt を実行するため、
+            // 「割り込み有効化→hlt の間にタイマー割り込みを取りこぼす」レースを防ぐ。
+            // タイマー割り込みが発火すると preempt() が Sleeping タスクの起床をチェックする。
+            x86_64::instructions::interrupts::enable_and_hlt();
         }
         Some((old_rsp_ptr, new_rsp)) => {
             // コンテキストスイッチを実行。

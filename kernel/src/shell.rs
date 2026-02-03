@@ -99,6 +99,8 @@ impl Shell {
             "elf" => self.cmd_elf(),
             "lspci" => self.cmd_lspci(),
             "blkread" => self.cmd_blkread(args),
+            "ls" => self.cmd_ls(),
+            "cat" => self.cmd_cat(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -125,6 +127,8 @@ impl Shell {
         kprintln!("  elf             - Load and run an ELF binary in user mode");
         kprintln!("  lspci           - List PCI devices");
         kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
+        kprintln!("  ls              - List files on FAT16 disk");
+        kprintln!("  cat <file>      - Display file contents from FAT16 disk");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -473,6 +477,89 @@ impl Shell {
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
                 kprintln!("Read error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
+    }
+
+    /// ls コマンド: FAT16 ディスクのルートディレクトリにあるファイル一覧を表示する。
+    fn cmd_ls(&self) {
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        match fs.list_root_dir() {
+            Ok(entries) => {
+                kprintln!("  Name          Size     Attr");
+                kprintln!("  ------------- -------- ----");
+                for entry in &entries {
+                    let attr_str = if entry.attr & 0x10 != 0 {
+                        "<DIR>"
+                    } else {
+                        "     "
+                    };
+                    kprintln!(
+                        "  {:<13} {:>8} {}",
+                        entry.name, entry.size, attr_str
+                    );
+                }
+                kprintln!("  {} file(s)", entries.len());
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error listing directory: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
+    }
+
+    /// cat コマンド: FAT16 ディスクのファイル内容を表示する。
+    /// ファイル名は大文字の 8.3 形式で指定（例: cat HELLO.TXT）
+    fn cmd_cat(&self, args: &str) {
+        let filename = args.trim();
+        if filename.is_empty() {
+            kprintln!("Usage: cat <FILENAME>");
+            kprintln!("  File names are in 8.3 format (e.g., HELLO.TXT)");
+            return;
+        }
+
+        // ファイル名を大文字に変換（FAT16 は大文字のみ）
+        let filename_upper: alloc::string::String = filename.chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        match fs.read_file(&filename_upper) {
+            Ok(data) => {
+                // テキストファイルとして表示を試みる
+                match core::str::from_utf8(&data) {
+                    Ok(text) => {
+                        kprintln!("{}", text);
+                    }
+                    Err(_) => {
+                        // バイナリファイルの場合はサイズだけ表示
+                        kprintln!("(binary file, {} bytes)", data.len());
+                    }
+                }
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
