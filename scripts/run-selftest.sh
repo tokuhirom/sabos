@@ -71,6 +71,29 @@ if ! grep -q "user>" "$LOG_FILE" 2>/dev/null; then
     exit 1
 fi
 
+echo "Sending user shell ls command..."
+
+# user シェルで ls を実行
+for c in l s ret; do
+    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    sleep 0.15
+done
+
+# ls の結果を待つ（最大 10 秒）
+echo "Waiting for ls output..."
+for i in {1..10}; do
+    if grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if ! grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
+    echo -e "${RED}ERROR: ls output did not contain HELLO.TXT${NC}"
+    cat "$LOG_FILE"
+    exit 1
+fi
+
 echo "Exiting user shell to kernel shell..."
 
 # exit コマンドを送信してユーザーシェルを終了
