@@ -97,7 +97,7 @@ screenshot: build $(ESP_DIR) $(DISK_IMG)
 	sleep 1; \
 	kill $$QEMU_PID 2>/dev/null; \
 	wait $$QEMU_PID 2>/dev/null || true; \
-	magick /tmp/sabos-screenshot.ppm $(SCREENSHOT_OUT); \
+	convert /tmp/sabos-screenshot.ppm $(SCREENSHOT_OUT); \
 	echo "Screenshot saved: $(SCREENSHOT_OUT)"
 
 clean:

@@ -18,6 +18,7 @@ mod pci;
 mod shell;
 mod syscall;
 mod usermode;
+mod virtio_blk;
 
 // kprint! / kprintln! マクロを使えるようにする。
 // #[macro_export] で定義されたマクロはクレートルートに配置される。
@@ -191,6 +192,26 @@ fn main() -> Status {
     scheduler::init();
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("Scheduler initialized.");
+    kprintln!();
+
+    // --- virtio-blk ドライバの初期化 ---
+    // PCI バスから virtio-blk デバイスを探して初期化する。
+    // ヒープアロケータとページング初期化の後に呼ぶ必要がある
+    // （Virtqueue のメモリを確保するため）。
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprint!("Initializing virtio-blk... ");
+    virtio_blk::init();
+    {
+        let drv = virtio_blk::VIRTIO_BLK.lock();
+        if let Some(ref d) = *drv {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("OK ({} sectors, {} MiB)", d.capacity(), d.capacity() * 512 / 1024 / 1024);
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
     kprintln!();
 
     // --- マルチタスクのデモ ---

@@ -98,6 +98,7 @@ impl Shell {
             "isolate" => self.cmd_isolate(),
             "elf" => self.cmd_elf(),
             "lspci" => self.cmd_lspci(),
+            "blkread" => self.cmd_blkread(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -123,6 +124,7 @@ impl Shell {
         kprintln!("  isolate         - Demo: process isolation with separate page tables");
         kprintln!("  elf             - Load and run an ELF binary in user mode");
         kprintln!("  lspci           - List PCI devices");
+        kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -412,6 +414,68 @@ impl Shell {
             );
         }
         kprintln!("  Total: {} devices", devices.len());
+    }
+
+    /// blkread コマンド: virtio-blk ドライバでディスクの指定セクタを読み取り、
+    /// 先頭の内容を 16 進ダンプで表示する。
+    ///
+    /// 引数なし: セクタ 0（ブートセクタ / BPB）を読む
+    /// 引数あり: 10進数のセクタ番号を指定
+    fn cmd_blkread(&self, args: &str) {
+        let sector = if args.trim().is_empty() {
+            0u64
+        } else {
+            match args.trim().parse::<u64>() {
+                Ok(s) => s,
+                Err(_) => {
+                    kprintln!("Usage: blkread [sector_number]");
+                    return;
+                }
+            }
+        };
+
+        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
+        let drv = match drv.as_mut() {
+            Some(d) => d,
+            None => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("virtio-blk device not available");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        let mut buf = [0u8; 512];
+        match drv.read_sector(sector, &mut buf) {
+            Ok(()) => {
+                kprintln!("Sector {} (512 bytes):", sector);
+                // 先頭 256 バイトを 16 進ダンプで表示
+                for row in 0..16 {
+                    let offset = row * 16;
+                    kprint!("  {:04x}: ", offset);
+                    for col in 0..16 {
+                        kprint!("{:02x} ", buf[offset + col]);
+                    }
+                    // ASCII 表示
+                    kprint!(" |");
+                    for col in 0..16 {
+                        let b = buf[offset + col];
+                        if b >= 0x20 && b < 0x7F {
+                            kprint!("{}", b as char);
+                        } else {
+                            kprint!(".");
+                        }
+                    }
+                    kprintln!("|");
+                }
+                kprintln!("  ... ({} more bytes)", 512 - 256);
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Read error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
