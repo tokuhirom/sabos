@@ -18,8 +18,10 @@ mod serial;
 mod pci;
 mod shell;
 mod syscall;
+mod net;
 mod usermode;
 mod virtio_blk;
+mod virtio_net;
 
 // kprint! / kprintln! マクロを使えるようにする。
 // #[macro_export] で定義されたマクロはクレートルートに配置される。
@@ -210,6 +212,27 @@ fn main() -> Status {
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- virtio-net の初期化 ---
+    // virtio-net デバイスが存在する場合のみ初期化する。
+    kprint!("Initializing virtio-net... ");
+    virtio_net::init();
+    {
+        let drv = virtio_net::VIRTIO_NET.lock();
+        if let Some(ref d) = *drv {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!(
+                "OK (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                d.mac_address[0], d.mac_address[1], d.mac_address[2],
+                d.mac_address[3], d.mac_address[4], d.mac_address[5]
+            );
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found (add -device virtio-net-pci to QEMU)");
         }
     }
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));

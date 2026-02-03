@@ -21,6 +21,7 @@ DISK_IMG = disk.img
 
 # QEMU の共通オプション
 # -drive if=virtio で virtio-blk デバイスとしてディスクイメージを接続する。
+# -netdev user + -device virtio-net-pci で virtio-net デバイスを追加する。
 # PCI バス上に vendor=0x1AF4 のデバイスとして見える。
 QEMU_COMMON = qemu-system-x86_64 \
 	-nodefaults \
@@ -29,7 +30,8 @@ QEMU_COMMON = qemu-system-x86_64 \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 	-drive format=raw,file=fat:rw:esp \
-	-drive if=virtio,format=raw,file=$(DISK_IMG)
+	-drive if=virtio,format=raw,file=$(DISK_IMG) \
+	-netdev user,id=net0 -device virtio-net-pci,netdev=net0
 
 # スクリーンショットの出力先（デフォルト: docs/images/screenshot.png）
 SCREENSHOT_OUT ?= docs/images/screenshot.png
@@ -76,6 +78,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG)
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 		-drive format=raw,file=fat:rw:esp \
 		-drive if=virtio,format=raw,file=$(DISK_IMG) \
+		-netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
 		-serial stdio
 
 # スクリーンショットを撮る

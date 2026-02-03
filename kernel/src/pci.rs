@@ -196,3 +196,22 @@ pub fn find_virtio_blk() -> Option<PciDevice> {
     }
     None
 }
+
+/// virtio-net デバイスを PCI バスから探す。
+///
+/// virtio デバイスの識別:
+///   vendor_id = 0x1AF4 (Red Hat / virtio)
+///   device_id = 0x1000 (virtio legacy network device)
+///
+/// 見つかった最初のデバイスを返す。見つからなければ None。
+pub fn find_virtio_net() -> Option<PciDevice> {
+    let devices = enumerate_bus();
+    for dev in devices {
+        // virtio vendor ID = 0x1AF4
+        // virtio-net legacy device ID = 0x1000
+        if dev.vendor_id == 0x1AF4 && dev.device_id == 0x1000 {
+            return Some(dev);
+        }
+    }
+    None
+}

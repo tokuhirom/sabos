@@ -105,6 +105,8 @@ impl Shell {
             "write" => self.cmd_write(args),
             "rm" => self.cmd_rm(args),
             "run" => self.cmd_run(args),
+            "netpoll" => self.cmd_netpoll(args),
+            "ip" => self.cmd_ip(),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -137,6 +139,8 @@ impl Shell {
         kprintln!("  write <name> <text> - Create a file with text content");
         kprintln!("  rm <name>       - Delete a file");
         kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
+        kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
+        kprintln!("  ip              - Show IP configuration");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -866,6 +870,70 @@ impl Shell {
             fa.free_frames()
         };
         kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
+    }
+
+    /// netpoll コマンド: ネットワークパケットをポーリングして処理する。
+    ///
+    /// 引数なし: 10 秒間ポーリング
+    /// 引数あり: 指定秒数ポーリング
+    fn cmd_netpoll(&self, args: &str) {
+        let seconds = if args.trim().is_empty() {
+            10u32
+        } else {
+            match args.trim().parse::<u32>() {
+                Ok(s) => s,
+                Err(_) => {
+                    kprintln!("Usage: netpoll [seconds]");
+                    return;
+                }
+            }
+        };
+
+        {
+            let drv = crate::virtio_net::VIRTIO_NET.lock();
+            if drv.is_none() {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("virtio-net not available");
+                kprintln!("Add -netdev user,id=net0 -device virtio-net-pci,netdev=net0 to QEMU");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        }
+
+        kprintln!("Polling network for {} seconds...", seconds);
+        kprintln!("(Try 'ping 10.0.2.15' from another terminal)");
+
+        // 指定秒数ポーリング（約 100ms 間隔）
+        let iterations = seconds * 10;
+        for _ in 0..iterations {
+            crate::net::poll_and_handle();
+            // 約 100ms 待機
+            for _ in 0..100000 {
+                core::hint::spin_loop();
+            }
+        }
+
+        kprintln!("Done polling.");
+    }
+
+    /// ip コマンド: IP 設定を表示する。
+    fn cmd_ip(&self) {
+        kprintln!("IP Configuration:");
+        kprintln!("  IP Address: {}.{}.{}.{}",
+            crate::net::MY_IP[0], crate::net::MY_IP[1],
+            crate::net::MY_IP[2], crate::net::MY_IP[3]);
+        kprintln!("  Gateway:    {}.{}.{}.{}",
+            crate::net::GATEWAY_IP[0], crate::net::GATEWAY_IP[1],
+            crate::net::GATEWAY_IP[2], crate::net::GATEWAY_IP[3]);
+
+        let drv = crate::virtio_net::VIRTIO_NET.lock();
+        if let Some(ref d) = *drv {
+            kprintln!("  MAC:        {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                d.mac_address[0], d.mac_address[1], d.mac_address[2],
+                d.mac_address[3], d.mac_address[4], d.mac_address[5]);
+        } else {
+            kprintln!("  MAC:        (no network device)");
+        }
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
