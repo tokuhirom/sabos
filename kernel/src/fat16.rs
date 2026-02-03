@@ -490,4 +490,356 @@ impl Fat16 {
             buf[offset_in_sector + 1],
         ]))
     }
+
+    // ========================================
+    // 書き込み機能
+    // ========================================
+
+    /// セクタにデータを書き込む（内部用ヘルパー）。
+    fn write_sector(&self, sector: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+        let mut drv = virtio_blk::VIRTIO_BLK.lock();
+        let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+        drv.write_sector(sector as u64, buf)
+    }
+
+    /// FAT テーブルのエントリを書き込む。
+    ///
+    /// FAT16 では各エントリは 16 ビット。
+    /// FAT #1 と FAT #2（バックアップ）の両方を更新する。
+    fn write_fat_entry(&self, cluster: u16, value: u16) -> Result<(), &'static str> {
+        let fat_offset = (cluster as u32) * 2;
+        let offset_in_sector = (fat_offset % (self.bpb.bytes_per_sector as u32)) as usize;
+
+        // FAT #1 と FAT #2 の両方を更新
+        for fat_num in 0..self.bpb.num_fats {
+            let fat_sector = self.fat_start_sector
+                + (fat_num as u32) * (self.bpb.fat_size_16 as u32)
+                + fat_offset / (self.bpb.bytes_per_sector as u32);
+
+            // セクタを読み込んで更新
+            let mut buf = [0u8; SECTOR_SIZE];
+            {
+                let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                drv.read_sector(fat_sector as u64, &mut buf)?;
+            }
+
+            let bytes = value.to_le_bytes();
+            buf[offset_in_sector] = bytes[0];
+            buf[offset_in_sector + 1] = bytes[1];
+
+            self.write_sector(fat_sector, &buf)?;
+        }
+
+        Ok(())
+    }
+
+    /// 空きクラスタを探す。
+    ///
+    /// FAT テーブルをスキャンして、値が 0x0000（空き）のエントリを探す。
+    /// クラスタ 2 から検索開始（クラスタ 0, 1 は予約済み）。
+    fn find_free_cluster(&self) -> Result<u16, &'static str> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        let entries_per_sector = SECTOR_SIZE / 2; // 各エントリは 2 バイト
+
+        for sect_offset in 0..(self.bpb.fat_size_16 as u32) {
+            let sector = self.fat_start_sector + sect_offset;
+            {
+                let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                drv.read_sector(sector as u64, &mut buf)?;
+            }
+
+            for i in 0..entries_per_sector {
+                let cluster = (sect_offset as usize) * entries_per_sector + i;
+                if cluster < 2 {
+                    continue; // クラスタ 0, 1 は予約済み
+                }
+                if cluster > 0xFFEF {
+                    break; // FAT16 のクラスタ番号の上限
+                }
+
+                let entry = u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]);
+                if entry == 0x0000 {
+                    return Ok(cluster as u16);
+                }
+            }
+        }
+
+        Err("No free clusters available")
+    }
+
+    /// 必要な数のクラスタを確保し、チェーンを作成する。
+    ///
+    /// 戻り値: チェーンの先頭クラスタ番号
+    fn allocate_clusters(&self, count: usize) -> Result<u16, &'static str> {
+        if count == 0 {
+            return Err("Cannot allocate 0 clusters");
+        }
+
+        let mut clusters = Vec::with_capacity(count);
+
+        // 必要な数の空きクラスタを見つける
+        for _ in 0..count {
+            let cluster = self.find_free_cluster()?;
+            // 一時的にマークして重複を避ける（後でチェーン化）
+            self.write_fat_entry(cluster, 0xFFFF)?; // 終端マーク
+            clusters.push(cluster);
+        }
+
+        // クラスタをチェーン化
+        for i in 0..(count - 1) {
+            self.write_fat_entry(clusters[i], clusters[i + 1])?;
+        }
+        // 最後のクラスタは終端マーク（既に 0xFFFF）
+
+        Ok(clusters[0])
+    }
+
+    /// クラスタチェーンを解放する（ファイル削除用）。
+    fn free_cluster_chain(&self, first_cluster: u16) -> Result<(), &'static str> {
+        let mut cluster = first_cluster;
+        while cluster >= 2 && cluster <= 0xFFEF {
+            let next = self.read_fat_entry(cluster)?;
+            self.write_fat_entry(cluster, 0x0000)?; // 空きにする
+            cluster = next;
+        }
+        Ok(())
+    }
+
+    /// ルートディレクトリに新しいエントリを追加する。
+    ///
+    /// 空きエントリ（先頭バイトが 0x00 または 0xE5）を探して書き込む。
+    fn add_root_dir_entry(&self, entry: &DirEntry) -> Result<(), &'static str> {
+        let mut buf = [0u8; SECTOR_SIZE];
+
+        for sect_offset in 0..self.root_dir_sectors {
+            let sector = self.root_dir_start_sector + sect_offset;
+            {
+                let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                drv.read_sector(sector as u64, &mut buf)?;
+            }
+
+            let entries_per_sector = SECTOR_SIZE / 32;
+            for i in 0..entries_per_sector {
+                let offset = i * 32;
+                let first_byte = buf[offset];
+
+                // 空きエントリを見つけた
+                if first_byte == 0x00 || first_byte == 0xE5 {
+                    // 8.3 形式のファイル名を作成
+                    let (name_part, ext_part) = self.split_filename(&entry.name);
+
+                    // ファイル名（8バイト、スペースパディング）
+                    for j in 0..8 {
+                        buf[offset + j] = if j < name_part.len() {
+                            name_part.as_bytes()[j]
+                        } else {
+                            b' '
+                        };
+                    }
+                    // 拡張子（3バイト、スペースパディング）
+                    for j in 0..3 {
+                        buf[offset + 8 + j] = if j < ext_part.len() {
+                            ext_part.as_bytes()[j]
+                        } else {
+                            b' '
+                        };
+                    }
+
+                    // 属性
+                    buf[offset + 11] = entry.attr;
+                    // 予約フィールド（0クリア）
+                    for j in 12..26 {
+                        buf[offset + j] = 0;
+                    }
+                    // 先頭クラスタ番号（リトルエンディアン）
+                    let cluster_bytes = entry.first_cluster.to_le_bytes();
+                    buf[offset + 26] = cluster_bytes[0];
+                    buf[offset + 27] = cluster_bytes[1];
+                    // ファイルサイズ（リトルエンディアン）
+                    let size_bytes = entry.size.to_le_bytes();
+                    buf[offset + 28] = size_bytes[0];
+                    buf[offset + 29] = size_bytes[1];
+                    buf[offset + 30] = size_bytes[2];
+                    buf[offset + 31] = size_bytes[3];
+
+                    self.write_sector(sector, &buf)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        Err("Root directory is full")
+    }
+
+    /// ファイル名を名前部分と拡張子部分に分割する（8.3 形式用）。
+    fn split_filename(&self, name: &str) -> (String, String) {
+        if let Some(dot_pos) = name.rfind('.') {
+            let name_part: String = name[..dot_pos].chars().take(8).collect();
+            let ext_part: String = name[dot_pos + 1..].chars().take(3).collect();
+            (name_part, ext_part)
+        } else {
+            (name.chars().take(8).collect(), String::new())
+        }
+    }
+
+    /// ファイルを作成してデータを書き込む。
+    ///
+    /// path: ファイルパス（現在はルートディレクトリのみ対応）
+    /// data: 書き込むデータ
+    ///
+    /// 注意: 同名ファイルが存在する場合はエラーを返す（上書きは未対応）。
+    pub fn create_file(&self, filename: &str, data: &[u8]) -> Result<(), &'static str> {
+        // ファイル名を大文字に変換
+        let filename_upper: String = filename
+            .trim()
+            .trim_start_matches('/')
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        // 同名ファイルが存在しないか確認
+        let entries = self.list_root_dir()?;
+        if entries.iter().any(|e| e.name == filename_upper) {
+            return Err("File already exists");
+        }
+
+        // 必要なクラスタ数を計算
+        let bytes_per_cluster =
+            (self.bpb.sectors_per_cluster as usize) * (self.bpb.bytes_per_sector as usize);
+        let cluster_count = if data.is_empty() {
+            1 // 空ファイルでも最低 1 クラスタ
+        } else {
+            (data.len() + bytes_per_cluster - 1) / bytes_per_cluster
+        };
+
+        serial_println!(
+            "FAT16: creating file '{}', size={}, clusters={}",
+            filename_upper, data.len(), cluster_count
+        );
+
+        // クラスタを確保
+        let first_cluster = self.allocate_clusters(cluster_count)?;
+
+        // データをクラスタに書き込む
+        let mut remaining = data;
+        let mut cluster = first_cluster;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+
+        while !remaining.is_empty() && cluster >= 2 && cluster <= 0xFFEF {
+            let first_sector_of_cluster = self.data_start_sector
+                + ((cluster as u32) - 2) * (self.bpb.sectors_per_cluster as u32);
+
+            for sect_offset in 0..(self.bpb.sectors_per_cluster as u32) {
+                if remaining.is_empty() {
+                    break;
+                }
+
+                let sector = first_sector_of_cluster + sect_offset;
+                let to_write = remaining.len().min(SECTOR_SIZE);
+
+                // セクタバッファをクリアしてデータをコピー
+                sector_buf.fill(0);
+                sector_buf[..to_write].copy_from_slice(&remaining[..to_write]);
+
+                self.write_sector(sector, &sector_buf)?;
+                remaining = &remaining[to_write..];
+            }
+
+            if !remaining.is_empty() {
+                cluster = self.read_fat_entry(cluster)?;
+            }
+        }
+
+        // ディレクトリエントリを作成
+        let entry = DirEntry {
+            name: filename_upper,
+            attr: 0, // 通常ファイル
+            first_cluster,
+            size: data.len() as u32,
+        };
+        self.add_root_dir_entry(&entry)?;
+
+        serial_println!("FAT16: file created successfully, first_cluster={}", first_cluster);
+        Ok(())
+    }
+
+    /// ファイルを削除する。
+    ///
+    /// ディレクトリエントリを削除済みマーク (0xE5) にし、
+    /// クラスタチェーンを解放する。
+    pub fn delete_file(&self, filename: &str) -> Result<(), &'static str> {
+        let filename_upper: String = filename
+            .trim()
+            .trim_start_matches('/')
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        let mut buf = [0u8; SECTOR_SIZE];
+
+        for sect_offset in 0..self.root_dir_sectors {
+            let sector = self.root_dir_start_sector + sect_offset;
+            {
+                let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                drv.read_sector(sector as u64, &mut buf)?;
+            }
+
+            let entries_per_sector = SECTOR_SIZE / 32;
+            for i in 0..entries_per_sector {
+                let offset = i * 32;
+                let first_byte = buf[offset];
+
+                if first_byte == 0x00 {
+                    // ディレクトリ終端
+                    return Err("File not found");
+                }
+                if first_byte == 0xE5 {
+                    continue; // 削除済み
+                }
+
+                let attr = buf[offset + 11];
+                if attr == ATTR_LFN || attr & ATTR_VOLUME_ID != 0 {
+                    continue;
+                }
+
+                // ファイル名をパース
+                let name_part = core::str::from_utf8(&buf[offset..offset + 8])
+                    .unwrap_or("")
+                    .trim_end();
+                let ext_part = core::str::from_utf8(&buf[offset + 8..offset + 11])
+                    .unwrap_or("")
+                    .trim_end();
+                let name = if ext_part.is_empty() {
+                    String::from(name_part)
+                } else {
+                    let mut s = String::from(name_part);
+                    s.push('.');
+                    s.push_str(ext_part);
+                    s
+                };
+
+                if name == filename_upper {
+                    // クラスタチェーンを解放
+                    let first_cluster =
+                        u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
+                    if first_cluster >= 2 {
+                        self.free_cluster_chain(first_cluster)?;
+                    }
+
+                    // ディレクトリエントリを削除済みマーク
+                    buf[offset] = 0xE5;
+                    self.write_sector(sector, &buf)?;
+
+                    serial_println!("FAT16: file '{}' deleted", filename_upper);
+                    return Ok(());
+                }
+            }
+        }
+
+        Err("File not found")
+    }
 }

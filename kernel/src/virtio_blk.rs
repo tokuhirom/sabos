@@ -106,8 +106,8 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 
 /// セクタの読み取り
 const VIRTIO_BLK_T_IN: u32 = 0;
-/// セクタの書き込み（今回は未使用）
-const _VIRTIO_BLK_T_OUT: u32 = 1;
+/// セクタの書き込み
+const VIRTIO_BLK_T_OUT: u32 = 1;
 
 // ============================================================
 // virtio-blk リクエストステータス
@@ -476,6 +476,123 @@ impl VirtioBlk {
         fence(Ordering::SeqCst);
         if status_byte != VIRTIO_BLK_S_OK {
             return Err("virtio-blk read failed (device returned error)");
+        }
+
+        Ok(())
+    }
+
+    /// 指定セクタにデータを書き込む。
+    ///
+    /// sector: 書き込み先セクタ番号（0始まり）
+    /// buf: 書き込むデータ（512 バイトの倍数であること）
+    ///
+    /// read_sector と同じ手順だが、リクエストタイプが OUT で、
+    /// データバッファは「デバイスが読む」ので WRITE フラグなし。
+    pub fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        if sector >= self.capacity {
+            return Err("sector out of range");
+        }
+        if buf.len() < 512 || buf.len() % 512 != 0 {
+            return Err("buffer must be multiple of 512 bytes");
+        }
+
+        let sector_count = buf.len() / 512;
+
+        // リクエストヘッダー（VIRTIO_BLK_T_OUT = 書き込みリクエスト）
+        let req_header = VirtioBlkReqHeader {
+            request_type: VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector,
+        };
+        // ステータスバイト（デバイスが結果を書き込む）
+        let mut status_byte: u8 = 0xFF;
+
+        // --- ディスクリプタチェーンの構築 ---
+        let desc_base = self.next_desc;
+        let d0 = desc_base;
+        let d1 = desc_base + 1;
+        let d2 = desc_base + 2;
+
+        // ディスクリプタ 0: リクエストヘッダー（デバイスが読む = WRITE フラグなし）
+        self.write_desc(
+            d0,
+            &req_header as *const VirtioBlkReqHeader as u64,
+            core::mem::size_of::<VirtioBlkReqHeader>() as u32,
+            VIRTQ_DESC_F_NEXT,
+            d1,
+        );
+
+        // ディスクリプタ 1: データバッファ（デバイスが読む = WRITE フラグなし）
+        // read_sector との違い: VIRTQ_DESC_F_WRITE を外す
+        self.write_desc(
+            d1,
+            buf.as_ptr() as u64,
+            (sector_count * 512) as u32,
+            VIRTQ_DESC_F_NEXT, // WRITE フラグなし
+            d2,
+        );
+
+        // ディスクリプタ 2: ステータスバイト（デバイスが書き込む = WRITE フラグ）
+        self.write_desc(
+            d2,
+            &mut status_byte as *mut u8 as u64,
+            1,
+            VIRTQ_DESC_F_WRITE,
+            0,
+        );
+
+        // 次回用にディスクリプタインデックスを進める
+        self.next_desc = (desc_base + 3) % self.queue_size;
+
+        // --- Available Ring に追加 ---
+        let avail_offset = (self.queue_size as usize) * 16;
+        let avail_ptr = unsafe { self.vq_ptr.add(avail_offset) };
+
+        let avail_idx = unsafe { (avail_ptr.add(2) as *const u16).read_volatile() };
+        let ring_entry_offset = 4 + ((avail_idx % self.queue_size) as usize) * 2;
+        unsafe {
+            (avail_ptr.add(ring_entry_offset) as *mut u16).write_volatile(d0);
+        }
+
+        fence(Ordering::SeqCst);
+
+        unsafe {
+            (avail_ptr.add(2) as *mut u16).write_volatile(avail_idx.wrapping_add(1));
+        }
+
+        fence(Ordering::SeqCst);
+
+        // --- デバイスに通知 ---
+        unsafe {
+            Port::<u16>::new(self.io_base + 0x10).write(0);
+        }
+
+        // --- Used Ring をポーリングして完了を待つ ---
+        let desc_size = (self.queue_size as usize) * 16;
+        let avail_size = 4 + (self.queue_size as usize) * 2;
+        let used_offset = align_up(desc_size + avail_size, 4096);
+        let used_ptr = unsafe { self.vq_ptr.add(used_offset) };
+
+        let expected_used_idx = self.last_used_idx.wrapping_add(1);
+        let mut spin_count = 0u64;
+        loop {
+            fence(Ordering::SeqCst);
+            let used_idx = unsafe { (used_ptr.add(2) as *const u16).read_volatile() };
+            if used_idx == expected_used_idx {
+                break;
+            }
+            spin_count += 1;
+            if spin_count > 100_000_000 {
+                return Err("virtio-blk write timeout");
+            }
+            core::hint::spin_loop();
+        }
+        self.last_used_idx = expected_used_idx;
+
+        // ステータスバイトを確認
+        fence(Ordering::SeqCst);
+        if status_byte != VIRTIO_BLK_S_OK {
+            return Err("virtio-blk write failed (device returned error)");
         }
 
         Ok(())

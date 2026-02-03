@@ -99,8 +99,11 @@ impl Shell {
             "elf" => self.cmd_elf(),
             "lspci" => self.cmd_lspci(),
             "blkread" => self.cmd_blkread(args),
+            "blkwrite" => self.cmd_blkwrite(args),
             "ls" => self.cmd_ls(args),
             "cat" => self.cmd_cat(args),
+            "write" => self.cmd_write(args),
+            "rm" => self.cmd_rm(args),
             "run" => self.cmd_run(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
@@ -128,8 +131,11 @@ impl Shell {
         kprintln!("  elf             - Load and run an ELF binary in user mode");
         kprintln!("  lspci           - List PCI devices");
         kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
+        kprintln!("  blkwrite <sect> - Write test pattern to a sector (DANGEROUS!)");
         kprintln!("  ls [path]       - List files on FAT16 disk (e.g., ls /SUBDIR)");
         kprintln!("  cat <path>      - Display file contents (e.g., cat /SUBDIR/FILE.TXT)");
+        kprintln!("  write <name> <text> - Create a file with text content");
+        kprintln!("  rm <name>       - Delete a file");
         kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
@@ -484,6 +490,83 @@ impl Shell {
         }
     }
 
+    /// blkwrite コマンド: virtio-blk デバイスの指定セクタにテストパターンを書き込む。
+    ///
+    /// 警告: ファイルシステムを破壊する可能性があるので注意！
+    /// データ領域の先頭（セクタ 200 以降など）でテストすること。
+    fn cmd_blkwrite(&self, args: &str) {
+        let args = args.trim();
+        if args.is_empty() {
+            kprintln!("Usage: blkwrite <sector_number>");
+            kprintln!("  WARNING: This will overwrite disk data!");
+            kprintln!("  Use a sector in data area (e.g., sector 200+) to avoid corruption.");
+            return;
+        }
+
+        let sector = match args.parse::<u64>() {
+            Ok(s) => s,
+            Err(_) => {
+                kprintln!("Invalid sector number: {}", args);
+                return;
+            }
+        };
+
+        // セクタ 0〜163 は FAT16 のメタデータ領域なので警告
+        if sector < 164 {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("WARNING: Sector {} is in FAT16 metadata area!", sector);
+            kprintln!("  This may corrupt the file system.");
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        }
+
+        // テストパターンを作成（セクタ番号を繰り返し）
+        let mut buf = [0u8; 512];
+        for i in 0..512 {
+            buf[i] = ((sector + i as u64) & 0xFF) as u8;
+        }
+
+        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
+        let drv = match drv.as_mut() {
+            Some(d) => d,
+            None => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("virtio-blk device not available");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        match drv.write_sector(sector, &buf) {
+            Ok(()) => {
+                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                kprintln!("Sector {} written successfully!", sector);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+
+                // 書き込んだ内容を読み返して確認
+                let mut read_buf = [0u8; 512];
+                match drv.read_sector(sector, &mut read_buf) {
+                    Ok(()) => {
+                        if read_buf == buf {
+                            kprintln!("Verified: read-back matches written data.");
+                        } else {
+                            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                            kprintln!("ERROR: read-back does not match!");
+                            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                        }
+                    }
+                    Err(e) => {
+                        kprintln!("Read-back failed: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Write error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
+    }
+
     /// ls コマンド: FAT16 ディスクのディレクトリにあるファイル一覧を表示する。
     ///
     /// 引数なし: ルートディレクトリを表示
@@ -588,6 +671,101 @@ impl Shell {
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
                 kprintln!("Error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
+    }
+
+    /// write コマンド: FAT16 ディスクに新しいファイルを作成する。
+    ///
+    /// 使い方: write <FILENAME> <TEXT>
+    /// 例: write TEST.TXT Hello World
+    fn cmd_write(&self, args: &str) {
+        let args = args.trim();
+        if args.is_empty() {
+            kprintln!("Usage: write <FILENAME> <TEXT>");
+            kprintln!("  Example: write TEST.TXT Hello World");
+            return;
+        }
+
+        // 最初の空白でファイル名とテキストを分離
+        let parts: Vec<&str> = args.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            kprintln!("Usage: write <FILENAME> <TEXT>");
+            kprintln!("  Both filename and text content are required.");
+            return;
+        }
+
+        let filename = parts[0];
+        let text = parts[1];
+
+        // ファイル名を大文字に変換
+        let filename_upper: alloc::string::String = filename
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        // テキストの末尾に改行を追加
+        let mut content = text.as_bytes().to_vec();
+        content.push(b'\n');
+
+        match fs.create_file(&filename_upper, &content) {
+            Ok(()) => {
+                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                kprintln!("File '{}' created ({} bytes)", filename_upper, content.len());
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error creating file: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+        }
+    }
+
+    /// rm コマンド: FAT16 ディスクのファイルを削除する。
+    fn cmd_rm(&self, args: &str) {
+        let filename = args.trim();
+        if filename.is_empty() {
+            kprintln!("Usage: rm <FILENAME>");
+            return;
+        }
+
+        // ファイル名を大文字に変換
+        let filename_upper: alloc::string::String = filename
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(fs) => fs,
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("FAT16 error: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        };
+
+        match fs.delete_file(&filename_upper) {
+            Ok(()) => {
+                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                kprintln!("File '{}' deleted", filename_upper);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("Error deleting file: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
