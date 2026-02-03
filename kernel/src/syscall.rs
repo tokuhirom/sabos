@@ -1148,7 +1148,12 @@ fn sys_yield() -> Result<u64, SyscallError> {
 ///
 /// 指定した時間だけ現在のタスクをスリープ状態にする。
 fn sys_sleep(arg1: u64) -> Result<u64, SyscallError> {
+    // システムコールは割り込み無効状態で処理される。
+    // Ring 3 からの sleep は、ここで一度割り込みを有効化してからスリープする。
+    // そうしないと yield_now() が enable_and_hlt() に入って
+    // 永久停止する（タイマー割り込みが来ない）。
     let ms = arg1;
+    x86_64::instructions::interrupts::enable();
     crate::scheduler::sleep_ms(ms);
     Ok(0)
 }
