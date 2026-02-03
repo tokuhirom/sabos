@@ -9,11 +9,18 @@
 // - help: ヘルプを表示
 // - clear: 画面をクリア
 // - exit: シェルを終了
+// - ls [path]: ディレクトリ一覧
+// - cat <file>: ファイル内容を表示
+// - write <file> <text>: ファイルを作成/上書き
+// - rm <file>: ファイルを削除
 
 use crate::syscall;
 
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
+
+/// ファイル読み取り/ディレクトリ一覧用のバッファサイズ
+const FILE_BUFFER_SIZE: usize = 4096;
 
 /// シェルのメインループを実行
 pub fn run() -> ! {
@@ -107,6 +114,10 @@ fn execute_command(line: &[u8]) {
         "help" => cmd_help(),
         "clear" => cmd_clear(),
         "exit" => cmd_exit(),
+        "ls" => cmd_ls(args),
+        "cat" => cmd_cat(args),
+        "write" => cmd_write(args),
+        "rm" => cmd_rm(args),
         "" => {}  // 空のコマンドは無視
         _ => {
             syscall::write_str("Unknown command: ");
@@ -136,10 +147,14 @@ fn cmd_help() {
     syscall::write_str("SABOS User Shell - Available Commands\n");
     syscall::write_str("=====================================\n");
     syscall::write_str("\n");
-    syscall::write_str("  echo <text>  - Print text to console\n");
-    syscall::write_str("  help         - Show this help message\n");
-    syscall::write_str("  clear        - Clear the screen\n");
-    syscall::write_str("  exit         - Exit the shell\n");
+    syscall::write_str("  echo <text>       - Print text to console\n");
+    syscall::write_str("  help              - Show this help message\n");
+    syscall::write_str("  clear             - Clear the screen\n");
+    syscall::write_str("  exit              - Exit the shell\n");
+    syscall::write_str("  ls [path]         - List directory contents\n");
+    syscall::write_str("  cat <file>        - Display file contents\n");
+    syscall::write_str("  write <file> <text> - Create/overwrite file\n");
+    syscall::write_str("  rm <file>         - Delete file\n");
     syscall::write_str("\n");
 }
 
@@ -152,4 +167,100 @@ fn cmd_clear() {
 fn cmd_exit() {
     syscall::write_str("Goodbye!\n");
     syscall::exit();
+}
+
+// =================================================================
+// ファイルシステムコマンド
+// =================================================================
+
+/// ls コマンド: ディレクトリ一覧を表示
+fn cmd_ls(args: &str) {
+    // パスが指定されなければルートディレクトリ
+    let path = if args.is_empty() { "/" } else { args };
+
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::dir_list(path, &mut buf);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to list directory\n");
+        return;
+    }
+
+    // 結果を表示
+    let len = result as usize;
+    if len > 0 {
+        syscall::write(&buf[..len]);
+    }
+}
+
+/// cat コマンド: ファイル内容を表示
+fn cmd_cat(args: &str) {
+    if args.is_empty() {
+        syscall::write_str("Usage: cat <filename>\n");
+        return;
+    }
+
+    // パスの正規化: "/" で始まらなければ "/" を付ける
+    let path = if args.starts_with('/') {
+        args
+    } else {
+        // 簡易実装: 先頭に "/" がない場合は一時バッファに結合
+        // 注意: この実装ではスタック上のバッファを使うので長いパスは非対応
+        &args  // とりあえずそのまま渡す（FAT16側で対応）
+    };
+
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::file_read(path, &mut buf);
+
+    if result < 0 {
+        syscall::write_str("Error: File not found or cannot be read\n");
+        return;
+    }
+
+    // ファイル内容を表示
+    let len = result as usize;
+    if len > 0 {
+        syscall::write(&buf[..len]);
+        // 最後が改行でなければ改行を追加
+        if buf[len - 1] != b'\n' {
+            syscall::write_str("\n");
+        }
+    }
+}
+
+/// write コマンド: ファイルを作成/上書き
+fn cmd_write(args: &str) {
+    // ファイル名とデータを分割
+    let (filename, data) = split_command(args);
+
+    if filename.is_empty() {
+        syscall::write_str("Usage: write <filename> <text>\n");
+        return;
+    }
+
+    let result = syscall::file_write(filename, data.as_bytes());
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to write file\n");
+        return;
+    }
+
+    syscall::write_str("File written successfully\n");
+}
+
+/// rm コマンド: ファイルを削除
+fn cmd_rm(args: &str) {
+    if args.is_empty() {
+        syscall::write_str("Usage: rm <filename>\n");
+        return;
+    }
+
+    let result = syscall::file_delete(args);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to delete file\n");
+        return;
+    }
+
+    syscall::write_str("File deleted successfully\n");
 }

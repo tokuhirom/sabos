@@ -42,9 +42,18 @@ use crate::user_ptr::{UserSlice, SyscallError};
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
+// コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面をクリア
+
+// ファイルシステム (10-19)
+pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len) — ファイル読み取り
+pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len) — ファイル書き込み
+pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len) — ファイル削除
+pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len) — ディレクトリ一覧
+
+// 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
 
 // =================================================================
@@ -77,26 +86,35 @@ global_asm!(
     "push rbx",
     "push rbp",
 
-    // --- Rust の syscall_dispatch(nr, arg1, arg2) を呼び出す ---
+    // --- Rust の syscall_dispatch(nr, arg1, arg2, arg3, arg4) を呼び出す ---
     // UEFI ターゲットは Microsoft x64 ABI を使用する。
     // Microsoft x64 ABI の引数渡し:
-    //   第1引数: rcx, 第2引数: rdx, 第3引数: r8
+    //   第1引数: rcx, 第2引数: rdx, 第3引数: r8, 第4引数: r9
+    //   第5引数以降はスタック経由
     //
     // int 0x80 のレジスタ規約（Linux 風）:
-    //   rax = syscall番号, rdi = arg1, rsi = arg2
+    //   rax = syscall番号, rdi = arg1, rsi = arg2, rdx = arg3, r10 = arg4
     //
-    // レジスタの移動:
-    "mov r8, rsi",    // arg2 (rsi) → 第3引数 (r8)
-    "mov rdx, rdi",   // arg1 (rdi) → 第2引数 (rdx)
-    "mov rcx, rax",   // syscall_nr (rax) → 第1引数 (rcx)
+    // レジスタの移動（順序が重要: 後で使うレジスタを先に移動）:
+    // 注意: rdx は Linux ABI では arg3 だが、保存した値を使う必要がある
+    // スタックに保存された rdx の位置: rbp(0) + rbx(8) + rcx(16) + rdx(24) からの位置
+    // = [rsp + 24] が保存された rdx
 
     // スタックを 16 バイトアラインする（ABI 要件）
     // push を 10 回 + CPU が 5 個 push = 15 個 × 8 = 120 バイト
     // 120 % 16 = 8 なので、8 バイト追加して 16 の倍数にする。
     // さらに Microsoft x64 ABI ではシャドウスペース（32バイト）が必要。
-    // シャドウスペースは呼び出し先が引数をスタックに退避するための領域。
     // 合計: 8 (アライン) + 32 (シャドウ) = 40 バイト確保
     "sub rsp, 40",
+
+    // 第5引数 (arg4 = r10) をスタックに積む（Microsoft ABI では第5引数以降はスタック）
+    "mov qword ptr [rsp+32], r10",  // arg4 → スタックの第5引数位置
+
+    // 引数をセット（Microsoft ABI: rcx, rdx, r8, r9）
+    "mov r9, rdx",    // arg3 (rdx) → 第4引数 (r9) ※先に移動
+    "mov r8, rsi",    // arg2 (rsi) → 第3引数 (r8)
+    "mov rdx, rdi",   // arg1 (rdi) → 第2引数 (rdx)
+    "mov rcx, rax",   // syscall_nr (rax) → 第1引数 (rcx)
 
     // syscall_dispatch を呼び出す
     "call syscall_dispatch",
@@ -141,14 +159,16 @@ unsafe extern "C" {
 ///   nr   — システムコール番号（rax から渡される）
 ///   arg1 — 第1引数（rdi から渡される）
 ///   arg2 — 第2引数（rsi から渡される）
+///   arg3 — 第3引数（rdx から渡される）
+///   arg4 — 第4引数（r10 から渡される）
 ///
 /// 戻り値:
 ///   rax に格納されてユーザープログラムに返される
 ///   エラーの場合は負の値（SyscallError::to_errno()）
 #[unsafe(no_mangle)]
-extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64) -> u64 {
+extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
     // 各システムコールハンドラを呼び出し、Result を u64 に変換
-    let result = dispatch_inner(nr, arg1, arg2);
+    let result = dispatch_inner(nr, arg1, arg2, arg3, arg4);
     match result {
         Ok(value) => value,
         Err(err) => err.to_errno(),
@@ -159,11 +179,16 @@ extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64) -> u64 {
 ///
 /// Result 型を返すことで、エラーハンドリングを型安全に行う。
 /// ? 演算子でエラーを早期リターンできる。
-fn dispatch_inner(nr: u64, arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     match nr {
         SYS_READ => sys_read(arg1, arg2),
         SYS_WRITE => sys_write(arg1, arg2),
         SYS_CLEAR_SCREEN => sys_clear_screen(),
+        // ファイルシステム
+        SYS_FILE_READ => sys_file_read(arg1, arg2, arg3, arg4),
+        SYS_FILE_WRITE => sys_file_write(arg1, arg2, arg3, arg4),
+        SYS_FILE_DELETE => sys_file_delete(arg1, arg2),
+        SYS_DIR_LIST => sys_dir_list(arg1, arg2, arg3, arg4),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
@@ -244,4 +269,158 @@ fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 fn sys_clear_screen() -> Result<u64, SyscallError> {
     crate::framebuffer::clear_global_screen();
     Ok(0)
+}
+
+// =================================================================
+// ファイルシステム関連システムコール
+// =================================================================
+
+/// SYS_FILE_READ: ファイルの内容を読み取る
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///   arg3 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg4 — バッファの長さ
+///
+/// 戻り値:
+///   読み取ったバイト数（成功時）
+///   負の値（エラー時）
+fn sys_file_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+    let buf_len = arg4 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // バッファを取得
+    let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // FAT16 からファイルを読み取る
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+
+    // バッファにコピー
+    let copy_len = core::cmp::min(data.len(), buf_len);
+    buf[..copy_len].copy_from_slice(&data[..copy_len]);
+
+    Ok(copy_len as u64)
+}
+
+/// SYS_FILE_WRITE: ファイルを作成または上書き
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///   arg3 — データのポインタ（ユーザー空間）
+///   arg4 — データの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+    let data_len = arg4 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // データを取得
+    let data_slice = UserSlice::<u8>::from_raw(arg3, data_len)?;
+    let data = data_slice.as_slice();
+
+    // FAT16 にファイルを書き込む
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    fat16.create_file(path, data).map_err(|_| SyscallError::Other)?;
+
+    Ok(data_len as u64)
+}
+
+/// SYS_FILE_DELETE: ファイルを削除
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // FAT16 からファイルを削除
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    fat16.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
+
+    Ok(0)
+}
+
+/// SYS_DIR_LIST: ディレクトリの内容を一覧
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）"/" ならルート
+///   arg2 — パスの長さ
+///   arg3 — バッファのポインタ（ユーザー空間、エントリ名を改行区切りで書き込む）
+///   arg4 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式:
+///   ファイル名を改行区切りで出力。ディレクトリには末尾に "/" を付ける。
+fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let path_len = arg2 as usize;
+    let buf_len = arg4 as usize;
+
+    // パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // バッファを取得
+    let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // FAT16 からディレクトリ一覧を取得
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let entries = fat16.list_dir(path).map_err(|_| SyscallError::FileNotFound)?;
+
+    // エントリ名を改行区切りでバッファに書き込む
+    // ATTR_DIRECTORY = 0x10
+    const ATTR_DIRECTORY: u8 = 0x10;
+
+    let mut offset = 0;
+    for entry in entries {
+        let name = &entry.name;
+        let is_dir = (entry.attr & ATTR_DIRECTORY) != 0;
+
+        // 名前のバイト数 + 改行 (+ "/" for directories)
+        let needed = name.len() + if is_dir { 2 } else { 1 };
+        if offset + needed > buf_len {
+            break;  // バッファがいっぱい
+        }
+
+        // 名前をコピー
+        buf[offset..offset + name.len()].copy_from_slice(name.as_bytes());
+        offset += name.len();
+
+        // ディレクトリなら "/" を追加
+        if is_dir {
+            buf[offset] = b'/';
+            offset += 1;
+        }
+
+        // 改行を追加
+        buf[offset] = b'\n';
+        offset += 1;
+    }
+
+    Ok(offset as u64)
 }

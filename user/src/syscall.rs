@@ -37,9 +37,18 @@ use core::arch::asm;
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
+// コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
+
+// ファイルシステム (10-19)
+pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len)
+pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len)
+pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
+pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
+
+// 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
 /// システムコールの戻り値を表す型
@@ -259,4 +268,76 @@ pub fn exit() -> ! {
 #[allow(dead_code)]
 pub fn _exit() -> ! {
     exit()
+}
+
+// =================================================================
+// ファイルシステム関連
+// =================================================================
+
+/// ファイルの内容を読み取る
+///
+/// # 引数
+/// - `path`: ファイルパス（例: "/HELLO.TXT"）
+/// - `buf`: 読み取ったデータを格納するバッファ
+///
+/// # 戻り値
+/// - 読み取ったバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn file_read(path: &str, buf: &mut [u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_FILE_READ, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+/// ファイルを作成または上書き
+///
+/// # 引数
+/// - `path`: ファイルパス（ルートディレクトリのみ対応、例: "HELLO.TXT"）
+/// - `data`: 書き込むデータ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn file_write(path: &str, data: &[u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let data_ptr = data.as_ptr() as u64;
+    let data_len = data.len() as u64;
+    unsafe { syscall4(SYS_FILE_WRITE, path_ptr, path_len, data_ptr, data_len) as i64 }
+}
+
+/// ファイルを削除
+///
+/// # 引数
+/// - `path`: ファイルパス（ルートディレクトリのみ対応、例: "HELLO.TXT"）
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn file_delete(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_FILE_DELETE, path_ptr, path_len) as i64 }
+}
+
+/// ディレクトリの内容を一覧
+///
+/// # 引数
+/// - `path`: ディレクトリパス（"/" ならルート）
+/// - `buf`: エントリ名を改行区切りで格納するバッファ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+///
+/// # 出力形式
+/// ファイル名を改行区切りで出力。ディレクトリには末尾に "/" が付く。
+pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
 }
