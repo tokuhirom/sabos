@@ -27,6 +27,9 @@
 use crate::syscall;
 use crate::fat16::Fat16;
 
+/// netd のタスクID（起動できた場合のみ設定）
+static mut NETD_TASK_ID: u64 = 0;
+
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
 
@@ -36,6 +39,7 @@ const FILE_BUFFER_SIZE: usize = 4096;
 /// シェルのメインループを実行
 pub fn run() -> ! {
     print_welcome();
+    init_net_service();
 
     let mut line_buf = [0u8; LINE_BUFFER_SIZE];
 
@@ -933,9 +937,7 @@ fn cmd_dns(args: &str) {
     syscall::write_str("'...\n");
 
     let mut ip = [0u8; 4];
-    let result = syscall::dns_lookup(domain, &mut ip);
-
-    if result < 0 {
+    if netd_dns_lookup(domain, &mut ip).is_err() {
         syscall::write_str("Error: DNS lookup failed\n");
         return;
     }
@@ -971,7 +973,7 @@ fn cmd_http(args: &str) {
             syscall::write_str("...\n");
 
             let mut resolved_ip = [0u8; 4];
-            if syscall::dns_lookup(host, &mut resolved_ip) < 0 {
+            if netd_dns_lookup(host, &mut resolved_ip).is_err() {
                 syscall::write_str("Error: DNS lookup failed\n");
                 return;
             }
@@ -988,7 +990,7 @@ fn cmd_http(args: &str) {
     write_ip(&ip);
     syscall::write_str(":80...\n");
 
-    if syscall::tcp_connect(&ip, 80) < 0 {
+    if netd_tcp_connect(&ip, 80).is_err() {
         syscall::write_str("Error: TCP connect failed\n");
         return;
     }
@@ -999,17 +1001,17 @@ fn cmd_http(args: &str) {
     syscall::write_str("Sending HTTP request...\n");
 
     // GET line
-    let _ = syscall::tcp_send(b"GET ");
-    let _ = syscall::tcp_send(path.as_bytes());
-    let _ = syscall::tcp_send(b" HTTP/1.0\r\n");
+    let _ = netd_tcp_send(b"GET ");
+    let _ = netd_tcp_send(path.as_bytes());
+    let _ = netd_tcp_send(b" HTTP/1.0\r\n");
 
     // Host header
-    let _ = syscall::tcp_send(b"Host: ");
-    let _ = syscall::tcp_send(host.as_bytes());
-    let _ = syscall::tcp_send(b"\r\n");
+    let _ = netd_tcp_send(b"Host: ");
+    let _ = netd_tcp_send(host.as_bytes());
+    let _ = netd_tcp_send(b"\r\n");
 
     // Connection header and end of headers
-    let _ = syscall::tcp_send(b"Connection: close\r\n\r\n");
+    let _ = netd_tcp_send(b"Connection: close\r\n\r\n");
 
     // レスポンスを受信
     syscall::write_str("Receiving response...\n");
@@ -1017,7 +1019,10 @@ fn cmd_http(args: &str) {
 
     let mut buf = [0u8; 1024];
     loop {
-        let n = syscall::tcp_recv(&mut buf, 5000);
+        let n = match netd_tcp_recv(&mut buf, 5000) {
+            Ok(n) => n,
+            Err(_) => -1,
+        };
         if n <= 0 {
             break;
         }
@@ -1033,7 +1038,140 @@ fn cmd_http(args: &str) {
     syscall::write_str("\n--- End ---\n");
 
     // 接続を閉じる
-    let _ = syscall::tcp_close();
+    let _ = netd_tcp_close();
+}
+
+// =================================================================
+// netd クライアント
+// =================================================================
+
+const OPCODE_DNS_LOOKUP: u32 = 1;
+const OPCODE_TCP_CONNECT: u32 = 2;
+const OPCODE_TCP_SEND: u32 = 3;
+const OPCODE_TCP_RECV: u32 = 4;
+const OPCODE_TCP_CLOSE: u32 = 5;
+
+const IPC_REQ_HEADER: usize = 8;
+const IPC_RESP_HEADER: usize = 12;
+
+fn init_net_service() {
+    // 既に起動済みなら何もしない
+    unsafe {
+        if NETD_TASK_ID != 0 {
+            return;
+        }
+    }
+
+    // disk.img から NETD.ELF を起動する
+    let id = syscall::spawn("/NETD.ELF");
+    if id < 0 {
+        syscall::write_str("Warning: netd not available\n");
+        return;
+    }
+    unsafe {
+        NETD_TASK_ID = id as u64;
+    }
+}
+
+fn netd_dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> Result<(), ()> {
+    let payload = domain.as_bytes();
+    let mut resp = [0u8; 2048];
+    let (status, len) = netd_request(OPCODE_DNS_LOOKUP, payload, &mut resp)?;
+    if status < 0 || len != 4 {
+        return Err(());
+    }
+    ip_out.copy_from_slice(&resp[..4]);
+    Ok(())
+}
+
+fn netd_tcp_connect(ip: &[u8; 4], port: u16) -> Result<(), ()> {
+    let mut payload = [0u8; 6];
+    payload[0..4].copy_from_slice(ip);
+    payload[4..6].copy_from_slice(&port.to_le_bytes());
+    let mut resp = [0u8; 2048];
+    let (status, _) = netd_request(OPCODE_TCP_CONNECT, &payload, &mut resp)?;
+    if status < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+fn netd_tcp_send(data: &[u8]) -> Result<(), ()> {
+    let mut resp = [0u8; 2048];
+    let (status, _) = netd_request(OPCODE_TCP_SEND, data, &mut resp)?;
+    if status < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+fn netd_tcp_recv(buf: &mut [u8], timeout_ms: u64) -> Result<i64, ()> {
+    let mut payload = [0u8; 12];
+    let max_len = buf.len() as u32;
+    payload[0..4].copy_from_slice(&max_len.to_le_bytes());
+    payload[4..12].copy_from_slice(&timeout_ms.to_le_bytes());
+
+    let mut resp = [0u8; 2048];
+    let (status, len) = netd_request(OPCODE_TCP_RECV, &payload, &mut resp)?;
+    if status < 0 {
+        return Err(());
+    }
+    let copy_len = core::cmp::min(buf.len(), len);
+    buf[..copy_len].copy_from_slice(&resp[..copy_len]);
+    Ok(copy_len as i64)
+}
+
+fn netd_tcp_close() -> Result<(), ()> {
+    let mut resp = [0u8; 2048];
+    let (status, _) = netd_request(OPCODE_TCP_CLOSE, &[], &mut resp)?;
+    if status < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32, usize), ()> {
+    let mut req = [0u8; 2048];
+    if IPC_REQ_HEADER + payload.len() > req.len() {
+        return Err(());
+    }
+    req[0..4].copy_from_slice(&opcode.to_le_bytes());
+    req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    req[8..8 + payload.len()].copy_from_slice(payload);
+
+    let netd_id = unsafe { NETD_TASK_ID };
+    if netd_id == 0 {
+        return Err(());
+    }
+
+    if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
+        return Err(());
+    }
+
+    let mut sender = 0u64;
+    let n = syscall::ipc_recv(&mut sender, resp_buf, 5000);
+    if n < 0 {
+        return Err(());
+    }
+    let n = n as usize;
+    if n < IPC_RESP_HEADER {
+        return Err(());
+    }
+
+    let resp_opcode = u32::from_le_bytes([resp_buf[0], resp_buf[1], resp_buf[2], resp_buf[3]]);
+    if resp_opcode != opcode {
+        return Err(());
+    }
+    let status = i32::from_le_bytes([resp_buf[4], resp_buf[5], resp_buf[6], resp_buf[7]]);
+    let len = u32::from_le_bytes([resp_buf[8], resp_buf[9], resp_buf[10], resp_buf[11]]) as usize;
+    if IPC_RESP_HEADER + len > n {
+        return Err(());
+    }
+
+    Ok((status, len))
 }
 
 /// IP アドレスを表示

@@ -1232,7 +1232,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 8. virtio-blk のテスト
+        // 8. IPC のテスト
+        if self.test_ipc() {
+            Self::print_pass("ipc");
+            passed += 1;
+        } else {
+            Self::print_fail("ipc");
+            failed += 1;
+        }
+
+        // 9. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1241,7 +1250,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 9. FAT16 のテスト
+        // 10. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1250,7 +1259,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 10. ネットワーク (DNS) のテスト
+        // 11. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1481,6 +1490,23 @@ impl Shell {
             Ok(n) => n == 512 && buf[510] == 0x55 && buf[511] == 0xAA,
             Err(_) => false,
         }
+    }
+
+    /// IPC のテスト
+    /// 自分宛に送信して受信できることを確認する
+    fn test_ipc(&self) -> bool {
+        let task_id = crate::scheduler::current_task_id();
+        let data = b"ping";
+        if crate::ipc::send(task_id, task_id, data.to_vec()).is_err() {
+            return false;
+        }
+
+        let msg = match crate::ipc::recv(task_id, 1000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+
+        msg.data == data
     }
 
     /// Handle から EOF まで読み取る

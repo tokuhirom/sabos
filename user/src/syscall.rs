@@ -34,11 +34,11 @@ use core::arch::asm;
 /// - ファイルシステム: 10-19
 /// - システム情報: 20-29
 /// - プロセス管理: 30-39
-/// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
 /// - ファイルハンドル: 70-79
 /// - ブロックデバイス: 80-89
+/// - IPC: 90-99
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
@@ -55,13 +55,6 @@ pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラム
 pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 
-// ネットワーク (40-49)
-pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
-pub const SYS_TCP_CONNECT: u64 = 41; // tcp_connect(ip_ptr, port) — TCP 接続
-pub const SYS_TCP_SEND: u64 = 42;    // tcp_send(data_ptr, data_len) — TCP 送信
-pub const SYS_TCP_RECV: u64 = 43;    // tcp_recv(buf_ptr, buf_len, timeout_ms) — TCP 受信
-pub const SYS_TCP_CLOSE: u64 = 44;   // tcp_close() — TCP 切断
-
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 
@@ -71,6 +64,10 @@ pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
 pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
+
+// IPC (90-99)
+pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
+pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
 
 /// システムコールの戻り値を表す型
 ///
@@ -300,6 +297,27 @@ pub fn block_write(sector: u64, buf: &[u8]) -> SyscallResult {
 }
 
 // =================================================================
+// IPC 関連
+// =================================================================
+
+/// IPC メッセージを送信する
+pub fn ipc_send(dest_task_id: u64, buf: &[u8]) -> SyscallResult {
+    let buf_ptr = buf.as_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall3(SYS_IPC_SEND, dest_task_id, buf_ptr, buf_len) as i64 }
+}
+
+/// IPC メッセージを受信する
+///
+/// sender_out に送信元タスクIDを書き込む。
+pub fn ipc_recv(sender_out: &mut u64, buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
+    let sender_ptr = sender_out as *mut u64 as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_IPC_RECV, sender_ptr, buf_ptr, buf_len, timeout_ms) as i64 }
+}
+
+// =================================================================
 // システム情報関連
 // =================================================================
 
@@ -435,80 +453,6 @@ pub fn spawn(path: &str) -> SyscallResult {
 /// 指定した時間だけ現在のタスクをスリープ状態にする。
 pub fn sleep(ms: u64) {
     unsafe { syscall1(SYS_SLEEP, ms); }
-}
-
-// =================================================================
-// ネットワーク関連
-// =================================================================
-
-/// DNS 解決
-///
-/// # 引数
-/// - `domain`: ドメイン名
-/// - `ip_out`: 解決した IP アドレスを格納する配列（4 バイト）
-///
-/// # 戻り値
-/// - 0（成功時）
-/// - 負の値（エラー時）
-pub fn dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> SyscallResult {
-    let domain_ptr = domain.as_ptr() as u64;
-    let domain_len = domain.len() as u64;
-    let ip_ptr = ip_out.as_mut_ptr() as u64;
-    unsafe { syscall3(SYS_DNS_LOOKUP, domain_ptr, domain_len, ip_ptr) as i64 }
-}
-
-/// TCP 接続
-///
-/// # 引数
-/// - `ip`: 接続先 IP アドレス（4 バイト）
-/// - `port`: 接続先ポート番号
-///
-/// # 戻り値
-/// - 0（成功時）
-/// - 負の値（エラー時）
-pub fn tcp_connect(ip: &[u8; 4], port: u16) -> SyscallResult {
-    let ip_ptr = ip.as_ptr() as u64;
-    let port_val = port as u64;
-    unsafe { syscall2(SYS_TCP_CONNECT, ip_ptr, port_val) as i64 }
-}
-
-/// TCP 送信
-///
-/// # 引数
-/// - `data`: 送信するデータ
-///
-/// # 戻り値
-/// - 送信したバイト数（成功時）
-/// - 負の値（エラー時）
-pub fn tcp_send(data: &[u8]) -> SyscallResult {
-    let data_ptr = data.as_ptr() as u64;
-    let data_len = data.len() as u64;
-    unsafe { syscall2(SYS_TCP_SEND, data_ptr, data_len) as i64 }
-}
-
-/// TCP 受信
-///
-/// # 引数
-/// - `buf`: 受信データを格納するバッファ
-/// - `timeout_ms`: タイムアウト（ミリ秒）
-///
-/// # 戻り値
-/// - 受信したバイト数（成功時）
-/// - 0（タイムアウトまたは接続終了時）
-/// - 負の値（エラー時）
-pub fn tcp_recv(buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
-    let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_TCP_RECV, buf_ptr, buf_len, timeout_ms) as i64 }
-}
-
-/// TCP 切断
-///
-/// # 戻り値
-/// - 0（成功時）
-/// - 負の値（エラー時）
-pub fn tcp_close() -> SyscallResult {
-    unsafe { syscall0(SYS_TCP_CLOSE) as i64 }
 }
 
 // =================================================================

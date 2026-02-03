@@ -46,6 +46,8 @@ pub enum SyscallError {
     FileNotFound,
     /// 不正なハンドル
     InvalidHandle,
+    /// タイムアウト
+    Timeout,
     /// 不明なシステムコール
     UnknownSyscall,
     /// 未対応
@@ -70,6 +72,7 @@ impl SyscallError {
             SyscallError::InvalidUtf8 => -22,         // EINVAL
             SyscallError::FileNotFound => -2,         // ENOENT
             SyscallError::InvalidHandle => -1002,     // SABOS: InvalidHandle
+            SyscallError::Timeout => -1004,           // SABOS: Timeout
             SyscallError::UnknownSyscall => -38,      // ENOSYS
             SyscallError::NotSupported => -1003,      // SABOS: NotSupported
             SyscallError::Other => -1,                // EPERM

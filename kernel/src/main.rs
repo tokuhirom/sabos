@@ -12,6 +12,7 @@ mod framebuffer;
 mod gdt;
 mod handle;
 mod interrupts;
+mod ipc;
 mod memory;
 mod paging;
 mod panic;

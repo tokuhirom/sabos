@@ -6,6 +6,7 @@ unexport RUSTUP_TOOLCHAIN
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
+NETD_ELF = user/target/x86_64-unknown-none/debug/netd
 ESP_DIR = esp/EFI/BOOT
 
 # OVMF ファームウェアの検出（Ubuntu: /usr/share/OVMF/）
@@ -62,6 +63,7 @@ disk-img: build-user
 	echo "Hello from FAT16!" > /tmp/hello.txt
 	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
 	mcopy -i $(DISK_IMG) $(USER_ELF) ::HELLO.ELF
+	mcopy -i $(DISK_IMG) $(NETD_ELF) ::NETD.ELF
 	@echo "Disk image created: $(DISK_IMG)"
 
 run: build $(ESP_DIR) $(DISK_IMG)

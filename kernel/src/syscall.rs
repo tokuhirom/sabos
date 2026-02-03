@@ -47,6 +47,7 @@ use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 /// - 終了: 60
 /// - ファイルハンドル: 70-79
 /// - ブロックデバイス: 80-89
+/// - IPC: 90-99
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
@@ -92,6 +93,10 @@ pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
 pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
+
+// IPC (90-99)
+pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
+pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
 
 // =================================================================
 // アセンブリエントリポイント
@@ -250,6 +255,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         // ブロックデバイス
         SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
         SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
+        // IPC
+        SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
+        SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
         // システム制御
         SYS_HALT => sys_halt(),
         SYS_EXIT => {
@@ -571,6 +579,53 @@ pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sy
     let drv = drv.as_mut().ok_or(SyscallError::Other)?;
     drv.write_sector(arg1, buf).map_err(|_| SyscallError::Other)?;
     Ok(len as u64)
+}
+
+/// SYS_IPC_SEND: メッセージを送信する
+///
+/// 引数:
+///   arg1 — 宛先タスクID
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_ipc_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let len = arg3 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf = buf_slice.as_slice();
+
+    let sender = crate::scheduler::current_task_id();
+    crate::ipc::send(sender, arg1, buf.to_vec())?;
+    Ok(0)
+}
+
+/// SYS_IPC_RECV: メッセージを受信する
+///
+/// 引数:
+///   arg1 — 送信元タスクIDの書き込み先（ユーザー空間）
+///   arg2 — 受信バッファのポインタ（ユーザー空間）
+///   arg3 — 受信バッファの長さ
+///   arg4 — タイムアウト (ms). 0 は無期限
+///
+/// 戻り値:
+///   読み取ったバイト数（成功時）
+///   負の値（エラー時）
+fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg3 as usize;
+    let sender_ptr = UserPtr::<u64>::from_raw(arg1)?;
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let task_id = crate::scheduler::current_task_id();
+    let msg = crate::ipc::recv(task_id, arg4)?;
+
+    let copy_len = core::cmp::min(buf.len(), msg.data.len());
+    buf[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+    sender_ptr.write(msg.sender);
+
+    Ok(copy_len as u64)
 }
 
 /// SYS_FILE_DELETE: ファイルを削除

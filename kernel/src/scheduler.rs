@@ -604,6 +604,18 @@ pub fn task_list() -> Vec<TaskInfo> {
         .collect()
 }
 
+/// 現在実行中のタスクIDを取得する
+pub fn current_task_id() -> u64 {
+    let sched = SCHEDULER.lock();
+    sched.tasks[sched.current].id
+}
+
+/// 指定したタスクIDが存在するか確認する
+pub fn task_exists(task_id: u64) -> bool {
+    let sched = SCHEDULER.lock();
+    sched.tasks.iter().any(|t| t.id == task_id && t.state != TaskState::Finished)
+}
+
 // =================================================================
 // ユーザープロセスのマルチタスク対応
 // =================================================================
