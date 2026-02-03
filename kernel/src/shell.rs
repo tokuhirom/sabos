@@ -108,6 +108,7 @@ impl Shell {
             "spawn" => self.cmd_spawn(args),
             "netpoll" => self.cmd_netpoll(args),
             "ip" => self.cmd_ip(),
+            "dns" => self.cmd_dns(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -143,6 +144,7 @@ impl Shell {
         kprintln!("  spawn <path>    - Spawn ELF as background process (e.g., spawn HELLO.ELF)");
         kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
         kprintln!("  ip              - Show IP configuration");
+        kprintln!("  dns <domain>    - Resolve domain name to IP address");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -996,6 +998,9 @@ impl Shell {
         kprintln!("  Gateway:    {}.{}.{}.{}",
             crate::net::GATEWAY_IP[0], crate::net::GATEWAY_IP[1],
             crate::net::GATEWAY_IP[2], crate::net::GATEWAY_IP[3]);
+        kprintln!("  DNS:        {}.{}.{}.{}",
+            crate::net::DNS_SERVER_IP[0], crate::net::DNS_SERVER_IP[1],
+            crate::net::DNS_SERVER_IP[2], crate::net::DNS_SERVER_IP[3]);
 
         let drv = crate::virtio_net::VIRTIO_NET.lock();
         if let Some(ref d) = *drv {
@@ -1004,6 +1009,41 @@ impl Shell {
                 d.mac_address[3], d.mac_address[4], d.mac_address[5]);
         } else {
             kprintln!("  MAC:        (no network device)");
+        }
+    }
+
+    /// dns コマンド: ドメイン名を IP アドレスに解決する。
+    fn cmd_dns(&self, args: &str) {
+        let domain = args.trim();
+        if domain.is_empty() {
+            kprintln!("Usage: dns <domain>");
+            kprintln!("  Example: dns example.com");
+            return;
+        }
+
+        {
+            let drv = crate::virtio_net::VIRTIO_NET.lock();
+            if drv.is_none() {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("virtio-net not available");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        }
+
+        kprintln!("Resolving '{}'...", domain);
+
+        match crate::net::dns_lookup(domain) {
+            Ok(ip) => {
+                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                kprintln!("{} -> {}.{}.{}.{}", domain, ip[0], ip[1], ip[2], ip[3]);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
+            Err(e) => {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("DNS lookup failed: {}", e);
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            }
         }
     }
 
