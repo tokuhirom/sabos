@@ -19,6 +19,7 @@ mod pci;
 mod shell;
 mod syscall;
 mod net;
+mod user_ptr;
 mod usermode;
 mod virtio_blk;
 mod virtio_net;

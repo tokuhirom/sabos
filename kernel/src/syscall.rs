@@ -22,12 +22,28 @@
 //
 // 注意: x86_64-unknown-uefi ターゲットでは extern "C" が Microsoft x64 ABI になる。
 // System V ABI（Linux）とは引数の渡し方が異なるので注意。
+//
+// ## 設計原則（CLAUDE.md より）
+//
+// - null 終端文字列を使わない: すべてのバッファは (ptr, len) 形式
+// - UserSlice<T> で型安全にラップ: ユーザー空間ポインタを検証してからアクセス
+// - SyscallError で明確なエラー型: 生の数値ではなく型付きエラーを使用
 
 use core::arch::global_asm;
+use crate::user_ptr::{UserSlice, SyscallError};
 
 /// システムコール番号の定義
-const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
-const SYS_EXIT: u64 = 60;  // exit() — ユーザープログラムを終了してカーネルに戻る
+///
+/// 番号体系は計画に従う:
+/// - コンソール I/O: 0-9
+/// - ファイルシステム: 10-19
+/// - システム情報: 20-29
+/// - プロセス管理: 30-39
+/// - ネットワーク: 40-49
+/// - システム制御: 50-59
+/// - 終了: 60
+pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
+pub const SYS_EXIT: u64 = 60;  // exit() — ユーザープログラムを終了してカーネルに戻る
 
 // =================================================================
 // アセンブリエントリポイント
@@ -126,41 +142,62 @@ unsafe extern "C" {
 ///
 /// 戻り値:
 ///   rax に格納されてユーザープログラムに返される
+///   エラーの場合は負の値（SyscallError::to_errno()）
 #[unsafe(no_mangle)]
 extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64) -> u64 {
+    // 各システムコールハンドラを呼び出し、Result を u64 に変換
+    let result = dispatch_inner(nr, arg1, arg2);
+    match result {
+        Ok(value) => value,
+        Err(err) => err.to_errno(),
+    }
+}
+
+/// システムコールの内部ディスパッチ関数
+///
+/// Result 型を返すことで、エラーハンドリングを型安全に行う。
+/// ? 演算子でエラーを早期リターンできる。
+fn dispatch_inner(nr: u64, arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     match nr {
-        SYS_WRITE => {
-            // write(buf_ptr, len)
-            // arg1 = バッファのポインタ（ユーザー空間だが、今は全メモリが
-            //         USER_ACCESSIBLE なのでカーネルから直接アクセス可能）
-            // arg2 = バッファの長さ（バイト数）
-            let ptr = arg1 as *const u8;
-            let len = arg2 as usize;
-
-            // ポインタと長さからスライスを作る。
-            // 本来はアドレス範囲のバリデーションが必要だが、
-            // 学習用プロジェクトでは省略する。
-            let slice = unsafe { core::slice::from_raw_parts(ptr, len) };
-
-            // UTF-8 として解釈してカーネルコンソールに出力する。
-            // 不正な UTF-8 の場合は置換文字 (U+FFFD) で表示。
-            let s = core::str::from_utf8(slice).unwrap_or("<invalid utf-8>");
-            crate::kprint!("{}", s);
-
-            // 書き込んだバイト数を返す
-            len as u64
-        }
+        SYS_WRITE => sys_write(arg1, arg2),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
             // 保存されたカーネルスタック（RSP/RBP）を復元して
             // run_in_usermode() の呼び出し元に return する。
+            // この関数は戻らない
             crate::usermode::exit_usermode();
         }
         _ => {
             // 未知のシステムコール番号
             crate::kprintln!("Unknown syscall: {}", nr);
-            u64::MAX // エラーを示す値
+            Err(SyscallError::UnknownSyscall)
         }
     }
+}
+
+/// SYS_WRITE: コンソールに文字列を出力
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ（バイト数）
+///
+/// 戻り値:
+///   書き込んだバイト数
+///
+/// UserSlice を使って型安全にユーザー空間のバッファを検証してからアクセスする。
+fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let len = arg2 as usize;
+
+    // UserSlice で型安全にユーザー空間のバッファを取得
+    // アドレス範囲、アラインメント、オーバーフローを検証
+    let user_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+
+    // UTF-8 として解釈してカーネルコンソールに出力
+    // as_str_lossy() は不正な UTF-8 を "<invalid utf-8>" に置換
+    let s = user_slice.as_str_lossy();
+    crate::kprint!("{}", s);
+
+    // 書き込んだバイト数を返す
+    Ok(len as u64)
 }
