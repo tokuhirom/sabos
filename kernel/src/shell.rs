@@ -99,7 +99,7 @@ impl Shell {
             "elf" => self.cmd_elf(),
             "lspci" => self.cmd_lspci(),
             "blkread" => self.cmd_blkread(args),
-            "ls" => self.cmd_ls(),
+            "ls" => self.cmd_ls(args),
             "cat" => self.cmd_cat(args),
             "run" => self.cmd_run(args),
             "panic" => self.cmd_panic(),
@@ -128,9 +128,9 @@ impl Shell {
         kprintln!("  elf             - Load and run an ELF binary in user mode");
         kprintln!("  lspci           - List PCI devices");
         kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
-        kprintln!("  ls              - List files on FAT16 disk");
-        kprintln!("  cat <file>      - Display file contents from FAT16 disk");
-        kprintln!("  run <file>      - Load and run ELF binary from FAT16 disk");
+        kprintln!("  ls [path]       - List files on FAT16 disk (e.g., ls /SUBDIR)");
+        kprintln!("  cat <path>      - Display file contents (e.g., cat /SUBDIR/FILE.TXT)");
+        kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -484,8 +484,13 @@ impl Shell {
         }
     }
 
-    /// ls コマンド: FAT16 ディスクのルートディレクトリにあるファイル一覧を表示する。
-    fn cmd_ls(&self) {
+    /// ls コマンド: FAT16 ディスクのディレクトリにあるファイル一覧を表示する。
+    ///
+    /// 引数なし: ルートディレクトリを表示
+    /// 引数あり: 指定パスのディレクトリを表示（例: ls /SUBDIR）
+    fn cmd_ls(&self, args: &str) {
+        let path = args.trim();
+
         let fs = match crate::fat16::Fat16::new() {
             Ok(fs) => fs,
             Err(e) => {
@@ -496,11 +501,28 @@ impl Shell {
             }
         };
 
-        match fs.list_root_dir() {
+        // パスが指定されていれば大文字に変換（FAT16 は大文字のみ）
+        let path_upper: alloc::string::String = if path.is_empty() {
+            String::from("/")
+        } else {
+            path.chars().map(|c| c.to_ascii_uppercase()).collect()
+        };
+
+        match fs.list_dir(&path_upper) {
             Ok(entries) => {
+                // ディレクトリパスを表示
+                if path_upper == "/" {
+                    kprintln!("Directory: /");
+                } else {
+                    kprintln!("Directory: {}", path_upper);
+                }
                 kprintln!("  Name          Size     Attr");
                 kprintln!("  ------------- -------- ----");
                 for entry in &entries {
+                    // "." と ".." は表示しない（サブディレクトリには存在するが見づらい）
+                    if entry.name == "." || entry.name == ".." {
+                        continue;
+                    }
                     let attr_str = if entry.attr & 0x10 != 0 {
                         "<DIR>"
                     } else {
@@ -511,7 +533,11 @@ impl Shell {
                         entry.name, entry.size, attr_str
                     );
                 }
-                kprintln!("  {} file(s)", entries.len());
+                // "." と ".." を除いた件数を表示
+                let count = entries.iter()
+                    .filter(|e| e.name != "." && e.name != "..")
+                    .count();
+                kprintln!("  {} file(s)", count);
             }
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));

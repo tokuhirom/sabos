@@ -189,93 +189,231 @@ impl Fat16 {
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 
-            // 各セクタには SECTOR_SIZE / 32 個のディレクトリエントリが入る
-            let entries_per_sector = SECTOR_SIZE / 32;
-            for i in 0..entries_per_sector {
-                let offset = i * 32;
-                let first_byte = buf[offset];
-
-                // 0x00: ここ以降にエントリはない（ディレクトリ終端）
-                if first_byte == 0x00 {
-                    return Ok(entries);
-                }
-
-                // 0xE5: 削除済みエントリ（スキップ）
-                if first_byte == 0xE5 {
-                    continue;
-                }
-
-                let attr = buf[offset + 11];
-
-                // LFN エントリはスキップ（長いファイル名の一部で、今回は対応しない）
-                if attr == ATTR_LFN {
-                    continue;
-                }
-
-                // ボリュームラベルはスキップ
-                if attr & ATTR_VOLUME_ID != 0 {
-                    continue;
-                }
-
-                // ファイル名を 8.3 形式からパース
-                // [0..8] = ファイル名（右パディングがスペース）
-                // [8..11] = 拡張子（右パディングがスペース）
-                let name_part = core::str::from_utf8(&buf[offset..offset + 8])
-                    .unwrap_or("????????")
-                    .trim_end();
-                let ext_part = core::str::from_utf8(&buf[offset + 8..offset + 11])
-                    .unwrap_or("???")
-                    .trim_end();
-
-                let name = if ext_part.is_empty() {
-                    String::from(name_part)
-                } else {
-                    let mut s = String::from(name_part);
-                    s.push('.');
-                    s.push_str(ext_part);
-                    s
-                };
-
-                // 先頭クラスタ番号（16ビット）
-                let first_cluster =
-                    u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
-                // ファイルサイズ（32ビット）
-                let size = u32::from_le_bytes([
-                    buf[offset + 28],
-                    buf[offset + 29],
-                    buf[offset + 30],
-                    buf[offset + 31],
-                ]);
-
-                entries.push(DirEntry {
-                    name,
-                    attr,
-                    first_cluster,
-                    size,
-                });
+            // ディレクトリエントリをパース
+            if let Some(result) = self.parse_dir_entries(&buf, &mut entries)? {
+                return Ok(result);
             }
         }
 
         Ok(entries)
     }
 
-    /// 指定したファイル名のファイルをルートディレクトリから探して内容を読み取る。
+    /// サブディレクトリのエントリ一覧を返す。
     ///
-    /// filename: 大文字の 8.3 形式ファイル名（例: "HELLO.TXT"）
+    /// サブディレクトリはルートディレクトリと違い、データ領域にクラスタチェーンとして配置される。
+    /// first_cluster: サブディレクトリの先頭クラスタ番号（DirEntry.first_cluster から取得）
+    pub fn list_subdir(&self, first_cluster: u16) -> Result<Vec<DirEntry>, &'static str> {
+        let mut entries = Vec::new();
+        let mut buf = [0u8; SECTOR_SIZE];
+        let mut cluster = first_cluster;
+
+        // クラスタチェーンを辿ってディレクトリエントリを読む
+        while cluster >= 2 && cluster <= 0xFFEF {
+            let first_sector_of_cluster = self.data_start_sector
+                + ((cluster as u32) - 2) * (self.bpb.sectors_per_cluster as u32);
+
+            // クラスタ内の各セクタを読む
+            for sect_offset in 0..(self.bpb.sectors_per_cluster as u32) {
+                let sector = first_sector_of_cluster + sect_offset;
+                {
+                    let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                    let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                    drv.read_sector(sector as u64, &mut buf)?;
+                }
+
+                // ディレクトリエントリをパース
+                if let Some(result) = self.parse_dir_entries(&buf, &mut entries)? {
+                    return Ok(result);
+                }
+            }
+
+            // FAT テーブルから次のクラスタ番号を読む
+            cluster = self.read_fat_entry(cluster)?;
+        }
+
+        Ok(entries)
+    }
+
+    /// セクタバッファからディレクトリエントリをパースして entries に追加する。
+    /// 終端マーカー (0x00) を見つけたら Some(entries) を返して早期終了を示す。
+    /// まだ続く場合は None を返す。
+    fn parse_dir_entries(
+        &self,
+        buf: &[u8; SECTOR_SIZE],
+        entries: &mut Vec<DirEntry>,
+    ) -> Result<Option<Vec<DirEntry>>, &'static str> {
+        let entries_per_sector = SECTOR_SIZE / 32;
+        for i in 0..entries_per_sector {
+            let offset = i * 32;
+            let first_byte = buf[offset];
+
+            // 0x00: ここ以降にエントリはない（ディレクトリ終端）
+            if first_byte == 0x00 {
+                return Ok(Some(entries.clone()));
+            }
+
+            // 0xE5: 削除済みエントリ（スキップ）
+            if first_byte == 0xE5 {
+                continue;
+            }
+
+            let attr = buf[offset + 11];
+
+            // LFN エントリはスキップ（長いファイル名の一部で、今回は対応しない）
+            if attr == ATTR_LFN {
+                continue;
+            }
+
+            // ボリュームラベルはスキップ
+            if attr & ATTR_VOLUME_ID != 0 {
+                continue;
+            }
+
+            // ファイル名を 8.3 形式からパース
+            // [0..8] = ファイル名（右パディングがスペース）
+            // [8..11] = 拡張子（右パディングがスペース）
+            let name_part = core::str::from_utf8(&buf[offset..offset + 8])
+                .unwrap_or("????????")
+                .trim_end();
+            let ext_part = core::str::from_utf8(&buf[offset + 8..offset + 11])
+                .unwrap_or("???")
+                .trim_end();
+
+            let name = if ext_part.is_empty() {
+                String::from(name_part)
+            } else {
+                let mut s = String::from(name_part);
+                s.push('.');
+                s.push_str(ext_part);
+                s
+            };
+
+            // 先頭クラスタ番号（16ビット）
+            let first_cluster =
+                u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
+            // ファイルサイズ（32ビット）
+            let size = u32::from_le_bytes([
+                buf[offset + 28],
+                buf[offset + 29],
+                buf[offset + 30],
+                buf[offset + 31],
+            ]);
+
+            entries.push(DirEntry {
+                name,
+                attr,
+                first_cluster,
+                size,
+            });
+        }
+
+        Ok(None)
+    }
+
+    /// パスを解析して、対象のディレクトリのエントリ一覧を返す。
+    ///
+    /// path: "/" 区切りのパス。"/" または "" ならルートディレクトリ。
+    ///       例: "/", "/SUBDIR", "/SUBDIR/NESTED"
+    pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>, &'static str> {
+        let path = path.trim();
+
+        // ルートディレクトリの場合
+        if path.is_empty() || path == "/" {
+            return self.list_root_dir();
+        }
+
+        // パスを "/" で分割してディレクトリを辿る
+        let path = path.trim_start_matches('/');
+        let mut current_entries = self.list_root_dir()?;
+
+        for component in path.split('/') {
+            if component.is_empty() {
+                continue;
+            }
+
+            // 大文字に変換して検索
+            let component_upper: String = component.chars()
+                .map(|c| c.to_ascii_uppercase())
+                .collect();
+
+            // 現在のディレクトリから該当エントリを探す
+            let entry = current_entries
+                .iter()
+                .find(|e| e.name == component_upper)
+                .ok_or("Directory not found")?;
+
+            // ディレクトリでなければエラー
+            if entry.attr & ATTR_DIRECTORY == 0 {
+                return Err("Not a directory");
+            }
+
+            // サブディレクトリのエントリ一覧を取得
+            current_entries = self.list_subdir(entry.first_cluster)?;
+        }
+
+        Ok(current_entries)
+    }
+
+    /// パスを解析して、対象のファイルまたはディレクトリのエントリを探す。
+    ///
+    /// path: "/" 区切りのパス。例: "/HELLO.TXT", "/SUBDIR/FILE.ELF"
+    pub fn find_entry(&self, path: &str) -> Result<DirEntry, &'static str> {
+        let path = path.trim().trim_start_matches('/');
+        if path.is_empty() {
+            return Err("Empty path");
+        }
+
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if parts.is_empty() {
+            return Err("Empty path");
+        }
+
+        // 最後の要素がファイル名、それ以前がディレクトリパス
+        let (dir_parts, filename) = parts.split_at(parts.len() - 1);
+
+        // ディレクトリを辿る
+        let mut current_entries = self.list_root_dir()?;
+        for component in dir_parts {
+            let component_upper: String = component.chars()
+                .map(|c| c.to_ascii_uppercase())
+                .collect();
+
+            let entry = current_entries
+                .iter()
+                .find(|e| e.name == component_upper)
+                .ok_or("Directory not found")?;
+
+            if entry.attr & ATTR_DIRECTORY == 0 {
+                return Err("Not a directory");
+            }
+
+            current_entries = self.list_subdir(entry.first_cluster)?;
+        }
+
+        // ファイル/ディレクトリを探す
+        let filename_upper: String = filename[0].chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        current_entries
+            .into_iter()
+            .find(|e| e.name == filename_upper)
+            .ok_or("File not found")
+    }
+
+    /// 指定したパスのファイルを読み取る。
+    ///
+    /// path: "/" 区切りのパス。例: "HELLO.TXT", "/SUBDIR/FILE.ELF"
     /// 戻り値: ファイルの内容のバイト列
     ///
     /// FAT16 のファイル読み取り手順:
-    ///   1. ルートディレクトリからファイルエントリを探す
+    ///   1. パスを辿ってファイルエントリを探す
     ///   2. 先頭クラスタ番号を取得
     ///   3. FAT テーブルを辿ってクラスタチェーンを追跡
     ///   4. 各クラスタのデータをセクタ単位で読み取る
-    pub fn read_file(&self, filename: &str) -> Result<Vec<u8>, &'static str> {
-        // ルートディレクトリからファイルを探す
-        let entries = self.list_root_dir()?;
-        let entry = entries
-            .iter()
-            .find(|e| e.name == filename)
-            .ok_or("File not found")?;
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+        // パスからファイルエントリを探す
+        let entry = self.find_entry(path)?;
 
         if entry.attr & ATTR_DIRECTORY != 0 {
             return Err("Cannot read directory");
@@ -286,8 +424,11 @@ impl Fat16 {
             entry.name, entry.first_cluster, entry.size
         );
 
-        let bytes_per_cluster =
-            (self.bpb.sectors_per_cluster as u32) * (self.bpb.bytes_per_sector as u32);
+        self.read_file_data(&entry)
+    }
+
+    /// DirEntry からファイルデータを読み取る（内部関数）。
+    fn read_file_data(&self, entry: &DirEntry) -> Result<Vec<u8>, &'static str> {
         let mut data = Vec::with_capacity(entry.size as usize);
         let mut remaining = entry.size as usize;
         let mut cluster = entry.first_cluster;
