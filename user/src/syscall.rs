@@ -38,15 +38,11 @@ use core::arch::asm;
 /// - システム制御: 50-59
 /// - 終了: 60
 /// - ファイルハンドル: 70-79
+/// - ブロックデバイス: 80-89
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
-
-// ファイルシステム (10-19)
-pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len)
-pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
-pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
 
 // システム情報 (20-29)
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報
@@ -72,20 +68,9 @@ pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
-// ファイルハンドル (70-79)
-pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, rights)
-pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
-pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
-
-/// Handle の読み取り権限
-pub const HANDLE_RIGHT_READ: u32 = 0x01;
-/// ユーザー空間に渡されるハンドル
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Handle {
-    pub id: u64,
-    pub token: u64,
-}
+// ブロックデバイス (80-89)
+pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
+pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 
 /// システムコールの戻り値を表す型
 ///
@@ -297,103 +282,21 @@ pub fn _exit() -> ! {
 }
 
 // =================================================================
-// ファイルシステム関連
+// ブロックデバイス関連
 // =================================================================
 
-/// ファイルの内容を読み取る
-///
-/// # 引数
-/// - `path`: ファイルパス（例: "/HELLO.TXT"）
-/// - `buf`: 読み取ったデータを格納するバッファ
-///
-/// # 戻り値
-/// - 読み取ったバイト数（成功時）
-/// - 負の値（エラー時）
-#[allow(dead_code)]
-
-/// ファイルを作成または上書き
-///
-/// # 引数
-/// - `path`: ファイルパス（ルートディレクトリのみ対応、例: "HELLO.TXT"）
-/// - `data`: 書き込むデータ
-///
-/// # 戻り値
-/// - 書き込んだバイト数（成功時）
-/// - 負の値（エラー時）
-pub fn file_write(path: &str, data: &[u8]) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    let data_ptr = data.as_ptr() as u64;
-    let data_len = data.len() as u64;
-    unsafe { syscall4(SYS_FILE_WRITE, path_ptr, path_len, data_ptr, data_len) as i64 }
-}
-
-/// ファイルを削除
-///
-/// # 引数
-/// - `path`: ファイルパス（ルートディレクトリのみ対応、例: "HELLO.TXT"）
-///
-/// # 戻り値
-/// - 0（成功時）
-/// - 負の値（エラー時）
-pub fn file_delete(path: &str) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    unsafe { syscall2(SYS_FILE_DELETE, path_ptr, path_len) as i64 }
-}
-
-/// ディレクトリの内容を一覧
-///
-/// # 引数
-/// - `path`: ディレクトリパス（"/" ならルート）
-/// - `buf`: エントリ名を改行区切りで格納するバッファ
-///
-/// # 戻り値
-/// - 書き込んだバイト数（成功時）
-/// - 負の値（エラー時）
-///
-/// # 出力形式
-/// ファイル名を改行区切りで出力。ディレクトリには末尾に "/" が付く。
-pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
+/// ブロックデバイスから 1 セクタ読み取る（512 バイト固定）
+pub fn block_read(sector: u64, buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
-    unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+    unsafe { syscall3(SYS_BLOCK_READ, sector, buf_ptr, buf_len) as i64 }
 }
 
-// =================================================================
-// ハンドル関連
-// =================================================================
-
-/// ファイルを開いて Handle を取得する
-///
-/// # 引数
-/// - `path`: ファイルパス
-/// - `rights`: 権限ビット（HANDLE_RIGHT_READ など）
-/// - `handle_out`: 取得した Handle の書き込み先
-pub fn open(path: &str, rights: u32, handle_out: &mut Handle) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    let handle_ptr = handle_out as *mut Handle as u64;
-    unsafe { syscall4(SYS_OPEN, path_ptr, path_len, handle_ptr, rights as u64) as i64 }
-}
-
-/// Handle から読み取る
-pub fn handle_read(handle: &Handle, buf: &mut [u8]) -> SyscallResult {
-    let handle_ptr = handle as *const Handle as u64;
-    let buf_ptr = buf.as_mut_ptr() as u64;
+/// ブロックデバイスへ 1 セクタ書き込む（512 バイト固定）
+pub fn block_write(sector: u64, buf: &[u8]) -> SyscallResult {
+    let buf_ptr = buf.as_ptr() as u64;
     let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_HANDLE_READ, handle_ptr, buf_ptr, buf_len) as i64 }
-}
-
-/// Handle に書き込む
-#[allow(dead_code)]
-
-/// Handle を閉じる
-pub fn handle_close(handle: &Handle) -> SyscallResult {
-    let handle_ptr = handle as *const Handle as u64;
-    unsafe { syscall1(SYS_HANDLE_CLOSE, handle_ptr) as i64 }
+    unsafe { syscall3(SYS_BLOCK_WRITE, sector, buf_ptr, buf_len) as i64 }
 }
 
 // =================================================================

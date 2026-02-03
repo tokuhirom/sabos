@@ -14,7 +14,12 @@
 
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 
+extern crate alloc;
+
+mod allocator;
+mod fat16;
 mod shell;
 mod syscall;
 

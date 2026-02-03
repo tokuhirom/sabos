@@ -25,6 +25,7 @@
 // - halt: システム停止
 
 use crate::syscall;
+use crate::fat16::Fat16;
 
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
@@ -208,18 +209,28 @@ fn cmd_ls(args: &str) {
     // パスが指定されなければルートディレクトリ
     let path = if args.is_empty() { "/" } else { args };
 
-    let mut buf = [0u8; FILE_BUFFER_SIZE];
-    let result = syscall::dir_list(path, &mut buf);
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
+            return;
+        }
+    };
 
-    if result < 0 {
-        syscall::write_str("Error: Failed to list directory\n");
-        return;
-    }
+    let entries = match fs.list_dir(path) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Error: Failed to list directory\n");
+            return;
+        }
+    };
 
-    // 結果を表示
-    let len = result as usize;
-    if len > 0 {
-        syscall::write(&buf[..len]);
+    for entry in entries {
+        syscall::write_str(&entry.name);
+        if (entry.attr & 0x10) != 0 {
+            syscall::write_str("/");
+        }
+        syscall::write_str("\n");
     }
 }
 
@@ -239,39 +250,27 @@ fn cmd_cat(args: &str) {
         &args  // とりあえずそのまま渡す（FAT16側で対応）
     };
 
-    let mut handle = syscall::Handle { id: 0, token: 0 };
-    let result = syscall::open(path, syscall::HANDLE_RIGHT_READ, &mut handle);
-    if result < 0 {
-        syscall::write_str("Error: File not found or cannot be read\n");
-        return;
-    }
-
-    let mut buf = [0u8; FILE_BUFFER_SIZE];
-    let mut last_byte: u8 = b'\n';
-    let mut read_any = false;
-
-    loop {
-        let n = syscall::handle_read(&handle, &mut buf);
-        if n < 0 {
-            syscall::write_str("Error: Failed to read file\n");
-            let _ = syscall::handle_close(&handle);
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
             return;
         }
-        let n = n as usize;
-        if n == 0 {
-            break;
+    };
+
+    let data = match fs.read_file(path.trim_start_matches('/')) {
+        Ok(d) => d,
+        Err(_) => {
+            syscall::write_str("Error: File not found or cannot be read\n");
+            return;
         }
+    };
 
-        read_any = true;
-        last_byte = buf[n - 1];
-        syscall::write(&buf[..n]);
-    }
-
-    let _ = syscall::handle_close(&handle);
-
-    // 最後が改行でなければ改行を追加
-    if read_any && last_byte != b'\n' {
-        syscall::write_str("\n");
+    if !data.is_empty() {
+        syscall::write(&data);
+        if *data.last().unwrap() != b'\n' {
+            syscall::write_str("\n");
+        }
     }
 }
 
@@ -285,9 +284,16 @@ fn cmd_write(args: &str) {
         return;
     }
 
-    let result = syscall::file_write(filename, data.as_bytes());
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
+            return;
+        }
+    };
 
-    if result < 0 {
+    let name = filename.trim_start_matches('/');
+    if fs.create_file(name, data.as_bytes()).is_err() {
         syscall::write_str("Error: Failed to write file\n");
         return;
     }
@@ -302,9 +308,16 @@ fn cmd_rm(args: &str) {
         return;
     }
 
-    let result = syscall::file_delete(args);
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
+            return;
+        }
+    };
 
-    if result < 0 {
+    let name = args.trim_start_matches('/');
+    if fs.delete_file(name).is_err() {
         syscall::write_str("Error: Failed to delete file\n");
         return;
     }

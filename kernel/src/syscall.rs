@@ -46,6 +46,7 @@ use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 /// - システム制御: 50-59
 /// - 終了: 60
 /// - ファイルハンドル: 70-79
+/// - ブロックデバイス: 80-89
 // コンソール I/O (0-9)
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
@@ -87,6 +88,10 @@ pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, ri
 pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
+
+// ブロックデバイス (80-89)
+pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
+pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 
 // =================================================================
 // アセンブリエントリポイント
@@ -242,6 +247,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_HANDLE_READ => sys_handle_read(arg1, arg2, arg3),
         SYS_HANDLE_WRITE => sys_handle_write(arg1, arg2, arg3),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
+        // ブロックデバイス
+        SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
+        SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
         // システム制御
         SYS_HALT => sys_halt(),
         SYS_EXIT => {
@@ -513,6 +521,56 @@ fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
 
     crate::handle::close(&handle)?;
     Ok(0)
+}
+
+/// SYS_BLOCK_READ: ブロックデバイスからセクタを読み取る
+///
+/// 引数:
+///   arg1 — セクタ番号
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ（512 バイト固定）
+///
+/// 戻り値:
+///   読み取ったバイト数（成功時）
+///   負の値（エラー時）
+pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let len = arg3 as usize;
+    if len != 512 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
+    let drv = drv.as_mut().ok_or(SyscallError::Other)?;
+    drv.read_sector(arg1, buf).map_err(|_| SyscallError::Other)?;
+    Ok(len as u64)
+}
+
+/// SYS_BLOCK_WRITE: ブロックデバイスにセクタを書き込む
+///
+/// 引数:
+///   arg1 — セクタ番号
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ（512 バイト固定）
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let len = arg3 as usize;
+    if len != 512 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf = buf_slice.as_slice();
+
+    let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
+    let drv = drv.as_mut().ok_or(SyscallError::Other)?;
+    drv.write_sector(arg1, buf).map_err(|_| SyscallError::Other)?;
+    Ok(len as u64)
 }
 
 /// SYS_FILE_DELETE: ファイルを削除

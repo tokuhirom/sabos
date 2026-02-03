@@ -1223,7 +1223,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 7. virtio-blk のテスト
+        // 7. ブロックデバイス syscalls のテスト
+        if self.test_block_syscall() {
+            Self::print_pass("block_syscall");
+            passed += 1;
+        } else {
+            Self::print_fail("block_syscall");
+            failed += 1;
+        }
+
+        // 8. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1232,7 +1241,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 8. FAT16 のテスト
+        // 9. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1241,7 +1250,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 9. ネットワーク (DNS) のテスト
+        // 10. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1461,6 +1470,17 @@ impl Shell {
         let _ = crate::handle::close(&handle);
 
         hello.starts_with(b"Hello from FAT16!")
+    }
+
+    /// ブロックデバイス syscalls のテスト
+    /// SYS_BLOCK_READ でセクタ 0 を読み取り、0x55AA を確認する
+    fn test_block_syscall(&self) -> bool {
+        let mut buf = [0u8; 512];
+        let ptr = buf.as_mut_ptr() as u64;
+        match crate::syscall::sys_block_read(0, ptr, buf.len() as u64) {
+            Ok(n) => n == 512 && buf[510] == 0x55 && buf[511] == 0xAA,
+            Err(_) => false,
+        }
     }
 
     /// Handle から EOF まで読み取る
