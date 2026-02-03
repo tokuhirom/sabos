@@ -21,6 +21,7 @@
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
+// - halt: システム停止
 
 use crate::syscall;
 
@@ -134,6 +135,7 @@ fn execute_command(line: &[u8]) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
         _ => {
             syscall::write_str("Unknown command: ");
@@ -179,6 +181,7 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
 }
 
@@ -741,4 +744,16 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
     }
 
     Some(ip)
+}
+
+// =================================================================
+// システム制御コマンド
+// =================================================================
+
+/// halt コマンド: システム停止
+///
+/// システムを停止する。この関数は戻らない。
+fn cmd_halt() {
+    syscall::write_str("System halted.\n");
+    syscall::halt();
 }

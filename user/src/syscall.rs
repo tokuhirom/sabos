@@ -66,6 +66,9 @@ pub const SYS_TCP_SEND: u64 = 42;    // tcp_send(data_ptr, data_len) — TCP 送
 pub const SYS_TCP_RECV: u64 = 43;    // tcp_recv(buf_ptr, buf_len, timeout_ms) — TCP 受信
 pub const SYS_TCP_CLOSE: u64 = 44;   // tcp_close() — TCP 切断
 
+// システム制御 (50-59)
+pub const SYS_HALT: u64 = 50;        // halt() — システム停止
+
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
@@ -556,4 +559,19 @@ pub fn tcp_recv(buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
 /// - 負の値（エラー時）
 pub fn tcp_close() -> SyscallResult {
     unsafe { syscall0(SYS_TCP_CLOSE) as i64 }
+}
+
+// =================================================================
+// システム制御関連
+// =================================================================
+
+/// システム停止
+///
+/// システムを停止する。この関数は戻らない。
+pub fn halt() -> ! {
+    unsafe {
+        syscall0(SYS_HALT);
+    }
+    // カーネルが制御を返さないので、ここには到達しない
+    loop {}
 }
