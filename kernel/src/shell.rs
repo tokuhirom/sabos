@@ -109,6 +109,7 @@ impl Shell {
             "netpoll" => self.cmd_netpoll(args),
             "ip" => self.cmd_ip(),
             "dns" => self.cmd_dns(args),
+            "http" => self.cmd_http(args),
             "selftest" => self.cmd_selftest(),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
@@ -146,6 +147,7 @@ impl Shell {
         kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
         kprintln!("  ip              - Show IP configuration");
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
+        kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
         kprintln!("  selftest        - Run automated self-tests");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
@@ -1047,6 +1049,115 @@ impl Shell {
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
+    }
+
+    /// http コマンド: HTTP GET リクエストを送信する。
+    ///
+    /// 使い方: http <host> [path]
+    /// 例: http example.com /
+    ///     http 93.184.216.34 /index.html
+    fn cmd_http(&self, args: &str) {
+        let parts: Vec<&str> = args.trim().split_whitespace().collect();
+        if parts.is_empty() {
+            kprintln!("Usage: http <host> [path]");
+            kprintln!("  Example: http example.com /");
+            return;
+        }
+
+        let host = parts[0];
+        let path = if parts.len() > 1 { parts[1] } else { "/" };
+
+        // virtio-net が利用可能か確認
+        {
+            let drv = crate::virtio_net::VIRTIO_NET.lock();
+            if drv.is_none() {
+                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                kprintln!("virtio-net not available");
+                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                return;
+            }
+        }
+
+        // ホストが IP アドレスかドメイン名かを判定
+        let ip = if let Some(parsed_ip) = self.parse_ip(host) {
+            parsed_ip
+        } else {
+            // DNS で解決
+            kprintln!("Resolving {}...", host);
+            match crate::net::dns_lookup(host) {
+                Ok(ip) => {
+                    kprintln!("Resolved to {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                    ip
+                }
+                Err(e) => {
+                    framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                    kprintln!("DNS lookup failed: {}", e);
+                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                    return;
+                }
+            }
+        };
+
+        // TCP 接続
+        kprintln!("Connecting to {}.{}.{}.{}:80...", ip[0], ip[1], ip[2], ip[3]);
+        if let Err(e) = crate::net::tcp_connect(ip, 80) {
+            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+            kprintln!("TCP connect failed: {}", e);
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            return;
+        }
+        kprintln!("Connected!");
+
+        // HTTP リクエストを送信
+        let request = alloc::format!(
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, host
+        );
+        kprintln!("Sending HTTP request...");
+        if let Err(e) = crate::net::tcp_send(request.as_bytes()) {
+            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+            kprintln!("TCP send failed: {}", e);
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+            let _ = crate::net::tcp_close();
+            return;
+        }
+
+        // レスポンスを受信
+        kprintln!("Receiving response...");
+        kprintln!("--- Response ---");
+        loop {
+            match crate::net::tcp_recv(5000) {
+                Ok(data) => {
+                    // UTF-8 として表示（無効な場合は置換）
+                    let text = core::str::from_utf8(&data)
+                        .unwrap_or("[binary data]");
+                    kprint!("{}", text);
+                }
+                Err(e) => {
+                    if e != "timeout" {
+                        kprintln!("\n[{}]", e);
+                    }
+                    break;
+                }
+            }
+        }
+        kprintln!("\n--- End ---");
+
+        // 接続を閉じる
+        let _ = crate::net::tcp_close();
+    }
+
+    /// IP アドレス文字列をパースする (例: "192.168.1.1")
+    fn parse_ip(&self, s: &str) -> Option<[u8; 4]> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        let mut ip = [0u8; 4];
+        for (i, part) in parts.iter().enumerate() {
+            ip[i] = part.parse().ok()?;
+        }
+        Some(ip)
     }
 
     /// selftest コマンド: 各サブシステムの自動テストを実行する。

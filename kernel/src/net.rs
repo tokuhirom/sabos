@@ -59,6 +59,8 @@ const ARP_HTYPE_ETHERNET: u16 = 1;
 
 /// ICMP
 const IP_PROTO_ICMP: u8 = 1;
+/// TCP
+const IP_PROTO_TCP: u8 = 6;
 /// UDP
 const IP_PROTO_UDP: u8 = 17;
 
@@ -231,6 +233,153 @@ impl UdpHeader {
 }
 
 // ============================================================
+// TCP ヘッダーと状態管理
+// ============================================================
+
+/// TCP ヘッダー (20 バイト、オプションなし)
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |          Source Port          |       Destination Port        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                        Sequence Number                        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    Acknowledgment Number                      |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |  Data |       |C|E|U|A|P|R|S|F|                               |
+/// | Offset| Rsrvd |W|C|R|C|S|S|Y|I|            Window             |
+/// |       |       |R|E|G|K|H|T|N|N|                               |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |           Checksum            |         Urgent Pointer        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct TcpHeader {
+    /// 送信元ポート
+    pub src_port: [u8; 2],
+    /// 宛先ポート
+    pub dst_port: [u8; 2],
+    /// シーケンス番号
+    pub seq_num: [u8; 4],
+    /// 確認応答番号
+    pub ack_num: [u8; 4],
+    /// データオフセット (上位4ビット) + 予約 (下位4ビット)
+    pub data_offset_reserved: u8,
+    /// フラグ (FIN, SYN, RST, PSH, ACK, URG, ECE, CWR)
+    pub flags: u8,
+    /// ウィンドウサイズ
+    pub window: [u8; 2],
+    /// チェックサム
+    pub checksum: [u8; 2],
+    /// 緊急ポインタ
+    pub urgent_ptr: [u8; 2],
+}
+
+/// TCP フラグ定数
+const TCP_FLAG_FIN: u8 = 0x01;
+const TCP_FLAG_SYN: u8 = 0x02;
+const TCP_FLAG_RST: u8 = 0x04;
+const TCP_FLAG_PSH: u8 = 0x08;
+const TCP_FLAG_ACK: u8 = 0x10;
+#[allow(dead_code)]
+const TCP_FLAG_URG: u8 = 0x20;
+
+impl TcpHeader {
+    pub fn src_port_u16(&self) -> u16 {
+        u16::from_be_bytes(self.src_port)
+    }
+
+    pub fn dst_port_u16(&self) -> u16 {
+        u16::from_be_bytes(self.dst_port)
+    }
+
+    pub fn seq_num_u32(&self) -> u32 {
+        u32::from_be_bytes(self.seq_num)
+    }
+
+    pub fn ack_num_u32(&self) -> u32 {
+        u32::from_be_bytes(self.ack_num)
+    }
+
+    /// データオフセット（ヘッダー長、4バイト単位）
+    pub fn data_offset(&self) -> usize {
+        ((self.data_offset_reserved >> 4) as usize) * 4
+    }
+
+    pub fn has_flag(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+/// TCP コネクションの状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    /// 初期状態
+    Closed,
+    /// SYN 送信済み、SYN-ACK 待ち
+    SynSent,
+    /// コネクション確立
+    Established,
+    /// FIN 送信済み、FIN-ACK 待ち
+    FinWait1,
+    /// FIN-ACK 受信、最終 ACK 待ち
+    FinWait2,
+    /// 相手から FIN 受信、ACK 送信済み
+    CloseWait,
+    /// FIN 送信済み（CloseWait から）
+    LastAck,
+    /// 最終待機（TIME_WAIT は省略）
+    TimeWait,
+}
+
+/// TCP コネクション
+///
+/// クライアント側の TCP コネクションを管理する。
+/// 簡易実装のため、同時に 1 コネクションのみ対応。
+pub struct TcpConnection {
+    /// コネクション状態
+    pub state: TcpState,
+    /// ローカルポート
+    pub local_port: u16,
+    /// リモート IP アドレス
+    pub remote_ip: [u8; 4],
+    /// リモートポート
+    pub remote_port: u16,
+    /// 送信シーケンス番号（次に送るバイトの番号）
+    pub seq_num: u32,
+    /// 確認応答番号（次に受け取るバイトの番号）
+    pub ack_num: u32,
+    /// 受信バッファ
+    pub recv_buffer: Vec<u8>,
+}
+
+impl TcpConnection {
+    pub fn new(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Self {
+        // 初期シーケンス番号は簡易的に固定値を使用
+        // 本来はランダムにすべきだが、学習用なので省略
+        let initial_seq = 1000;
+        Self {
+            state: TcpState::Closed,
+            local_port,
+            remote_ip,
+            remote_port,
+            seq_num: initial_seq,
+            ack_num: 0,
+            recv_buffer: Vec::new(),
+        }
+    }
+}
+
+/// グローバル TCP コネクション（簡易実装のため 1 つだけ）
+static TCP_CONNECTION: Mutex<Option<TcpConnection>> = Mutex::new(None);
+
+/// TCP レスポンス受信フラグ
+static TCP_RECV_FLAG: Mutex<bool> = Mutex::new(false);
+
+// ============================================================
 // パケット処理
 // ============================================================
 
@@ -349,6 +498,9 @@ fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
     match ip_header.protocol {
         IP_PROTO_ICMP => {
             handle_icmp(ip_header, ip_payload);
+        }
+        IP_PROTO_TCP => {
+            handle_tcp(ip_header, ip_payload);
         }
         IP_PROTO_UDP => {
             handle_udp(ip_header, ip_payload);
@@ -877,4 +1029,524 @@ fn skip_dns_name(data: &[u8], mut offset: usize) -> Result<usize, &'static str> 
         // 通常のラベル
         offset += 1 + len as usize;
     }
+}
+
+// ============================================================
+// TCP クライアント
+// ============================================================
+//
+// TCP (Transmission Control Protocol) はコネクション指向の
+// 信頼性のあるストリームプロトコル。
+//
+// ## 3-way ハンドシェイク
+//
+// クライアント → サーバー: SYN (seq=x)
+// サーバー → クライアント: SYN-ACK (seq=y, ack=x+1)
+// クライアント → サーバー: ACK (seq=x+1, ack=y+1)
+//
+// ## コネクション終了 (4-way)
+//
+// クライアント → サーバー: FIN
+// サーバー → クライアント: ACK
+// サーバー → クライアント: FIN
+// クライアント → サーバー: ACK
+
+/// TCP パケットを処理する
+fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
+    if payload.len() < 20 {
+        return;
+    }
+
+    let tcp_header = unsafe { &*(payload.as_ptr() as *const TcpHeader) };
+    let header_len = tcp_header.data_offset();
+
+    if payload.len() < header_len {
+        return;
+    }
+
+    let tcp_payload = &payload[header_len..];
+
+    let src_port = tcp_header.src_port_u16();
+    let dst_port = tcp_header.dst_port_u16();
+    let seq = tcp_header.seq_num_u32();
+    let ack = tcp_header.ack_num_u32();
+    let flags = tcp_header.flags;
+
+    serial_println!(
+        "tcp: packet from {}:{} -> :{}, seq={}, ack={}, flags={:#04x}, len={}",
+        ip_header.src_ip[0], src_port, dst_port, seq, ack, flags, tcp_payload.len()
+    );
+
+    // 現在のコネクションを取得
+    let mut conn_lock = TCP_CONNECTION.lock();
+    let conn = match conn_lock.as_mut() {
+        Some(c) => c,
+        None => return, // コネクションがなければ無視
+    };
+
+    // ポートとアドレスが一致するか確認
+    if src_port != conn.remote_port || dst_port != conn.local_port {
+        return;
+    }
+    if ip_header.src_ip != conn.remote_ip {
+        return;
+    }
+
+    // 状態に応じた処理
+    match conn.state {
+        TcpState::SynSent => {
+            // SYN-ACK を待っている
+            if tcp_header.has_flag(TCP_FLAG_SYN) && tcp_header.has_flag(TCP_FLAG_ACK) {
+                serial_println!("tcp: received SYN-ACK");
+                // ACK 番号が正しいか確認 (我々の SYN の seq + 1)
+                if ack == conn.seq_num + 1 {
+                    conn.seq_num = ack; // 次の送信 seq
+                    conn.ack_num = seq + 1; // 相手の SYN を確認
+                    conn.state = TcpState::Established;
+
+                    // ACK を送信
+                    drop(conn_lock);
+                    send_tcp_ack();
+
+                    // 受信フラグをセット
+                    let mut flag = TCP_RECV_FLAG.lock();
+                    *flag = true;
+
+                    serial_println!("tcp: connection established");
+                }
+            } else if tcp_header.has_flag(TCP_FLAG_RST) {
+                serial_println!("tcp: connection refused (RST)");
+                conn.state = TcpState::Closed;
+                let mut flag = TCP_RECV_FLAG.lock();
+                *flag = true;
+            }
+        }
+        TcpState::Established => {
+            // データ受信または FIN
+            if tcp_header.has_flag(TCP_FLAG_FIN) {
+                serial_println!("tcp: received FIN");
+                conn.ack_num = seq + 1;
+                conn.state = TcpState::CloseWait;
+
+                // ACK を送信
+                drop(conn_lock);
+                send_tcp_ack();
+            } else if tcp_payload.len() > 0 {
+                // データを受信バッファに追加
+                serial_println!("tcp: received {} bytes of data", tcp_payload.len());
+                conn.recv_buffer.extend_from_slice(tcp_payload);
+                conn.ack_num = seq + tcp_payload.len() as u32;
+
+                // ACK を送信
+                drop(conn_lock);
+                send_tcp_ack();
+            } else if tcp_header.has_flag(TCP_FLAG_ACK) {
+                // 純粋な ACK（データ送信への確認）
+                // seq_num の更新は不要（送信側で管理）
+            }
+
+            // 受信フラグをセット
+            let mut flag = TCP_RECV_FLAG.lock();
+            *flag = true;
+        }
+        TcpState::FinWait1 => {
+            // FIN-ACK または ACK を待っている
+            if tcp_header.has_flag(TCP_FLAG_ACK) {
+                if tcp_header.has_flag(TCP_FLAG_FIN) {
+                    // FIN-ACK 同時
+                    conn.ack_num = seq + 1;
+                    conn.state = TcpState::TimeWait;
+                    drop(conn_lock);
+                    send_tcp_ack();
+                } else {
+                    // ACK のみ
+                    conn.state = TcpState::FinWait2;
+                }
+                let mut flag = TCP_RECV_FLAG.lock();
+                *flag = true;
+            }
+        }
+        TcpState::FinWait2 => {
+            if tcp_header.has_flag(TCP_FLAG_FIN) {
+                conn.ack_num = seq + 1;
+                conn.state = TcpState::TimeWait;
+                drop(conn_lock);
+                send_tcp_ack();
+                let mut flag = TCP_RECV_FLAG.lock();
+                *flag = true;
+            }
+        }
+        TcpState::LastAck => {
+            if tcp_header.has_flag(TCP_FLAG_ACK) {
+                conn.state = TcpState::Closed;
+                let mut flag = TCP_RECV_FLAG.lock();
+                *flag = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// TCP ACK パケットを送信する
+fn send_tcp_ack() {
+    let conn_lock = TCP_CONNECTION.lock();
+    let conn = match conn_lock.as_ref() {
+        Some(c) => c,
+        None => return,
+    };
+
+    let _ = send_tcp_packet_internal(
+        conn.remote_ip,
+        conn.remote_port,
+        conn.local_port,
+        conn.seq_num,
+        conn.ack_num,
+        TCP_FLAG_ACK,
+        &[],
+    );
+}
+
+/// TCP パケットを送信する（内部用）
+fn send_tcp_packet_internal(
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    src_port: u16,
+    seq_num: u32,
+    ack_num: u32,
+    flags: u8,
+    payload: &[u8],
+) -> Result<(), &'static str> {
+    let mut drv = virtio_net::VIRTIO_NET.lock();
+    let drv = match drv.as_mut() {
+        Some(d) => d,
+        None => return Err("no network device"),
+    };
+
+    let my_mac = drv.mac_address;
+    let dst_mac = BROADCAST_MAC;
+
+    // Ethernet ヘッダー
+    let eth_header = EthernetHeader {
+        dst_mac,
+        src_mac: my_mac,
+        ethertype: ETHERTYPE_IPV4.to_be_bytes(),
+    };
+
+    // TCP ヘッダー (20 バイト、オプションなし)
+    let tcp_header = TcpHeader {
+        src_port: src_port.to_be_bytes(),
+        dst_port: dst_port.to_be_bytes(),
+        seq_num: seq_num.to_be_bytes(),
+        ack_num: ack_num.to_be_bytes(),
+        data_offset_reserved: 0x50, // 5 * 4 = 20 bytes
+        flags,
+        window: 65535u16.to_be_bytes(), // 最大ウィンドウサイズ
+        checksum: [0, 0], // 後で計算
+        urgent_ptr: [0, 0],
+    };
+
+    // IP ヘッダー
+    let tcp_length = 20 + payload.len();
+    let total_length = 20 + tcp_length;
+    let ip_header = Ipv4Header {
+        version_ihl: 0x45,
+        tos: 0,
+        total_length: (total_length as u16).to_be_bytes(),
+        identification: [0, 0],
+        flags_fragment: [0x40, 0x00], // Don't Fragment
+        ttl: 64,
+        protocol: IP_PROTO_TCP,
+        checksum: [0, 0],
+        src_ip: MY_IP,
+        dst_ip,
+    };
+
+    // IP ヘッダーチェックサムを計算
+    let ip_header_bytes = unsafe {
+        core::slice::from_raw_parts(&ip_header as *const _ as *const u8, 20)
+    };
+    let ip_checksum = calculate_checksum(ip_header_bytes);
+
+
+    // TCP チェックサムを計算（疑似ヘッダー + TCP ヘッダー + データ）
+    let tcp_checksum = calculate_tcp_checksum(
+        &MY_IP,
+        &dst_ip,
+        &tcp_header,
+        payload,
+    );
+
+
+    // パケットを構築
+    let mut packet = Vec::with_capacity(14 + 20 + tcp_length);
+
+    // Ethernet ヘッダー
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
+    });
+
+    // IP ヘッダー（チェックサムを設定）
+    let mut ip_header_with_checksum = ip_header;
+    ip_header_with_checksum.checksum = ip_checksum.to_be_bytes();
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
+    });
+
+    // TCP ヘッダー（チェックサムを設定）
+    let mut tcp_header_with_checksum = tcp_header;
+    tcp_header_with_checksum.checksum = tcp_checksum.to_be_bytes();
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&tcp_header_with_checksum as *const _ as *const u8, 20)
+    });
+
+    // TCP ペイロード
+    packet.extend_from_slice(payload);
+
+    // 送信
+    drv.send_packet(&packet)
+}
+
+/// TCP チェックサムを計算する
+///
+/// TCP チェックサムは疑似ヘッダーを含めて計算する:
+/// - 送信元 IP (4 bytes)
+/// - 宛先 IP (4 bytes)
+/// - 0x00 (1 byte)
+/// - プロトコル番号 (1 byte, TCP=6)
+/// - TCP 長 (2 bytes)
+/// - TCP ヘッダー + データ
+fn calculate_tcp_checksum(
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    tcp_header: &TcpHeader,
+    payload: &[u8],
+) -> u16 {
+    let tcp_len = 20 + payload.len();
+
+    // 疑似ヘッダー + TCP ヘッダー + データを構築
+    let mut data = Vec::with_capacity(12 + tcp_len);
+
+    // 疑似ヘッダー
+    data.extend_from_slice(src_ip);
+    data.extend_from_slice(dst_ip);
+    data.push(0);
+    data.push(IP_PROTO_TCP);
+    data.extend_from_slice(&(tcp_len as u16).to_be_bytes());
+
+    // TCP ヘッダー
+    data.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(tcp_header as *const _ as *const u8, 20)
+    });
+
+    // ペイロード
+    data.extend_from_slice(payload);
+
+    calculate_checksum(&data)
+}
+
+/// TCP コネクションを確立する（3-way ハンドシェイク）
+///
+/// # 引数
+/// - `dst_ip`: 宛先 IP アドレス
+/// - `dst_port`: 宛先ポート
+///
+/// # 戻り値
+/// - `Ok(())`: コネクション確立成功
+/// - `Err(&str)`: エラー
+pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<(), &'static str> {
+    // 既存のコネクションがあれば閉じる
+    {
+        let mut conn = TCP_CONNECTION.lock();
+        *conn = None;
+    }
+
+    // ローカルポート（簡易的に固定）
+    let local_port = 49152;
+
+    // 新しいコネクションを作成
+    let mut conn = TcpConnection::new(local_port, dst_ip, dst_port);
+    conn.state = TcpState::SynSent;
+    let initial_seq = conn.seq_num;
+
+    {
+        let mut conn_lock = TCP_CONNECTION.lock();
+        *conn_lock = Some(conn);
+    }
+
+    // 受信フラグをクリア
+    {
+        let mut flag = TCP_RECV_FLAG.lock();
+        *flag = false;
+    }
+
+    // SYN を送信
+    serial_println!("tcp: sending SYN");
+    send_tcp_packet_internal(
+        dst_ip,
+        dst_port,
+        local_port,
+        initial_seq,
+        0,
+        TCP_FLAG_SYN,
+        &[],
+    )?;
+
+    // SYN-ACK を待つ（ポーリング）
+    for _ in 0..1000000 {
+        poll_and_handle();
+
+        // 受信フラグをチェック
+        {
+            let flag = TCP_RECV_FLAG.lock();
+            if *flag {
+                break;
+            }
+        }
+
+        // 簡単なビジーウェイト
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // コネクション状態を確認
+    let conn = TCP_CONNECTION.lock();
+    match conn.as_ref() {
+        Some(c) if c.state == TcpState::Established => Ok(()),
+        Some(c) => {
+            serial_println!("tcp: connect failed, state={:?}", c.state);
+            Err("connection failed")
+        }
+        None => Err("no connection"),
+    }
+}
+
+/// TCP でデータを送信する
+pub fn tcp_send(data: &[u8]) -> Result<(), &'static str> {
+    let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
+        let mut conn = TCP_CONNECTION.lock();
+        let conn = conn.as_mut().ok_or("no connection")?;
+
+        if conn.state != TcpState::Established {
+            return Err("connection not established");
+        }
+
+        let result = (conn.remote_ip, conn.remote_port, conn.local_port,
+                     conn.seq_num, conn.ack_num);
+        conn.seq_num += data.len() as u32;
+        result
+    };
+
+    serial_println!("tcp: sending {} bytes", data.len());
+    send_tcp_packet_internal(
+        dst_ip,
+        dst_port,
+        local_port,
+        seq_num,
+        ack_num,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        data,
+    )
+}
+
+/// TCP でデータを受信する（ブロッキング、タイムアウト付き）
+pub fn tcp_recv(_timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
+    // 受信フラグをクリア
+    {
+        let mut flag = TCP_RECV_FLAG.lock();
+        *flag = false;
+    }
+
+    // ポーリングループ（簡易タイムアウト）
+    for _ in 0..500000 {
+        poll_and_handle();
+
+        // 受信バッファをチェック
+        {
+            let mut conn = TCP_CONNECTION.lock();
+            if let Some(ref mut c) = *conn {
+                if !c.recv_buffer.is_empty() {
+                    let data = core::mem::take(&mut c.recv_buffer);
+                    return Ok(data);
+                }
+                if c.state == TcpState::CloseWait || c.state == TcpState::Closed {
+                    // まだバッファにデータがあれば返す
+                    if !c.recv_buffer.is_empty() {
+                        let data = core::mem::take(&mut c.recv_buffer);
+                        return Ok(data);
+                    }
+                    return Err("connection closed");
+                }
+            }
+        }
+
+        // 簡単なビジーウェイト
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    Err("timeout")
+}
+
+/// TCP コネクションを閉じる
+pub fn tcp_close() -> Result<(), &'static str> {
+    let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
+        let mut conn = TCP_CONNECTION.lock();
+        let conn = conn.as_mut().ok_or("no connection")?;
+
+        if conn.state != TcpState::Established && conn.state != TcpState::CloseWait {
+            return Err("invalid state for close");
+        }
+
+        let result = (conn.remote_ip, conn.remote_port, conn.local_port,
+                     conn.seq_num, conn.ack_num);
+
+        if conn.state == TcpState::Established {
+            conn.state = TcpState::FinWait1;
+        } else {
+            conn.state = TcpState::LastAck;
+        }
+        conn.seq_num += 1; // FIN は 1 バイト消費
+        result
+    };
+
+    // FIN を送信
+    serial_println!("tcp: sending FIN");
+    send_tcp_packet_internal(
+        dst_ip,
+        dst_port,
+        local_port,
+        seq_num,
+        ack_num,
+        TCP_FLAG_FIN | TCP_FLAG_ACK,
+        &[],
+    )?;
+
+    // ACK を待つ（ポーリング）
+    for _ in 0..100000 {
+        poll_and_handle();
+
+        {
+            let conn = TCP_CONNECTION.lock();
+            if let Some(ref c) = *conn {
+                if c.state == TcpState::TimeWait || c.state == TcpState::Closed {
+                    break;
+                }
+            }
+        }
+
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // コネクションをクリア
+    {
+        let mut conn = TCP_CONNECTION.lock();
+        *conn = None;
+    }
+
+    serial_println!("tcp: connection closed");
+    Ok(())
 }
