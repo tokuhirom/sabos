@@ -113,11 +113,13 @@ make test
 - `scripts/` - テストスクリプト等
 - `docs/diary/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
 - `docs/images/` - スクリーンショット置き場
+- `docs/spec/` - 仕様ドキュメント置き場
 
 ## ドキュメント一覧
 
 - 開発日記: `docs/diary/YYYY-MM-DD.md`
 - スクリーンショット: `docs/images/`
+- 仕様ドキュメント: `docs/spec/`
 - `setup-ubuntu.sh` - Ubuntu 向け開発環境セットアップスクリプト
 
 ## Git Workflow
@@ -129,6 +131,7 @@ make test
 ## Development Principles
 
 - 開発日記を `docs/diary/YYYY-MM-DD.md` に書く。その日やったこと、学んだこと、スクショを残す
+- 仕様ドキュメントは `docs/spec/` に置く。`docs/` 直下には置かない
 - 習作プロジェクトなので楽しさと学びを重視
 - 一度作った機能は壊さない。GitHub Actions でビルドの成功を常に保証する
 - コメントはマシマシで書く。学習用プロジェクトなので「なぜそうしているか」「何をしているか」を後から読んで理解できるよう丁寧にコメントを残す
