@@ -109,6 +109,7 @@ impl Shell {
             "netpoll" => self.cmd_netpoll(args),
             "ip" => self.cmd_ip(),
             "dns" => self.cmd_dns(args),
+            "selftest" => self.cmd_selftest(),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -145,6 +146,7 @@ impl Shell {
         kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
         kprintln!("  ip              - Show IP configuration");
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
+        kprintln!("  selftest        - Run automated self-tests");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -1044,6 +1046,222 @@ impl Shell {
                 kprintln!("DNS lookup failed: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
+        }
+    }
+
+    /// selftest コマンド: 各サブシステムの自動テストを実行する。
+    /// CI で使いやすいように、各テスト結果を [PASS]/[FAIL] で出力し、
+    /// 最後にサマリーを出力する。
+    fn cmd_selftest(&self) {
+        kprintln!("=== SELFTEST START ===");
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        // 1. メモリアロケータのテスト
+        if self.test_memory_allocator() {
+            Self::print_pass("memory_allocator");
+            passed += 1;
+        } else {
+            Self::print_fail("memory_allocator");
+            failed += 1;
+        }
+
+        // 2. ページングのテスト
+        if self.test_paging() {
+            Self::print_pass("paging");
+            passed += 1;
+        } else {
+            Self::print_fail("paging");
+            failed += 1;
+        }
+
+        // 3. スケジューラのテスト
+        if self.test_scheduler() {
+            Self::print_pass("scheduler");
+            passed += 1;
+        } else {
+            Self::print_fail("scheduler");
+            failed += 1;
+        }
+
+        // 4. virtio-blk のテスト
+        if self.test_virtio_blk() {
+            Self::print_pass("virtio_blk");
+            passed += 1;
+        } else {
+            Self::print_fail("virtio_blk");
+            failed += 1;
+        }
+
+        // 5. FAT16 のテスト
+        if self.test_fat16() {
+            Self::print_pass("fat16");
+            passed += 1;
+        } else {
+            Self::print_fail("fat16");
+            failed += 1;
+        }
+
+        // 6. ネットワーク (DNS) のテスト
+        if self.test_network_dns() {
+            Self::print_pass("network_dns");
+            passed += 1;
+        } else {
+            Self::print_fail("network_dns");
+            failed += 1;
+        }
+
+        // サマリー出力
+        let total = passed + failed;
+        if failed == 0 {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("=== SELFTEST END: {}/{} PASSED ===", passed, total);
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        } else {
+            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+            kprintln!("=== SELFTEST END: {}/{} FAILED ===", failed, total);
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        }
+    }
+
+    /// テスト結果を緑色で [PASS] と表示
+    fn print_pass(name: &str) {
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("[PASS] {}", name);
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
+
+    /// テスト結果を赤色で [FAIL] と表示
+    fn print_fail(name: &str) {
+        framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+        kprintln!("[FAIL] {}", name);
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
+
+    /// メモリアロケータのテスト
+    /// Box でヒープ確保→解放が正常に動作するかを確認
+    fn test_memory_allocator(&self) -> bool {
+        use alloc::boxed::Box;
+        use alloc::vec;
+
+        // Box のアロケーション
+        let boxed = Box::new(12345u64);
+        if *boxed != 12345 {
+            return false;
+        }
+
+        // Vec のアロケーション（複数要素）
+        let mut v = vec![1u32, 2, 3, 4, 5];
+        v.push(6);
+        if v.len() != 6 || v[5] != 6 {
+            return false;
+        }
+
+        // 大きめのアロケーション
+        let big = vec![0u8; 4096];
+        if big.len() != 4096 {
+            return false;
+        }
+
+        // drop されてメモリが解放されることを期待（明示的なチェックは難しいので省略）
+        true
+    }
+
+    /// ページングのテスト
+    /// アドレス変換が正常に動作するかを確認
+    fn test_paging(&self) -> bool {
+        // 既知のアドレス（カーネルコード領域）の変換を試す
+        // カーネルはアイデンティティマッピングされているはずなので virt == phys
+        let test_addr = VirtAddr::new(0x100000); // 1MB
+        match paging::translate_addr(test_addr) {
+            Some(phys) => {
+                // アイデンティティマッピングの場合、phys == virt
+                phys.as_u64() == test_addr.as_u64()
+            }
+            None => false,
+        }
+    }
+
+    /// スケジューラのテスト
+    /// タスクを spawn して Finished になるまで待つ
+    fn test_scheduler(&self) -> bool {
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        // テスト用のフラグ（タスクが実行されたら true にする）
+        static TEST_FLAG: AtomicBool = AtomicBool::new(false);
+        TEST_FLAG.store(false, Ordering::SeqCst);
+
+        fn test_task() {
+            TEST_FLAG.store(true, Ordering::SeqCst);
+        }
+
+        // タスクを spawn
+        let task_id = scheduler::spawn("selftest_task", test_task);
+
+        // タスクが完了するまで yield（最大 100 回）
+        for _ in 0..100 {
+            scheduler::yield_now();
+            if TEST_FLAG.load(Ordering::SeqCst) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// virtio-blk のテスト
+    /// セクタ 0 を読み取り、FAT16 のブートシグネチャ (0x55AA) を確認
+    fn test_virtio_blk(&self) -> bool {
+        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
+        if let Some(ref mut d) = *drv {
+            let mut buf = [0u8; 512];
+            match d.read_sector(0, &mut buf) {
+                Ok(()) => {
+                    // FAT16 のブートセクタ末尾は 0x55AA
+                    buf[510] == 0x55 && buf[511] == 0xAA
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// FAT16 のテスト
+    /// HELLO.TXT ファイルを読み取り、内容が "Hello from FAT16!" で始まるか確認
+    fn test_fat16(&self) -> bool {
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        match fs.read_file("HELLO.TXT") {
+            Ok(data) => {
+                let expected = b"Hello from FAT16!";
+                data.len() >= expected.len() && &data[..expected.len()] == expected
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// ネットワーク (DNS) のテスト
+    /// example.com を解決してみる（QEMU SLIRP は常に応答を返すはず）
+    fn test_network_dns(&self) -> bool {
+        // virtio-net が利用可能か確認
+        {
+            let drv = crate::virtio_net::VIRTIO_NET.lock();
+            if drv.is_none() {
+                return false;
+            }
+        }
+
+        // DNS lookup を試行
+        match crate::net::dns_lookup("example.com") {
+            Ok(ip) => {
+                // 何らかの IP が返ってくれば OK（0.0.0.0 以外）
+                ip != [0, 0, 0, 0]
+            }
+            Err(_) => false,
         }
     }
 

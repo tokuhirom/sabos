@@ -1,4 +1,4 @@
-name: Build
+name: Build and Test
 
 on:
   push:
@@ -22,3 +22,31 @@ jobs:
 
       - name: Build kernel
         run: cd kernel && cargo build --target x86_64-unknown-uefi
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build  # build が成功してからテスト実行
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-uefi,x86_64-unknown-none
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools netcat-openbsd
+
+      - name: Build
+        run: make build
+
+      - name: Create disk image
+        run: make disk-img
+
+      - name: Create ESP directory
+        run: mkdir -p esp/EFI/BOOT
+
+      - name: Run selftest
+        run: make test

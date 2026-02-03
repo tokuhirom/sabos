@@ -2,7 +2,7 @@
 # Make の子プロセスには渡さないようにする
 unexport RUSTUP_TOOLCHAIN
 
-.PHONY: build build-user run run-gui screenshot clean disk-img
+.PHONY: build build-user run run-gui screenshot clean disk-img test
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -108,3 +108,10 @@ clean:
 	cd user && cargo clean
 	rm -rf esp
 	rm -f $(DISK_IMG)
+
+# 自動テストを実行する。
+# QEMU を起動して selftest コマンドを実行し、結果を検証する。
+# CI で使う場合はこのターゲットを呼ぶ。
+test: build $(ESP_DIR) $(DISK_IMG)
+	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
+	./scripts/run-selftest.sh
