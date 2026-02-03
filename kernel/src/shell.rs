@@ -1241,7 +1241,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 9. virtio-blk のテスト
+        // 9. 型安全 IPC のテスト
+        if self.test_ipc_typed() {
+            Self::print_pass("ipc_typed");
+            passed += 1;
+        } else {
+            Self::print_fail("ipc_typed");
+            failed += 1;
+        }
+
+        // 10. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1250,7 +1259,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 10. FAT16 のテスト
+        // 11. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1259,7 +1268,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 11. ネットワーク (DNS) のテスト
+        // 12. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1507,6 +1516,29 @@ impl Shell {
         };
 
         msg.data == data
+    }
+
+    /// 型安全 IPC のテスト
+    /// 同じタスクに typed メッセージを送受信できることを確認する
+    fn test_ipc_typed(&self) -> bool {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct TestMsg {
+            a: u32,
+            b: u64,
+        }
+
+        let task_id = crate::scheduler::current_task_id();
+        let data = TestMsg { a: 7, b: 42 };
+        if crate::ipc::send_typed(task_id, task_id, data).is_err() {
+            return false;
+        }
+
+        let msg = match crate::ipc::recv_typed::<TestMsg>(task_id, 1000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+
+        msg.sender == task_id && msg.data == data
     }
 
     /// Handle から EOF まで読み取る
