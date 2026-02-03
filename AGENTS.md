@@ -166,3 +166,120 @@ sabos> selftest
 - build: カーネルとユーザープログラムのビルド確認
 - test: QEMU で実際に起動して selftest を実行
 - 新機能を追加したら対応するテストも追加する
+
+## 動作確認手順
+
+### 自動テスト
+
+```bash
+make test
+```
+
+これで以下が自動的に実行される:
+1. ユーザーシェル起動を待機 (`user>` プロンプト)
+2. `exit` でユーザーシェルを終了
+3. カーネルシェル起動を待機 (`sabos>` プロンプト)
+4. `selftest` コマンドを実行
+5. 全テスト PASS を確認
+
+### 手動テスト（GUI モード）
+
+```bash
+make run-gui
+```
+
+#### 1. ユーザーシェルの確認
+
+起動後、ユーザーシェル (`user>` プロンプト) が表示される。
+
+**基本コマンド:**
+```
+user> help          # コマンド一覧
+user> echo Hello    # エコー
+user> clear         # 画面クリア
+```
+
+**ファイルシステム:**
+```
+user> ls            # ルートディレクトリ一覧
+user> ls /SUBDIR    # サブディレクトリ一覧
+user> cat HELLO.TXT # ファイル内容表示
+user> write TEST.TXT Hello World  # ファイル作成
+user> rm TEST.TXT   # ファイル削除
+```
+
+**システム情報:**
+```
+user> mem           # メモリ情報（JSON形式）
+user> ps            # タスク一覧（JSON形式）
+user> ip            # ネットワーク設定（JSON形式）
+```
+
+**プロセス実行:**
+```
+user> run /HELLO.ELF    # ELF バイナリを実行（フォアグラウンド）
+user> spawn /HELLO.ELF  # ELF バイナリを実行（バックグラウンド）
+user> sleep 1000        # 1000ms スリープ
+```
+
+**ネットワーク:**
+```
+user> dns google.com         # DNS 解決
+user> http example.com /     # HTTP GET リクエスト
+```
+
+**システム制御:**
+```
+user> halt          # システム停止（復帰不可）
+user> exit          # ユーザーシェル終了 → カーネルシェルへ
+```
+
+#### 2. カーネルシェルの確認
+
+`exit` でユーザーシェルを終了するとカーネルシェル (`sabos>` プロンプト) に移行する。
+
+**デバッグコマンド:**
+```
+sabos> selftest     # 自動テスト実行
+sabos> lspci        # PCI デバイス一覧
+sabos> blkread 0    # セクタ 0 の読み取り
+sabos> panic        # カーネルパニックのテスト
+```
+
+**期待される selftest 結果:**
+```
+=== SELFTEST START ===
+[PASS] memory_allocator
+[PASS] paging
+[PASS] scheduler
+[PASS] virtio_blk
+[PASS] fat16
+[PASS] network_dns
+=== SELFTEST END: 6/6 PASSED ===
+```
+
+### シェルの起動フロー
+
+```
+カーネル起動
+    ↓
+ユーザーシェル自動起動 (user>)
+    ↓
+exit コマンド
+    ↓
+カーネルシェルにフォールバック (sabos>)
+```
+
+### トラブルシューティング
+
+**ユーザーシェルが起動しない場合:**
+- `kernel/src/main.rs` の `Starting user shell...` 付近のログを確認
+- ELF バイナリが正しくビルドされているか確認 (`make build-user`)
+
+**selftest が失敗する場合:**
+- 個別のテスト項目を確認して、どのサブシステムで失敗しているか特定
+- `network_dns` 失敗時は QEMU のネットワーク設定を確認
+
+**キーボード入力が効かない場合:**
+- GUI モード (`make run-gui`) で実行しているか確認
+- シリアルモード (`make run`) ではキーボード入力は使えない
