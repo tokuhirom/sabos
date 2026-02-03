@@ -53,6 +53,11 @@ pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr,
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len) — ファイル削除
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len) — ディレクトリ一覧
 
+// システム情報 (20-29)
+pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報取得
+pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧取得
+pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報取得
+
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
 
@@ -189,6 +194,10 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_FILE_WRITE => sys_file_write(arg1, arg2, arg3, arg4),
         SYS_FILE_DELETE => sys_file_delete(arg1, arg2),
         SYS_DIR_LIST => sys_dir_list(arg1, arg2, arg3, arg4),
+        // システム情報
+        SYS_GET_MEM_INFO => sys_get_mem_info(arg1, arg2),
+        SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
+        SYS_GET_NET_INFO => sys_get_net_info(arg1, arg2),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
@@ -423,4 +432,174 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
     }
 
     Ok(offset as u64)
+}
+
+// =================================================================
+// システム情報関連システムコール
+// =================================================================
+
+/// SYS_GET_MEM_INFO: メモリ情報を取得
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式（テキスト）:
+///   total_frames=XXXX
+///   allocated_frames=XXXX
+///   free_frames=XXXX
+///   free_kib=XXXX
+fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    use crate::memory::FRAME_ALLOCATOR;
+    use core::fmt::Write;
+
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // メモリ情報を取得
+    let fa = FRAME_ALLOCATOR.lock();
+    let total = fa.total_frames();
+    let allocated = fa.allocated_count();
+    let free = fa.free_frames();
+    drop(fa);  // ロックを早めに解放
+
+    // テキスト形式で書き込む
+    let mut writer = SliceWriter::new(buf);
+    let _ = writeln!(writer, "total_frames={}", total);
+    let _ = writeln!(writer, "allocated_frames={}", allocated);
+    let _ = writeln!(writer, "free_frames={}", free);
+    let _ = writeln!(writer, "free_kib={}", free * 4);  // 4 KiB/frame
+
+    Ok(writer.written() as u64)
+}
+
+/// SYS_GET_TASK_LIST: タスク一覧を取得
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式（テキスト、1行目はヘッダ）:
+///   id,state,type,name
+///   1,Running,kernel,shell
+///   2,Ready,user,HELLO.ELF
+fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    use crate::scheduler::{self, TaskState};
+    use core::fmt::Write;
+
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // タスク一覧を取得
+    let tasks = scheduler::task_list();
+
+    // テキスト形式で書き込む
+    let mut writer = SliceWriter::new(buf);
+
+    // ヘッダ行
+    let _ = writeln!(writer, "id,state,type,name");
+
+    // 各タスクの情報
+    for t in &tasks {
+        let state_str = match t.state {
+            TaskState::Ready => "Ready",
+            TaskState::Running => "Running",
+            TaskState::Sleeping(_) => "Sleeping",
+            TaskState::Finished => "Finished",
+        };
+        let type_str = if t.is_user_process { "user" } else { "kernel" };
+        let _ = writeln!(writer, "{},{},{},{}", t.id, state_str, type_str, t.name);
+    }
+
+    Ok(writer.written() as u64)
+}
+
+/// SYS_GET_NET_INFO: ネットワーク情報を取得
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式（テキスト）:
+///   ip=X.X.X.X
+///   gateway=X.X.X.X
+///   dns=X.X.X.X
+///   mac=XX:XX:XX:XX:XX:XX
+fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    use core::fmt::Write;
+
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // ネットワーク情報を取得
+    let my_ip = crate::net::MY_IP;
+    let gateway = crate::net::GATEWAY_IP;
+    let dns = crate::net::DNS_SERVER_IP;
+
+    // テキスト形式で書き込む
+    let mut writer = SliceWriter::new(buf);
+    let _ = writeln!(writer, "ip={}.{}.{}.{}", my_ip[0], my_ip[1], my_ip[2], my_ip[3]);
+    let _ = writeln!(writer, "gateway={}.{}.{}.{}", gateway[0], gateway[1], gateway[2], gateway[3]);
+    let _ = writeln!(writer, "dns={}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+
+    // MAC アドレスを取得（virtio-net が初期化されていれば）
+    let drv = crate::virtio_net::VIRTIO_NET.lock();
+    if let Some(ref d) = *drv {
+        let mac = d.mac_address;
+        let _ = writeln!(writer, "mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        let _ = writeln!(writer, "mac=none");
+    }
+
+    Ok(writer.written() as u64)
+}
+
+// =================================================================
+// ユーティリティ: スライスへの書き込み
+// =================================================================
+
+/// バイトスライスに書き込むための Write 実装
+///
+/// fmt::Write トレイトを実装して、write! / writeln! マクロを使えるようにする。
+/// バッファがいっぱいになったら書き込みを止める（パニックしない）。
+struct SliceWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> SliceWriter<'a> {
+    fn new(buf: &'a mut [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn written(&self) -> usize {
+        self.pos
+    }
+}
+
+impl<'a> core::fmt::Write for SliceWriter<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = self.buf.len() - self.pos;
+        let to_write = core::cmp::min(bytes.len(), remaining);
+        self.buf[self.pos..self.pos + to_write].copy_from_slice(&bytes[..to_write]);
+        self.pos += to_write;
+        Ok(())
+    }
 }

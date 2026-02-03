@@ -13,6 +13,9 @@
 // - cat <file>: ファイル内容を表示
 // - write <file> <text>: ファイルを作成/上書き
 // - rm <file>: ファイルを削除
+// - mem: メモリ情報を表示
+// - ps: タスク一覧を表示
+// - ip: ネットワーク情報を表示
 
 use crate::syscall;
 
@@ -118,6 +121,9 @@ fn execute_command(line: &[u8]) {
         "cat" => cmd_cat(args),
         "write" => cmd_write(args),
         "rm" => cmd_rm(args),
+        "mem" => cmd_mem(),
+        "ps" => cmd_ps(),
+        "ip" => cmd_ip(),
         "" => {}  // 空のコマンドは無視
         _ => {
             syscall::write_str("Unknown command: ");
@@ -155,6 +161,9 @@ fn cmd_help() {
     syscall::write_str("  cat <file>        - Display file contents\n");
     syscall::write_str("  write <file> <text> - Create/overwrite file\n");
     syscall::write_str("  rm <file>         - Delete file\n");
+    syscall::write_str("  mem               - Show memory information\n");
+    syscall::write_str("  ps                - Show task list\n");
+    syscall::write_str("  ip                - Show network information\n");
     syscall::write_str("\n");
 }
 
@@ -263,4 +272,175 @@ fn cmd_rm(args: &str) {
     }
 
     syscall::write_str("File deleted successfully\n");
+}
+
+// =================================================================
+// システム情報コマンド
+// =================================================================
+
+/// mem コマンド: メモリ情報を表示
+///
+/// カーネルからメモリ情報を取得して表示する。
+fn cmd_mem() {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_mem_info(&mut buf);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to get memory info\n");
+        return;
+    }
+
+    syscall::write_str("Memory Information:\n");
+
+    // 結果をパースして表示
+    let len = result as usize;
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        // "key=value" 形式の行を整形して表示
+        for line in s.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "total_frames" => {
+                        syscall::write_str("  Total frames:     ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "allocated_frames" => {
+                        syscall::write_str("  Allocated frames: ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "free_frames" => {
+                        syscall::write_str("  Free frames:      ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "free_kib" => {
+                        syscall::write_str("  Free memory:      ");
+                        syscall::write_str(value);
+                        syscall::write_str(" KiB\n");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// ps コマンド: タスク一覧を表示
+///
+/// カーネルからタスク情報を取得して表示する。
+fn cmd_ps() {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_task_list(&mut buf);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to get task list\n");
+        return;
+    }
+
+    // 結果を表示（CSV 形式をテーブル形式に変換）
+    let len = result as usize;
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        // ヘッダを表示
+        syscall::write_str("  ID  STATE       TYPE    NAME\n");
+        syscall::write_str("  --  ----------  ------  ----------\n");
+
+        // 各行をパース（最初の行はヘッダなのでスキップ）
+        for (i, line) in s.lines().enumerate() {
+            if i == 0 {
+                continue;  // ヘッダ行をスキップ
+            }
+
+            // CSV 形式: id,state,type,name
+            let parts: [&str; 4] = parse_csv_line(line);
+            if parts[0].is_empty() {
+                continue;
+            }
+
+            // 整形して表示
+            syscall::write_str("  ");
+            write_padded(parts[0], 2);   // ID
+            syscall::write_str("  ");
+            write_padded(parts[1], 10);  // STATE
+            syscall::write_str("  ");
+            write_padded(parts[2], 6);   // TYPE
+            syscall::write_str("  ");
+            syscall::write_str(parts[3]); // NAME
+            syscall::write_str("\n");
+        }
+    }
+}
+
+/// ip コマンド: ネットワーク情報を表示
+///
+/// カーネルからネットワーク情報を取得して表示する。
+fn cmd_ip() {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_net_info(&mut buf);
+
+    if result < 0 {
+        syscall::write_str("Error: Failed to get network info\n");
+        return;
+    }
+
+    syscall::write_str("IP Configuration:\n");
+
+    // 結果をパースして表示
+    let len = result as usize;
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        for line in s.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                match key {
+                    "ip" => {
+                        syscall::write_str("  IP Address: ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "gateway" => {
+                        syscall::write_str("  Gateway:    ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "dns" => {
+                        syscall::write_str("  DNS:        ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    "mac" => {
+                        syscall::write_str("  MAC:        ");
+                        syscall::write_str(value);
+                        syscall::write_str("\n");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+// =================================================================
+// ユーティリティ関数
+// =================================================================
+
+/// CSV 行を4つのフィールドにパース
+///
+/// カンマで区切って最大4つのフィールドを返す。
+/// フィールドが足りない場合は空文字列になる。
+fn parse_csv_line(line: &str) -> [&str; 4] {
+    let mut parts = [""; 4];
+    for (i, part) in line.splitn(4, ',').enumerate() {
+        parts[i] = part;
+    }
+    parts
+}
+
+/// 文字列を指定幅で出力（左寄せ、スペースで埋める）
+fn write_padded(s: &str, width: usize) {
+    syscall::write_str(s);
+    let len = s.len();
+    if len < width {
+        for _ in 0..(width - len) {
+            syscall::write_str(" ");
+        }
+    }
 }

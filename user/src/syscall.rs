@@ -48,6 +48,11 @@ pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr,
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
 
+// システム情報 (20-29)
+pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報
+pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧
+pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報
+
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
@@ -340,4 +345,73 @@ pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+// =================================================================
+// システム情報関連
+// =================================================================
+
+/// メモリ情報を取得
+///
+/// # 引数
+/// - `buf`: 情報を格納するバッファ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+///
+/// # 出力形式（テキスト）
+/// ```
+/// total_frames=XXXX
+/// allocated_frames=XXXX
+/// free_frames=XXXX
+/// free_kib=XXXX
+/// ```
+pub fn get_mem_info(buf: &mut [u8]) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall2(SYS_GET_MEM_INFO, buf_ptr, buf_len) as i64 }
+}
+
+/// タスク一覧を取得
+///
+/// # 引数
+/// - `buf`: 情報を格納するバッファ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+///
+/// # 出力形式（テキスト、CSV 形式）
+/// ```
+/// id,state,type,name
+/// 1,Running,kernel,shell
+/// 2,Ready,user,HELLO.ELF
+/// ```
+pub fn get_task_list(buf: &mut [u8]) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall2(SYS_GET_TASK_LIST, buf_ptr, buf_len) as i64 }
+}
+
+/// ネットワーク情報を取得
+///
+/// # 引数
+/// - `buf`: 情報を格納するバッファ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+///
+/// # 出力形式（テキスト）
+/// ```
+/// ip=X.X.X.X
+/// gateway=X.X.X.X
+/// dns=X.X.X.X
+/// mac=XX:XX:XX:XX:XX:XX
+/// ```
+pub fn get_net_info(buf: &mut [u8]) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall2(SYS_GET_NET_INFO, buf_ptr, buf_len) as i64 }
 }
