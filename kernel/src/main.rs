@@ -14,6 +14,7 @@ mod paging;
 mod panic;
 mod scheduler;
 mod serial;
+mod pci;
 mod shell;
 mod syscall;
 mod usermode;

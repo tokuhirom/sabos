@@ -2,7 +2,7 @@
 # Make の子プロセスには渡さないようにする
 unexport RUSTUP_TOOLCHAIN
 
-.PHONY: build build-user run run-gui screenshot clean
+.PHONY: build build-user run run-gui screenshot clean disk-img
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -16,14 +16,20 @@ ifeq ($(OVMF_CODE),)
   $(error OVMF が見つかりません。sudo apt-get install ovmf を実行してください)
 endif
 
+# virtio-blk 用のディスクイメージ
+DISK_IMG = disk.img
+
 # QEMU の共通オプション
+# -drive if=virtio で virtio-blk デバイスとしてディスクイメージを接続する。
+# PCI バス上に vendor=0x1AF4 のデバイスとして見える。
 QEMU_COMMON = qemu-system-x86_64 \
 	-nodefaults \
 	-machine q35 \
 	-vga std \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
-	-drive format=raw,file=fat:rw:esp
+	-drive format=raw,file=fat:rw:esp \
+	-drive if=virtio,format=raw,file=$(DISK_IMG)
 
 # スクリーンショットの出力先（デフォルト: docs/images/screenshot.png）
 SCREENSHOT_OUT ?= docs/images/screenshot.png
@@ -44,19 +50,32 @@ build-user:
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
 
-run: build $(ESP_DIR)
+# FAT16 ディスクイメージを作成する。
+# 32MB のイメージを dd で作り、mkfs.fat -F 16 で FAT16 フォーマットする。
+# mtools (mcopy) でテストファイルを書き込む。
+# USER_ELF をビルド済みの ELF バイナリとして HELLO.ELF に書き込む。
+disk-img: build-user
+	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32
+	mkfs.fat -F 16 $(DISK_IMG)
+	echo "Hello from FAT16!" > /tmp/hello.txt
+	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
+	mcopy -i $(DISK_IMG) $(USER_ELF) ::HELLO.ELF
+	@echo "Disk image created: $(DISK_IMG)"
+
+run: build $(ESP_DIR) $(DISK_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	$(QEMU_COMMON) \
 		-serial stdio \
 		-display none
 
-run-gui: build $(ESP_DIR)
+run-gui: build $(ESP_DIR) $(DISK_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-machine q35 \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 		-drive format=raw,file=fat:rw:esp \
+		-drive if=virtio,format=raw,file=$(DISK_IMG) \
 		-serial stdio
 
 # スクリーンショットを撮る
@@ -64,7 +83,7 @@ run-gui: build $(ESP_DIR)
 #   make screenshot                                        → docs/images/screenshot.png
 #   make screenshot SCREENSHOT_OUT=docs/images/foo.png     → docs/images/foo.png
 #   make screenshot SCREENSHOT_WAIT=10                     → 10秒待ってから撮影
-screenshot: build $(ESP_DIR)
+screenshot: build $(ESP_DIR) $(DISK_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	@mkdir -p $(dir $(SCREENSHOT_OUT))
 	@echo "Starting QEMU for screenshot..."
@@ -85,3 +104,4 @@ clean:
 	cd kernel && cargo clean
 	cd user && cargo clean
 	rm -rf esp
+	rm -f $(DISK_IMG)

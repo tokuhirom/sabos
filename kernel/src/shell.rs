@@ -97,7 +97,9 @@ impl Shell {
             "usertest" => self.cmd_usertest(),
             "isolate" => self.cmd_isolate(),
             "elf" => self.cmd_elf(),
+            "lspci" => self.cmd_lspci(),
             "panic" => self.cmd_panic(),
+            "halt" => self.cmd_halt(),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
                 kprintln!("Unknown command: {}", command);
@@ -120,7 +122,9 @@ impl Shell {
         kprintln!("  usertest        - Test memory protection (Ring 3 access violation)");
         kprintln!("  isolate         - Demo: process isolation with separate page tables");
         kprintln!("  elf             - Load and run an ELF binary in user mode");
+        kprintln!("  lspci           - List PCI devices");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
+        kprintln!("  halt            - Halt the system");
     }
 
     /// clear コマンド: 画面をクリアする。
@@ -389,9 +393,41 @@ impl Shell {
         kprintln!("=== Done ===");
     }
 
+    /// lspci コマンド: PCI バス上のデバイス一覧を表示する。
+    ///
+    /// PCI Configuration Space を走査し、見つかったデバイスの
+    /// バス:デバイス.ファンクション番号、ベンダー ID、デバイス ID、
+    /// クラスコードを一覧表示する。
+    fn cmd_lspci(&self) {
+        let devices = crate::pci::enumerate_bus();
+        kprintln!("PCI devices on bus 0:");
+        kprintln!("  BDF       Vendor Device Class");
+        kprintln!("  --------- ------ ------ --------");
+        for dev in &devices {
+            kprintln!(
+                "  {:02x}:{:02x}.{}   {:04x}   {:04x}   {:02x}:{:02x}.{:02x}",
+                dev.bus, dev.device, dev.function,
+                dev.vendor_id, dev.device_id,
+                dev.class_code, dev.subclass, dev.prog_if,
+            );
+        }
+        kprintln!("  Total: {} devices", devices.len());
+    }
+
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
     /// panic ハンドラのテスト用。シリアルと画面に赤字で panic 情報が表示されるはず。
     fn cmd_panic(&self) {
         panic!("User-triggered panic from shell command");
+    }
+
+    /// halt コマンド: 割り込みを無効化して CPU を停止する。
+    /// hlt 命令は割り込みが来るまで CPU を停止するが、cli で割り込みを無効化しているので
+    /// 二度と復帰しない = システム停止。
+    fn cmd_halt(&self) {
+        kprintln!("System halted.");
+        loop {
+            x86_64::instructions::interrupts::disable();
+            x86_64::instructions::hlt();
+        }
     }
 }
