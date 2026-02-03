@@ -37,9 +37,10 @@ use core::arch::asm;
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
-pub const SYS_READ: u64 = 0;   // read(buf_ptr, len) — コンソールから読み取り
-pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — コンソールに出力
-pub const SYS_EXIT: u64 = 60;  // exit() — プログラム終了
+pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
+pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
+pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
+pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
 /// システムコールの戻り値を表す型
 ///
@@ -232,6 +233,11 @@ pub fn write(buf: &[u8]) -> SyscallResult {
 /// `write()` の文字列版。UTF-8 文字列を受け取る。
 pub fn write_str(s: &str) -> SyscallResult {
     write(s.as_bytes())
+}
+
+/// 画面をクリアする
+pub fn clear_screen() {
+    unsafe { syscall0(SYS_CLEAR_SCREEN); }
 }
 
 /// プログラムを終了する

@@ -42,9 +42,10 @@ use crate::user_ptr::{UserSlice, SyscallError};
 /// - ネットワーク: 40-49
 /// - システム制御: 50-59
 /// - 終了: 60
-pub const SYS_READ: u64 = 0;   // read(buf_ptr, len) — コンソールから読み取り
-pub const SYS_WRITE: u64 = 1;  // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
-pub const SYS_EXIT: u64 = 60;  // exit() — ユーザープログラムを終了してカーネルに戻る
+pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
+pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
+pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面をクリア
+pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
 
 // =================================================================
 // アセンブリエントリポイント
@@ -162,6 +163,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     match nr {
         SYS_READ => sys_read(arg1, arg2),
         SYS_WRITE => sys_write(arg1, arg2),
+        SYS_CLEAR_SCREEN => sys_clear_screen(),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
@@ -233,4 +235,13 @@ fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 
     // 書き込んだバイト数を返す
     Ok(len as u64)
+}
+
+/// SYS_CLEAR_SCREEN: 画面をクリア
+///
+/// 引数: なし
+/// 戻り値: 0（成功）
+fn sys_clear_screen() -> Result<u64, SyscallError> {
+    crate::framebuffer::clear_global_screen();
+    Ok(0)
 }

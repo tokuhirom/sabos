@@ -7,10 +7,15 @@
 //
 // このバイナリは include_bytes! でカーネルに埋め込まれ、
 // ELF パーサーがロードして Ring 3 で実行する。
+//
+// ## 機能
+//
+// - シェル: echo, help, clear, exit コマンドを提供
 
 #![no_std]
 #![no_main]
 
+mod shell;
 mod syscall;
 
 use core::panic::PanicInfo;
@@ -22,9 +27,8 @@ use core::panic::PanicInfo;
 /// システムコールを使ってカーネルとやり取りする。
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    // システムコールライブラリを使って出力
-    syscall::write_str("Hello from ELF binary!\n");
-    syscall::exit();
+    // ユーザー空間シェルを起動
+    shell::run();
 }
 
 /// パニックハンドラ（no_std 必須）。
