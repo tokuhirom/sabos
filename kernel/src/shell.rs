@@ -1196,7 +1196,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 4. スケジューラのテスト
+        // 4. procfs のテスト
+        if self.test_procfs() {
+            Self::print_pass("procfs");
+            passed += 1;
+        } else {
+            Self::print_fail("procfs");
+            failed += 1;
+        }
+
+        // 5. スケジューラのテスト
         if self.test_scheduler() {
             Self::print_pass("scheduler");
             passed += 1;
@@ -1205,7 +1214,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 5. virtio-blk のテスト
+        // 6. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1214,7 +1223,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 6. FAT16 のテスト
+        // 7. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1223,7 +1232,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 7. ネットワーク (DNS) のテスト
+        // 8. ネットワーク (DNS) のテスト
         if self.test_network_dns() {
             Self::print_pass("network_dns");
             passed += 1;
@@ -1348,6 +1357,56 @@ impl Shell {
             if vid != dev.vendor_id {
                 return false;
             }
+        }
+
+        true
+    }
+
+    /// procfs のテスト
+    /// /proc の一覧と、/proc/meminfo / /proc/tasks が読めることを確認
+    fn test_procfs(&self) -> bool {
+        let mut buf = [0u8; 512];
+
+        // /proc の一覧
+        let list_len = match crate::syscall::procfs_list_dir("/proc", &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if list_len == 0 {
+            return false;
+        }
+        let list_str = match core::str::from_utf8(&buf[..list_len]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if !list_str.contains("meminfo") || !list_str.contains("tasks") {
+            return false;
+        }
+
+        // /proc/meminfo
+        let mem_len = match crate::syscall::procfs_read("/proc/meminfo", &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let mem_str = match core::str::from_utf8(&buf[..mem_len]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if !mem_str.contains("total_frames=") {
+            return false;
+        }
+
+        // /proc/tasks
+        let task_len = match crate::syscall::procfs_read("/proc/tasks", &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let task_str = match core::str::from_utf8(&buf[..task_len]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if !task_str.contains("id,state,type,name") {
+            return false;
         }
 
         true

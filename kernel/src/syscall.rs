@@ -339,6 +339,12 @@ fn sys_file_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysc
     let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
     let buf = buf_slice.as_mut_slice();
 
+    // /proc 配下は procfs で処理
+    if path.starts_with("/proc") {
+        let written = procfs_read(path, buf)?;
+        return Ok(written as u64);
+    }
+
     // FAT16 からファイルを読み取る
     let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
     let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
@@ -373,6 +379,11 @@ fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sys
     let data_slice = UserSlice::<u8>::from_raw(arg3, data_len)?;
     let data = data_slice.as_slice();
 
+    // /proc 配下は読み取り専用
+    if path.starts_with("/proc") {
+        return Err(SyscallError::InvalidArgument);
+    }
+
     // FAT16 にファイルを書き込む
     let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
     fat16.create_file(path, data).map_err(|_| SyscallError::Other)?;
@@ -395,6 +406,11 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // /proc 配下は読み取り専用
+    if path.starts_with("/proc") {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     // FAT16 からファイルを削除
     let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
@@ -428,6 +444,12 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
     // バッファを取得
     let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
     let buf = buf_slice.as_mut_slice();
+
+    // /proc 配下は procfs で処理
+    if path.starts_with("/proc") {
+        let written = procfs_list_dir(path, buf)?;
+        return Ok(written as u64);
+    }
 
     // FAT16 からディレクトリ一覧を取得
     let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
@@ -463,6 +485,18 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
         offset += 1;
     }
 
+    // ルートディレクトリには procfs を追加
+    if path == "/" || path.is_empty() {
+        let name = b"proc/";
+        let needed = name.len() + 1;
+        if offset + needed <= buf_len {
+            buf[offset..offset + name.len()].copy_from_slice(name);
+            offset += name.len();
+            buf[offset] = b'\n';
+            offset += 1;
+        }
+    }
+
     Ok(offset as u64)
 }
 
@@ -470,28 +504,58 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 // システム情報関連システムコール
 // =================================================================
 
-/// SYS_GET_MEM_INFO: メモリ情報を取得
+// =================================================================
+// procfs: 最小限の疑似ファイルシステム
+// =================================================================
+
+/// procfs のルートパス
+const PROC_ROOT: &str = "/proc";
+/// メモリ情報
+const PROC_MEMINFO: &str = "/proc/meminfo";
+/// タスク一覧
+const PROC_TASKS: &str = "/proc/tasks";
+
+/// procfs のファイルを読み取る
 ///
-/// 引数:
-///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
-///   arg2 — バッファの長さ
+/// 対象ファイルが存在しない場合は FileNotFound を返す。
+pub(crate) fn procfs_read(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
+    match path {
+        PROC_MEMINFO => Ok(write_mem_info(buf)),
+        PROC_TASKS => Ok(write_task_list(buf)),
+        _ => Err(SyscallError::FileNotFound),
+    }
+}
+
+/// procfs のディレクトリ一覧を取得する
 ///
-/// 戻り値:
-///   書き込んだバイト数（成功時）
-///   負の値（エラー時）
-///
-/// 出力形式（テキスト）:
-///   total_frames=XXXX
-///   allocated_frames=XXXX
-///   free_frames=XXXX
-///   free_kib=XXXX
-fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+/// /proc のみ対応。それ以外は FileNotFound。
+pub(crate) fn procfs_list_dir(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
+    if path != PROC_ROOT && path != "/proc/" {
+        return Err(SyscallError::FileNotFound);
+    }
+
+    let mut offset = 0;
+    let entries = [b"meminfo", b"tasks"];
+
+    for name in entries {
+        let needed = name.len() + 1;
+        if offset + needed > buf.len() {
+            break;
+        }
+
+        buf[offset..offset + name.len()].copy_from_slice(name);
+        offset += name.len();
+        buf[offset] = b'\n';
+        offset += 1;
+    }
+
+    Ok(offset)
+}
+
+/// メモリ情報をテキスト形式で書き込む
+fn write_mem_info(buf: &mut [u8]) -> usize {
     use crate::memory::FRAME_ALLOCATOR;
     use core::fmt::Write;
-
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
-    let buf = buf_slice.as_mut_slice();
 
     // メモリ情報を取得
     let fa = FRAME_ALLOCATOR.lock();
@@ -507,30 +571,13 @@ fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let _ = writeln!(writer, "free_frames={}", free);
     let _ = writeln!(writer, "free_kib={}", free * 4);  // 4 KiB/frame
 
-    Ok(writer.written() as u64)
+    writer.written()
 }
 
-/// SYS_GET_TASK_LIST: タスク一覧を取得
-///
-/// 引数:
-///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
-///   arg2 — バッファの長さ
-///
-/// 戻り値:
-///   書き込んだバイト数（成功時）
-///   負の値（エラー時）
-///
-/// 出力形式（テキスト、1行目はヘッダ）:
-///   id,state,type,name
-///   1,Running,kernel,shell
-///   2,Ready,user,HELLO.ELF
-fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+/// タスク一覧をテキスト形式で書き込む
+fn write_task_list(buf: &mut [u8]) -> usize {
     use crate::scheduler::{self, TaskState};
     use core::fmt::Write;
-
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
-    let buf = buf_slice.as_mut_slice();
 
     // タスク一覧を取得
     let tasks = scheduler::task_list();
@@ -553,7 +600,50 @@ fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
         let _ = writeln!(writer, "{},{},{},{}", t.id, state_str, type_str, t.name);
     }
 
-    Ok(writer.written() as u64)
+    writer.written()
+}
+
+/// SYS_GET_MEM_INFO: メモリ情報を取得
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式（テキスト）:
+///   total_frames=XXXX
+///   allocated_frames=XXXX
+///   free_frames=XXXX
+///   free_kib=XXXX
+fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+    Ok(write_mem_info(buf) as u64)
+}
+
+/// SYS_GET_TASK_LIST: タスク一覧を取得
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+///
+/// 出力形式（テキスト、1行目はヘッダ）:
+///   id,state,type,name
+///   1,Running,kernel,shell
+///   2,Ready,user,HELLO.ELF
+fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+    Ok(write_task_list(buf) as u64)
 }
 
 /// SYS_GET_NET_INFO: ネットワーク情報を取得
