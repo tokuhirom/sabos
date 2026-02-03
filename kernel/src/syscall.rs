@@ -564,12 +564,16 @@ fn write_mem_info(buf: &mut [u8]) -> usize {
     let free = fa.free_frames();
     drop(fa);  // ロックを早めに解放
 
-    // テキスト形式で書き込む
+    // JSON 形式で書き込む
     let mut writer = SliceWriter::new(buf);
-    let _ = writeln!(writer, "total_frames={}", total);
-    let _ = writeln!(writer, "allocated_frames={}", allocated);
-    let _ = writeln!(writer, "free_frames={}", free);
-    let _ = writeln!(writer, "free_kib={}", free * 4);  // 4 KiB/frame
+    let _ = write!(
+        writer,
+        "{{\"total_frames\":{},\"allocated_frames\":{},\"free_frames\":{},\"free_kib\":{}}}\n",
+        total,
+        allocated,
+        free,
+        free * 4
+    );
 
     writer.written()
 }
@@ -582,14 +586,11 @@ fn write_task_list(buf: &mut [u8]) -> usize {
     // タスク一覧を取得
     let tasks = scheduler::task_list();
 
-    // テキスト形式で書き込む
+    // JSON 形式で書き込む
     let mut writer = SliceWriter::new(buf);
 
-    // ヘッダ行
-    let _ = writeln!(writer, "id,state,type,name");
-
-    // 各タスクの情報
-    for t in &tasks {
+    let _ = write!(writer, "{{\"tasks\":[");
+    for (i, t) in tasks.iter().enumerate() {
         let state_str = match t.state {
             TaskState::Ready => "Ready",
             TaskState::Running => "Running",
@@ -597,8 +598,18 @@ fn write_task_list(buf: &mut [u8]) -> usize {
             TaskState::Finished => "Finished",
         };
         let type_str = if t.is_user_process { "user" } else { "kernel" };
-        let _ = writeln!(writer, "{},{},{},{}", t.id, state_str, type_str, t.name);
+        if i != 0 {
+            let _ = write!(writer, ",");
+        }
+        let _ = write!(writer, "{{\"id\":{},\"state\":\"", t.id);
+        let _ = writer.write_str(state_str);
+        let _ = write!(writer, "\",\"type\":\"");
+        let _ = writer.write_str(type_str);
+        let _ = write!(writer, "\",\"name\":\"");
+        let _ = write_json_string(&mut writer, t.name.as_str());
+        let _ = write!(writer, "\"}}");
     }
+    let _ = write!(writer, "]}}\n");
 
     writer.written()
 }
@@ -1043,4 +1054,33 @@ impl<'a> core::fmt::Write for SliceWriter<'a> {
         self.pos += to_write;
         Ok(())
     }
+}
+
+/// JSON 文字列用のエスケープ付き書き込み
+fn write_json_string(writer: &mut SliceWriter<'_>, s: &str) -> core::fmt::Result {
+    let mut buf = [0u8; 4];
+    for ch in s.chars() {
+        match ch {
+            '\\' => {
+                let _ = writer.write_str("\\\\");
+            }
+            '"' => {
+                let _ = writer.write_str("\\\"");
+            }
+            '\n' => {
+                let _ = writer.write_str("\\n");
+            }
+            '\r' => {
+                let _ = writer.write_str("\\r");
+            }
+            '\t' => {
+                let _ = writer.write_str("\\t");
+            }
+            _ => {
+                let encoded = ch.encode_utf8(&mut buf);
+                let _ = writer.write_str(encoded);
+            }
+        }
+    }
+    Ok(())
 }

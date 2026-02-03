@@ -1392,7 +1392,7 @@ impl Shell {
             Ok(s) => s,
             Err(_) => return false,
         };
-        if !mem_str.contains("total_frames=") {
+        if !mem_str.contains("\"total_frames\"") {
             return false;
         }
 
@@ -1405,7 +1405,7 @@ impl Shell {
             Ok(s) => s,
             Err(_) => return false,
         };
-        if !task_str.contains("id,state,type,name") {
+        if !task_str.contains("\"tasks\"") || !task_str.contains("\"id\"") {
             return false;
         }
 
