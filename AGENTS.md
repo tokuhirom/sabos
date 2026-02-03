@@ -111,7 +111,13 @@ make test
 - `kernel/` - カーネル本体（Rust, no_std, UEFI target）
 - `user/` - ユーザープログラム（ELF バイナリ、x86_64-unknown-none target）
 - `scripts/` - テストスクリプト等
-- `docs/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
+- `docs/diary/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
+- `docs/images/` - スクリーンショット置き場
+
+## ドキュメント一覧
+
+- 開発日記: `docs/diary/YYYY-MM-DD.md`
+- スクリーンショット: `docs/images/`
 - `setup-ubuntu.sh` - Ubuntu 向け開発環境セットアップスクリプト
 
 ## Git Workflow
@@ -122,7 +128,7 @@ make test
 
 ## Development Principles
 
-- 開発日記を `docs/YYYY-MM-DD.md` に書く。その日やったこと、学んだこと、スクショを残す
+- 開発日記を `docs/diary/YYYY-MM-DD.md` に書く。その日やったこと、学んだこと、スクショを残す
 - 習作プロジェクトなので楽しさと学びを重視
 - 一度作った機能は壊さない。GitHub Actions でビルドの成功を常に保証する
 - コメントはマシマシで書く。学習用プロジェクトなので「なぜそうしているか」「何をしているか」を後から読んで理解できるよう丁寧にコメントを残す
@@ -132,7 +138,7 @@ make test
 
 ## Daily Workflow
 
-- 1日のはじめにその日の計画を `docs/YYYY-MM-DD.md` に書き、計画に沿って進める
+- 1日のはじめにその日の計画を `docs/diary/YYYY-MM-DD.md` に書き、計画に沿って進める
 - 各タスクは実装計画を具体的に（変更ファイル・変更内容）書き出してから着手する
 - タスクは小さく分割する。大きすぎると planning mode に入ってコンテキストが失われるため
 

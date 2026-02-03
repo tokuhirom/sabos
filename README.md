@@ -9,7 +9,7 @@ x86_64向け自作OS。Rust + UEFIで構築する。
 
 ## Dev Diary
 
-- [2026-02-01](docs/2026-02-01.md) — Day 1: プロジェクト開始、Hello SABOS!
+- [2026-02-01](docs/diary/2026-02-01.md) — Day 1: プロジェクト開始、Hello SABOS!
 
 ## Build
 
