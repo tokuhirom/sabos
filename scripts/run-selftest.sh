@@ -56,8 +56,31 @@ qemu-system-x86_64 \
 QEMU_PID=$!
 echo "QEMU PID: $QEMU_PID"
 
-# シェルプロンプトが表示されるまで待機
-echo "Waiting for shell prompt..."
+# ユーザーシェルプロンプトが表示されるまで待機
+echo "Waiting for user shell prompt..."
+for i in {1..30}; do
+    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if ! grep -q "user>" "$LOG_FILE" 2>/dev/null; then
+    echo -e "${RED}ERROR: User shell prompt not found after 30 seconds${NC}"
+    cat "$LOG_FILE"
+    exit 1
+fi
+
+echo "Exiting user shell to kernel shell..."
+
+# exit コマンドを送信してユーザーシェルを終了
+for c in e x i t ret; do
+    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    sleep 0.15
+done
+
+# カーネルシェルプロンプトが表示されるまで待機
+echo "Waiting for kernel shell prompt..."
 for i in {1..30}; do
     if grep -q "sabos>" "$LOG_FILE" 2>/dev/null; then
         break
@@ -66,7 +89,7 @@ for i in {1..30}; do
 done
 
 if ! grep -q "sabos>" "$LOG_FILE" 2>/dev/null; then
-    echo -e "${RED}ERROR: Shell prompt not found after 30 seconds${NC}"
+    echo -e "${RED}ERROR: Kernel shell prompt not found after 30 seconds${NC}"
     cat "$LOG_FILE"
     exit 1
 fi

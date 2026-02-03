@@ -303,9 +303,35 @@ fn main() -> Status {
     kprintln!("All sleep demo tasks finished!");
     kprintln!();
 
-    // --- シェルの起動 ---
+    // --- ユーザーシェルの起動 ---
+    // 埋め込まれたユーザープログラム（user/ crate のシェル）を Ring 3 で実行する。
+    // ユーザーシェルが exit した場合はカーネルシェルにフォールバックする。
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
-    kprintln!("Welcome to SABOS shell! Type 'help' for commands.");
+    kprintln!("Starting user shell...");
+    kprintln!();
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+
+    // 埋め込まれた ELF を取得してユーザープロセスとして実行
+    let elf_data = usermode::get_user_elf_data();
+    match usermode::create_elf_process(elf_data) {
+        Ok((process, entry_point, user_stack_top)) => {
+            // Ring 3 でユーザーシェルを実行（exit するまでブロック）
+            usermode::run_elf_process(&process, entry_point, user_stack_top);
+            // ユーザーシェルが終了したらプロセスを破棄
+            usermode::destroy_user_process(process);
+            kprintln!("User shell exited.");
+        }
+        Err(e) => {
+            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+            kprintln!("Failed to start user shell: {}", e);
+            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        }
+    }
+
+    // --- カーネルシェルにフォールバック ---
+    // ユーザーシェルが終了した場合やエラー時はカーネルシェルを起動
+    framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+    kprintln!("Falling back to kernel shell. Type 'help' for commands.");
     kprintln!();
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
