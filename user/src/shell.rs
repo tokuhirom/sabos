@@ -19,6 +19,8 @@
 // - run <file>: ELF プログラムをフォアグラウンドで実行
 // - spawn <file>: ELF プログラムをバックグラウンドで実行
 // - sleep <ms>: 指定ミリ秒スリープ
+// - dns <domain>: DNS 解決
+// - http <host> [path]: HTTP GET リクエスト
 
 use crate::syscall;
 
@@ -130,6 +132,8 @@ fn execute_command(line: &[u8]) {
         "run" => cmd_run(args),
         "spawn" => cmd_spawn(args),
         "sleep" => cmd_sleep(args),
+        "dns" => cmd_dns(args),
+        "http" => cmd_http(args),
         "" => {}  // 空のコマンドは無視
         _ => {
             syscall::write_str("Unknown command: ");
@@ -173,6 +177,8 @@ fn cmd_help() {
     syscall::write_str("  run <file>        - Run ELF program (foreground)\n");
     syscall::write_str("  spawn <file>      - Run ELF program (background)\n");
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
+    syscall::write_str("  dns <domain>      - DNS lookup\n");
+    syscall::write_str("  http <host> [path] - HTTP GET request\n");
     syscall::write_str("\n");
 }
 
@@ -577,4 +583,162 @@ fn write_padded(s: &str, width: usize) {
             syscall::write_str(" ");
         }
     }
+}
+
+// =================================================================
+// ネットワークコマンド
+// =================================================================
+
+/// dns コマンド: DNS 解決
+///
+/// ドメイン名を IP アドレスに解決する。
+fn cmd_dns(args: &str) {
+    let domain = args.trim();
+    if domain.is_empty() {
+        syscall::write_str("Usage: dns <domain>\n");
+        syscall::write_str("  Example: dns example.com\n");
+        return;
+    }
+
+    syscall::write_str("Resolving '");
+    syscall::write_str(domain);
+    syscall::write_str("'...\n");
+
+    let mut ip = [0u8; 4];
+    let result = syscall::dns_lookup(domain, &mut ip);
+
+    if result < 0 {
+        syscall::write_str("Error: DNS lookup failed\n");
+        return;
+    }
+
+    syscall::write_str(domain);
+    syscall::write_str(" -> ");
+    write_ip(&ip);
+    syscall::write_str("\n");
+}
+
+/// http コマンド: HTTP GET リクエスト
+///
+/// 指定したホストに HTTP GET リクエストを送信し、レスポンスを表示する。
+fn cmd_http(args: &str) {
+    // 引数をパース: host [path]
+    let (host, path) = split_command(args);
+
+    if host.is_empty() {
+        syscall::write_str("Usage: http <host> [path]\n");
+        syscall::write_str("  Example: http example.com /\n");
+        return;
+    }
+
+    let path = if path.is_empty() { "/" } else { path };
+
+    // IP アドレスを解決または直接パース
+    let ip = match parse_ip(host) {
+        Some(ip) => ip,
+        None => {
+            // DNS で解決
+            syscall::write_str("Resolving ");
+            syscall::write_str(host);
+            syscall::write_str("...\n");
+
+            let mut resolved_ip = [0u8; 4];
+            if syscall::dns_lookup(host, &mut resolved_ip) < 0 {
+                syscall::write_str("Error: DNS lookup failed\n");
+                return;
+            }
+
+            syscall::write_str("Resolved to ");
+            write_ip(&resolved_ip);
+            syscall::write_str("\n");
+            resolved_ip
+        }
+    };
+
+    // TCP 接続
+    syscall::write_str("Connecting to ");
+    write_ip(&ip);
+    syscall::write_str(":80...\n");
+
+    if syscall::tcp_connect(&ip, 80) < 0 {
+        syscall::write_str("Error: TCP connect failed\n");
+        return;
+    }
+    syscall::write_str("Connected!\n");
+
+    // HTTP リクエストを構築
+    // 簡易的に固定フォーマットで送信
+    syscall::write_str("Sending HTTP request...\n");
+
+    // GET line
+    let _ = syscall::tcp_send(b"GET ");
+    let _ = syscall::tcp_send(path.as_bytes());
+    let _ = syscall::tcp_send(b" HTTP/1.0\r\n");
+
+    // Host header
+    let _ = syscall::tcp_send(b"Host: ");
+    let _ = syscall::tcp_send(host.as_bytes());
+    let _ = syscall::tcp_send(b"\r\n");
+
+    // Connection header and end of headers
+    let _ = syscall::tcp_send(b"Connection: close\r\n\r\n");
+
+    // レスポンスを受信
+    syscall::write_str("Receiving response...\n");
+    syscall::write_str("--- Response ---\n");
+
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = syscall::tcp_recv(&mut buf, 5000);
+        if n <= 0 {
+            break;
+        }
+        let n = n as usize;
+        // UTF-8 として表示（バイナリデータも可能な限り表示）
+        if let Ok(text) = core::str::from_utf8(&buf[..n]) {
+            syscall::write_str(text);
+        } else {
+            syscall::write_str("[binary data]");
+        }
+    }
+
+    syscall::write_str("\n--- End ---\n");
+
+    // 接続を閉じる
+    let _ = syscall::tcp_close();
+}
+
+/// IP アドレスを表示
+fn write_ip(ip: &[u8; 4]) {
+    write_number(ip[0] as u64);
+    syscall::write_str(".");
+    write_number(ip[1] as u64);
+    syscall::write_str(".");
+    write_number(ip[2] as u64);
+    syscall::write_str(".");
+    write_number(ip[3] as u64);
+}
+
+/// IP アドレス文字列をパース (例: "192.168.1.1")
+fn parse_ip(s: &str) -> Option<[u8; 4]> {
+    let mut ip = [0u8; 4];
+    let mut part_index = 0;
+
+    for part in s.split('.') {
+        if part_index >= 4 {
+            return None;
+        }
+        let n = parse_u64(part)?;
+        if n > 255 {
+            return None;
+        }
+        ip[part_index] = n as u8;
+        part_index += 1;
+    }
+
+    if part_index != 4 {
+        return None;
+    }
+
+    Some(ip)
 }

@@ -65,6 +65,13 @@ pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグ�
 pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 
+// ネットワーク (40-49)
+pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
+pub const SYS_TCP_CONNECT: u64 = 41; // tcp_connect(ip_ptr, port) — TCP 接続
+pub const SYS_TCP_SEND: u64 = 42;    // tcp_send(data_ptr, data_len) — TCP 送信
+pub const SYS_TCP_RECV: u64 = 43;    // tcp_recv(buf_ptr, buf_len, timeout_ms) — TCP 受信
+pub const SYS_TCP_CLOSE: u64 = 44;   // tcp_close() — TCP 切断
+
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
 
@@ -210,6 +217,12 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_SPAWN => sys_spawn(arg1, arg2),
         SYS_YIELD => sys_yield(),
         SYS_SLEEP => sys_sleep(arg1),
+        // ネットワーク
+        SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
+        SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
+        SYS_TCP_SEND => sys_tcp_send(arg1, arg2),
+        SYS_TCP_RECV => sys_tcp_recv(arg1, arg2, arg3),
+        SYS_TCP_CLOSE => sys_tcp_close(),
         SYS_EXIT => {
             // exit()
             // ユーザープログラムの終了を要求する。
@@ -691,6 +704,130 @@ fn sys_yield() -> Result<u64, SyscallError> {
 fn sys_sleep(arg1: u64) -> Result<u64, SyscallError> {
     let ms = arg1;
     crate::scheduler::sleep_ms(ms);
+    Ok(0)
+}
+
+// =================================================================
+// ネットワーク関連システムコール
+// =================================================================
+
+/// SYS_DNS_LOOKUP: DNS 解決
+///
+/// 引数:
+///   arg1 — ドメイン名のポインタ（ユーザー空間）
+///   arg2 — ドメイン名の長さ
+///   arg3 — 結果の IP アドレスを書き込むバッファ（4 バイト）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_dns_lookup(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let domain_len = arg2 as usize;
+
+    // ドメイン名を取得
+    let domain_slice = UserSlice::<u8>::from_raw(arg1, domain_len)?;
+    let domain = domain_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // IP バッファを取得（4 バイト）
+    let ip_slice = UserSlice::<u8>::from_raw(arg3, 4)?;
+    let ip_buf = ip_slice.as_mut_slice();
+
+    // DNS 解決
+    let ip = crate::net::dns_lookup(domain).map_err(|_| SyscallError::Other)?;
+
+    // 結果をコピー
+    ip_buf[0] = ip[0];
+    ip_buf[1] = ip[1];
+    ip_buf[2] = ip[2];
+    ip_buf[3] = ip[3];
+
+    Ok(0)
+}
+
+/// SYS_TCP_CONNECT: TCP 接続
+///
+/// 引数:
+///   arg1 — IP アドレスのポインタ（4 バイト）
+///   arg2 — ポート番号
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_tcp_connect(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let port = arg2 as u16;
+
+    // IP アドレスを取得
+    let ip_slice = UserSlice::<u8>::from_raw(arg1, 4)?;
+    let ip_buf = ip_slice.as_slice();
+    let ip = [ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3]];
+
+    // TCP 接続
+    crate::net::tcp_connect(ip, port).map_err(|_| SyscallError::Other)?;
+
+    Ok(0)
+}
+
+/// SYS_TCP_SEND: TCP 送信
+///
+/// 引数:
+///   arg1 — データのポインタ（ユーザー空間）
+///   arg2 — データの長さ
+///
+/// 戻り値:
+///   送信したバイト数（成功時）
+///   負の値（エラー時）
+fn sys_tcp_send(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let data_len = arg2 as usize;
+
+    // データを取得
+    let data_slice = UserSlice::<u8>::from_raw(arg1, data_len)?;
+    let data = data_slice.as_slice();
+
+    // TCP 送信
+    crate::net::tcp_send(data).map_err(|_| SyscallError::Other)?;
+
+    Ok(data_len as u64)
+}
+
+/// SYS_TCP_RECV: TCP 受信
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ
+///   arg3 — タイムアウト（ミリ秒）
+///
+/// 戻り値:
+///   受信したバイト数（成功時）
+///   0（タイムアウト時）
+///   負の値（エラー時）
+fn sys_tcp_recv(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    let timeout_ms = arg3;
+
+    // バッファを取得
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    // TCP 受信
+    match crate::net::tcp_recv(timeout_ms) {
+        Ok(data) => {
+            let copy_len = core::cmp::min(data.len(), buf_len);
+            buf[..copy_len].copy_from_slice(&data[..copy_len]);
+            Ok(copy_len as u64)
+        }
+        Err(e) if e == "timeout" => Ok(0),  // タイムアウトは 0 を返す
+        Err(e) if e == "connection closed" => Ok(0),  // 接続終了も 0 を返す
+        Err(_) => Err(SyscallError::Other),
+    }
+}
+
+/// SYS_TCP_CLOSE: TCP 切断
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_tcp_close() -> Result<u64, SyscallError> {
+    crate::net::tcp_close().map_err(|_| SyscallError::Other)?;
     Ok(0)
 }
 
