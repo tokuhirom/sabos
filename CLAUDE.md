@@ -24,12 +24,16 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png
 
 # 待ち時間を変えたい場合（デフォルト6秒）
 make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
+
+# 自動テストを実行
+make test
 ```
 
 ## Project Structure
 
 - `kernel/` - カーネル本体（Rust, no_std, UEFI target）
 - `user/` - ユーザープログラム（ELF バイナリ、x86_64-unknown-none target）
+- `scripts/` - テストスクリプト等
 - `docs/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
 - `setup-ubuntu.sh` - Ubuntu 向け開発環境セットアップスクリプト
 
@@ -59,8 +63,30 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 - コミットメッセージも日本語で書く
 - コード内のコメントも日本語で書く（学習用プロジェクトのため）
 
+## Testing
+
+- `make test` で自動テストを実行できる
+- QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT16、DNS
+- **新機能を追加したら `selftest` にもテストを追加する**
+
+### selftest コマンド
+
+シェルで `selftest` を実行すると各サブシステムをテストする:
+
+```
+sabos> selftest
+=== SELFTEST START ===
+[PASS] memory_allocator
+[PASS] paging
+...
+=== SELFTEST END: 6/6 PASSED ===
+```
+
 ## CI/CD
 
-- GitHub Actions で `cargo build --target x86_64-unknown-uefi` が通ることを保証
-- 新機能を追加したら対応するCIチェックも追加する
+- GitHub Actions で build と test の 2 ジョブを実行
+- build: カーネルとユーザープログラムのビルド確認
+- test: QEMU で実際に起動して selftest を実行
+- 新機能を追加したら対応するテストも追加する
 
