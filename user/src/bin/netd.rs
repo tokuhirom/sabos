@@ -14,10 +14,13 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
+#[path = "../netstack.rs"]
+mod netstack;
 #[path = "../syscall_netd.rs"]
-mod syscall;
+mod syscall_netd;
 
 use core::panic::PanicInfo;
+use crate::syscall_netd as syscall;
 
 const OPCODE_DNS_LOOKUP: u32 = 1;
 const OPCODE_TCP_CONNECT: u32 = 2;
@@ -26,6 +29,7 @@ const OPCODE_TCP_RECV: u32 = 4;
 const OPCODE_TCP_CLOSE: u32 = 5;
 
 const IPC_BUF_SIZE: usize = 2048;
+const IPC_RECV_TIMEOUT_MS: u64 = 10;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -35,20 +39,28 @@ pub extern "C" fn _start() -> ! {
 fn netd_loop() -> ! {
     let mut buf = [0u8; IPC_BUF_SIZE];
     let mut sender: u64 = 0;
+    let mut init_ok = netstack::init().is_ok();
 
     loop {
-        let n = syscall::ipc_recv(&mut sender, &mut buf, 0);
+        if !init_ok {
+            init_ok = netstack::init().is_ok();
+        }
+
+        let n = syscall::ipc_recv(&mut sender, &mut buf, IPC_RECV_TIMEOUT_MS);
         if n < 0 {
+            netstack::poll_and_handle();
             continue;
         }
         let n = n as usize;
         if n < 8 {
+            netstack::poll_and_handle();
             continue;
         }
 
         let opcode = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
         let len = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
         if 8 + len > n {
+            netstack::poll_and_handle();
             continue;
         }
         let payload = &buf[8..8 + len];
@@ -57,34 +69,36 @@ fn netd_loop() -> ! {
         let mut resp_len = 0usize;
         let mut status: i32 = 0;
 
-        match opcode {
+        if !init_ok {
+            status = -99;
+        } else {
+            match opcode {
             OPCODE_DNS_LOOKUP => {
                 let domain = core::str::from_utf8(payload).unwrap_or("");
-                let mut ip = [0u8; 4];
-                let r = syscall::dns_lookup(domain, &mut ip);
-                if r < 0 {
-                    status = r as i32;
-                } else {
+                match netstack::dns_lookup(domain) {
+                    Ok(ip) => {
                     resp_len = 4;
                     resp[12..16].copy_from_slice(&ip);
+                    }
+                    Err(err) => {
+                        status = map_netstack_error(err);
+                    }
                 }
             }
             OPCODE_TCP_CONNECT => {
                 if payload.len() == 6 {
                     let ip = [payload[0], payload[1], payload[2], payload[3]];
                     let port = u16::from_le_bytes([payload[4], payload[5]]);
-                    let r = syscall::tcp_connect(&ip, port);
-                    if r < 0 {
-                        status = r as i32;
+                    if let Err(err) = netstack::tcp_connect(ip, port) {
+                        status = map_netstack_error(err);
                     }
                 } else {
                     status = -1;
                 }
             }
             OPCODE_TCP_SEND => {
-                let r = syscall::tcp_send(payload);
-                if r < 0 {
-                    status = r as i32;
+                if let Err(err) = netstack::tcp_send(payload) {
+                    status = map_netstack_error(err);
                 }
             }
             OPCODE_TCP_RECV => {
@@ -94,28 +108,29 @@ fn netd_loop() -> ! {
                         payload[4], payload[5], payload[6], payload[7],
                         payload[8], payload[9], payload[10], payload[11],
                     ]);
-                    let mut tmp = [0u8; 1024];
-                    let read_len = core::cmp::min(max_len, tmp.len());
-                    let r = syscall::tcp_recv(&mut tmp[..read_len], timeout);
-                    if r < 0 {
-                        status = r as i32;
-                    } else {
-                        let rlen = r as usize;
-                        resp_len = rlen;
-                        resp[12..12 + rlen].copy_from_slice(&tmp[..rlen]);
+                    match netstack::tcp_recv(timeout) {
+                        Ok(data) => {
+                            let cap = core::cmp::min(max_len, data.len());
+                            let cap = core::cmp::min(cap, resp.len() - 12);
+                            resp_len = cap;
+                            resp[12..12 + cap].copy_from_slice(&data[..cap]);
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
                     }
                 } else {
                     status = -1;
                 }
             }
             OPCODE_TCP_CLOSE => {
-                let r = syscall::tcp_close();
-                if r < 0 {
-                    status = r as i32;
+                if let Err(err) = netstack::tcp_close() {
+                    status = map_netstack_error(err);
                 }
             }
             _ => {
                 status = -1;
+            }
             }
         }
 
@@ -126,10 +141,20 @@ fn netd_loop() -> ! {
 
         let total = 12 + resp_len;
         let _ = syscall::ipc_send(sender, &resp[..total]);
+
+        netstack::poll_and_handle();
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     syscall::exit();
+}
+
+fn map_netstack_error(err: &str) -> i32 {
+    if err.contains("timeout") {
+        -42
+    } else {
+        -99
+    }
 }

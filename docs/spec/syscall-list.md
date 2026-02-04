@@ -54,6 +54,9 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `42` `SYS_TCP_SEND(data_ptr, data_len) -> n`
 - `43` `SYS_TCP_RECV(buf_ptr, buf_len, timeout_ms) -> n`
 - `44` `SYS_TCP_CLOSE() -> 0`
+- `45` `SYS_NET_SEND_FRAME(buf_ptr, len) -> n`
+- `46` `SYS_NET_RECV_FRAME(buf_ptr, len, timeout_ms) -> n`
+- `47` `SYS_NET_GET_MAC(buf_ptr, len) -> n`
 
 ## システム制御 (50-59)
 

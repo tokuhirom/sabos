@@ -82,6 +82,9 @@ pub const SYS_TCP_CONNECT: u64 = 41; // tcp_connect(ip_ptr, port) — TCP 接続
 pub const SYS_TCP_SEND: u64 = 42;    // tcp_send(data_ptr, data_len) — TCP 送信
 pub const SYS_TCP_RECV: u64 = 43;    // tcp_recv(buf_ptr, buf_len, timeout_ms) — TCP 受信
 pub const SYS_TCP_CLOSE: u64 = 44;   // tcp_close() — TCP 切断
+pub const SYS_NET_SEND_FRAME: u64 = 45; // net_send_frame(buf_ptr, len) — Ethernet フレーム送信
+pub const SYS_NET_RECV_FRAME: u64 = 46; // net_recv_frame(buf_ptr, len, timeout_ms) — Ethernet フレーム受信
+pub const SYS_NET_GET_MAC: u64 = 47;    // net_get_mac(buf_ptr, len) — MAC アドレス取得
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
@@ -257,6 +260,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_TCP_SEND => sys_tcp_send(arg1, arg2),
         SYS_TCP_RECV => sys_tcp_recv(arg1, arg2, arg3),
         SYS_TCP_CLOSE => sys_tcp_close(),
+        SYS_NET_SEND_FRAME => sys_net_send_frame(arg1, arg2),
+        SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2, arg3),
+        SYS_NET_GET_MAC => sys_net_get_mac(arg1, arg2),
         // ハンドル
         SYS_OPEN => sys_open(arg1, arg2, arg3, arg4),
         SYS_HANDLE_READ => sys_handle_read(arg1, arg2, arg3),
@@ -1435,6 +1441,103 @@ fn sys_tcp_recv(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
 fn sys_tcp_close() -> Result<u64, SyscallError> {
     crate::net::tcp_close().map_err(|_| SyscallError::Other)?;
     Ok(0)
+}
+
+/// SYS_NET_SEND_FRAME: Ethernet フレーム送信
+///
+/// 引数:
+///   arg1 — フレームのポインタ（ユーザー空間）
+///   arg2 — フレームの長さ
+///
+/// 戻り値:
+///   送信したバイト数（成功時）
+///   負の値（エラー時）
+fn sys_net_send_frame(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let len = arg2 as usize;
+    if len == 0 || len > 1514 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+    let buf = buf_slice.as_slice();
+
+    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+    let drv = drv.as_mut().ok_or(SyscallError::Other)?;
+    drv.send_packet(buf).map_err(|_| SyscallError::Other)?;
+
+    Ok(len as u64)
+}
+
+/// SYS_NET_RECV_FRAME: Ethernet フレーム受信
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ
+///   arg3 — タイムアウト（ミリ秒）。0 なら即時復帰
+///
+/// 戻り値:
+///   受信したバイト数（成功時）
+///   0（タイムアウト時）
+///   負の値（エラー時）
+fn sys_net_recv_frame(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    let timeout_ms = arg3;
+
+    if buf_len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    x86_64::instructions::interrupts::enable();
+    let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+
+    loop {
+        let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+        if let Some(frame) = drv.as_mut().and_then(|d| d.receive_packet()) {
+            let copy_len = core::cmp::min(frame.len(), buf_len);
+            buf[..copy_len].copy_from_slice(&frame[..copy_len]);
+            return Ok(copy_len as u64);
+        }
+
+        if timeout_ms == 0 {
+            return Ok(0);
+        }
+
+        let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let elapsed_ticks = now.saturating_sub(start_tick);
+        let elapsed_ms = elapsed_ticks * 55;
+        if elapsed_ms >= timeout_ms {
+            return Ok(0);
+        }
+
+        crate::scheduler::yield_now();
+    }
+}
+
+/// SYS_NET_GET_MAC: MAC アドレス取得
+///
+/// 引数:
+///   arg1 — 書き込み先バッファ（ユーザー空間）
+///   arg2 — バッファの長さ（6 以上）
+///
+/// 戻り値:
+///   6（成功時）
+///   負の値（エラー時）
+fn sys_net_get_mac(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    if buf_len < 6 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let drv = crate::virtio_net::VIRTIO_NET.lock();
+    let drv = drv.as_ref().ok_or(SyscallError::Other)?;
+    buf[..6].copy_from_slice(&drv.mac_address);
+    Ok(6)
 }
 
 // =================================================================

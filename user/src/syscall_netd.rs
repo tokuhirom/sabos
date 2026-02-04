@@ -5,11 +5,9 @@
 use core::arch::asm;
 
 // ネットワーク (40-49)
-pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr)
-pub const SYS_TCP_CONNECT: u64 = 41; // tcp_connect(ip_ptr, port)
-pub const SYS_TCP_SEND: u64 = 42;    // tcp_send(data_ptr, data_len)
-pub const SYS_TCP_RECV: u64 = 43;    // tcp_recv(buf_ptr, buf_len, timeout_ms)
-pub const SYS_TCP_CLOSE: u64 = 44;   // tcp_close()
+pub const SYS_NET_SEND_FRAME: u64 = 45; // net_send_frame(buf_ptr, len)
+pub const SYS_NET_RECV_FRAME: u64 = 46; // net_recv_frame(buf_ptr, len, timeout_ms)
+pub const SYS_NET_GET_MAC: u64 = 47;    // net_get_mac(buf_ptr, len)
 
 // IPC (90-99)
 pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
@@ -96,33 +94,22 @@ pub fn exit() -> ! {
     loop {}
 }
 
-pub fn dns_lookup(domain: &str, result_ip: &mut [u8; 4]) -> SyscallResult {
-    let ptr = domain.as_ptr() as u64;
-    let len = domain.len() as u64;
-    let ip_ptr = result_ip.as_mut_ptr() as u64;
-    unsafe { syscall3(SYS_DNS_LOOKUP, ptr, len, ip_ptr) as i64 }
+pub fn net_send_frame(frame: &[u8]) -> SyscallResult {
+    let ptr = frame.as_ptr() as u64;
+    let len = frame.len() as u64;
+    unsafe { syscall2(SYS_NET_SEND_FRAME, ptr, len) as i64 }
 }
 
-pub fn tcp_connect(ip: &[u8; 4], port: u16) -> SyscallResult {
-    let ip_ptr = ip.as_ptr() as u64;
-    let port_val = port as u64;
-    unsafe { syscall2(SYS_TCP_CONNECT, ip_ptr, port_val) as i64 }
+pub fn net_recv_frame(buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
+    let ptr = buf.as_mut_ptr() as u64;
+    let len = buf.len() as u64;
+    unsafe { syscall3(SYS_NET_RECV_FRAME, ptr, len, timeout_ms) as i64 }
 }
 
-pub fn tcp_send(data: &[u8]) -> SyscallResult {
-    let data_ptr = data.as_ptr() as u64;
-    let data_len = data.len() as u64;
-    unsafe { syscall2(SYS_TCP_SEND, data_ptr, data_len) as i64 }
-}
-
-pub fn tcp_recv(buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
-    let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_TCP_RECV, buf_ptr, buf_len, timeout_ms) as i64 }
-}
-
-pub fn tcp_close() -> SyscallResult {
-    unsafe { syscall0(SYS_TCP_CLOSE) as i64 }
+pub fn net_get_mac(buf: &mut [u8; 6]) -> SyscallResult {
+    let ptr = buf.as_mut_ptr() as u64;
+    let len = 6u64;
+    unsafe { syscall2(SYS_NET_GET_MAC, ptr, len) as i64 }
 }
 
 pub fn ipc_send(dest_task_id: u64, buf: &[u8]) -> SyscallResult {
