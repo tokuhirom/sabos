@@ -18,6 +18,7 @@ mod syscall;
 
 use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::format;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use font8x8::UnicodeFonts;
@@ -36,8 +37,16 @@ const CURSOR_H: u32 = 8;
 const HUD_TICK_INTERVAL: u32 = 30;
 const HUD_X: u32 = 8;
 const HUD_Y: u32 = 8;
-const HUD_W: u32 = 320;
-const HUD_H: u32 = 120;
+const HUD_W: u32 = 360;
+const HUD_H: u32 = 136;
+const HUD_BG: (u8, u8, u8) = (16, 16, 40);
+const HUD_BORDER: (u8, u8, u8) = (80, 120, 200);
+const HUD_TITLE: (u8, u8, u8) = (255, 220, 120);
+const HUD_TEXT: (u8, u8, u8) = (220, 240, 255);
+const HUD_WARN: (u8, u8, u8) = (255, 120, 120);
+const HUD_OK: (u8, u8, u8) = (120, 220, 120);
+const HUD_BAR_BG: (u8, u8, u8) = (24, 24, 60);
+const HUD_BAR_FILL: (u8, u8, u8) = (90, 180, 255);
 
 struct GuiState {
     width: u32,
@@ -623,10 +632,18 @@ fn draw_hud(state: &mut GuiState) -> Result<(), ()> {
         return Err(());
     }
 
-    draw_rect(state, HUD_X, HUD_Y, HUD_W, HUD_H, 16, 16, 40)?;
+    draw_rect(state, HUD_X, HUD_Y, HUD_W, HUD_H, HUD_BG.0, HUD_BG.1, HUD_BG.2)?;
+    // 枠線
+    let _ = draw_line(state, HUD_X, HUD_Y, HUD_X + HUD_W - 1, HUD_Y, HUD_BORDER.0, HUD_BORDER.1, HUD_BORDER.2);
+    let _ = draw_line(state, HUD_X, HUD_Y + HUD_H - 1, HUD_X + HUD_W - 1, HUD_Y + HUD_H - 1, HUD_BORDER.0, HUD_BORDER.1, HUD_BORDER.2);
+    let _ = draw_line(state, HUD_X, HUD_Y, HUD_X, HUD_Y + HUD_H - 1, HUD_BORDER.0, HUD_BORDER.1, HUD_BORDER.2);
+    let _ = draw_line(state, HUD_X + HUD_W - 1, HUD_Y, HUD_X + HUD_W - 1, HUD_Y + HUD_H - 1, HUD_BORDER.0, HUD_BORDER.1, HUD_BORDER.2);
+
+    // タイトル帯
+    let _ = draw_rect(state, HUD_X + 1, HUD_Y + 1, HUD_W - 2, 18, 24, 24, 60);
+    let _ = draw_text(state, HUD_X + 8, HUD_Y + 4, HUD_TITLE, HUD_BG, "MEMINFO HUD");
 
     let mut text = String::new();
-    let _ = writeln!(text, "MEMINFO HUD");
     if let Some(v) = total {
         let _ = writeln!(text, "total_frames: {}", v);
     }
@@ -647,7 +664,28 @@ fn draw_hud(state: &mut GuiState) -> Result<(), ()> {
     }
     let _ = writeln!(text, "heap_source: {}", heap_source);
 
-    draw_text(state, HUD_X + 8, HUD_Y + 8, (255, 255, 255), (16, 16, 40), text.as_str())?;
+    draw_text(state, HUD_X + 8, HUD_Y + 28, HUD_TEXT, HUD_BG, text.as_str())?;
+
+    // 簡易バー（使用率）
+    if let (Some(t), Some(a)) = (total, allocated) {
+        let ratio = if t == 0 { 0 } else { a * 100 / t };
+        let bar_x = HUD_X + 8;
+        let bar_y = HUD_Y + HUD_H - 20;
+        let bar_w = HUD_W - 16;
+        let bar_h = 8;
+        let _ = draw_rect(state, bar_x, bar_y, bar_w, bar_h, HUD_BAR_BG.0, HUD_BAR_BG.1, HUD_BAR_BG.2);
+        let fill_w = (bar_w as u64 * ratio / 100) as u32;
+        let _ = draw_rect(state, bar_x, bar_y, fill_w, bar_h, HUD_BAR_FILL.0, HUD_BAR_FILL.1, HUD_BAR_FILL.2);
+        let color = if ratio >= 80 { HUD_WARN } else { HUD_OK };
+        let _ = draw_text(
+            state,
+            bar_x + 4,
+            bar_y - 12,
+            color,
+            HUD_BG,
+            &format!("alloc {}%", ratio),
+        );
+    }
     Ok(())
 }
 
