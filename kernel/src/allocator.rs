@@ -92,6 +92,21 @@ pub fn heap_region_for_reserve() -> Option<(u64, u64)> {
     }
 }
 
+/// ヒープ開始アドレス（デバッグ用）
+pub fn heap_start() -> u64 {
+    unsafe { HEAP_START }
+}
+
+/// ヒープサイズ（バイト）
+pub fn heap_size() -> u64 {
+    unsafe { HEAP_SIZE }
+}
+
+/// ヒープが CONVENTIONAL 由来かどうか
+pub fn heap_from_conventional() -> bool {
+    unsafe { HEAP_FROM_CONVENTIONAL }
+}
+
 /// UEFI メモリマップからヒープ領域を選ぶ。
 fn select_heap_region(memory_map: &MemoryMapOwned) -> Option<(u64, u64)> {
     let mut best_start = 0u64;

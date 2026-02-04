@@ -155,6 +155,7 @@ impl FileSystem for ProcFs {
 /// メモリ情報を JSON 形式で生成する
 fn generate_meminfo() -> Vec<u8> {
     use crate::memory::FRAME_ALLOCATOR;
+    use crate::allocator;
     use crate::scheduler;
 
     // メモリ情報を取得
@@ -165,17 +166,27 @@ fn generate_meminfo() -> Vec<u8> {
     let invalid_deallocs = fa.invalid_dealloc_count();
     drop(fa); // ロックを早めに解放
     let processes = scheduler::process_mem_list();
+    let heap_start = allocator::heap_start();
+    let heap_size = allocator::heap_size();
+    let heap_source = if allocator::heap_from_conventional() {
+        "conventional"
+    } else {
+        "bss_fallback"
+    };
 
     // JSON 形式で書き込む
     let mut buf = Vec::with_capacity(256);
     let mut writer = VecWriter::new(&mut buf);
     let _ = write!(
         writer,
-        "{{\"total_frames\":{},\"allocated_frames\":{},\"free_frames\":{},\"free_kib\":{},\"processes\":[",
+        "{{\"total_frames\":{},\"allocated_frames\":{},\"free_frames\":{},\"free_kib\":{},\"heap_start\":{},\"heap_size\":{},\"heap_source\":\"{}\",\"processes\":[",
         total,
         allocated,
         free,
-        free * 4
+        free * 4,
+        heap_start,
+        heap_size,
+        heap_source
     );
     for (i, p) in processes.iter().enumerate() {
         if i != 0 {
