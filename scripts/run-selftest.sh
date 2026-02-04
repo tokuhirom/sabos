@@ -71,6 +71,26 @@ if ! grep -q "user>" "$LOG_FILE" 2>/dev/null; then
     exit 1
 fi
 
+echo "Waiting for init supervisor loop..."
+for i in {1..30}; do
+    if grep -q "Entering supervisor loop" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+# init のログが落ち着いたタイミングで空行を送ってプロンプトを揃える
+echo "sendkey ret" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+sleep 0.5
+
+# user> プロンプトが再表示されるまで待つ
+for i in {1..10}; do
+    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
 echo "Sending user shell mkdir command..."
 
 # mkdir TESTDIR
@@ -137,6 +157,14 @@ if ! grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
     cat "$LOG_FILE"
     exit 1
 fi
+
+# ls 実行後に user> プロンプトが戻るまで待つ
+for i in {1..10}; do
+    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
 
 echo "Sending selftest command..."
 

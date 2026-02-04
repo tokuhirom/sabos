@@ -673,6 +673,18 @@ pub fn task_exists(task_id: u64) -> bool {
     sched.tasks.iter().any(|t| t.id == task_id && t.state != TaskState::Finished)
 }
 
+/// タスク名からタスク ID を探す。
+///
+/// ユーザープロセスは ELF のファイル名（例: "NETD.ELF"）がタスク名になる。
+pub fn find_task_id_by_name(name: &str) -> Option<u64> {
+    let sched = SCHEDULER.lock();
+    sched
+        .tasks
+        .iter()
+        .find(|t| t.name == name && t.state != TaskState::Finished)
+        .map(|t| t.id)
+}
+
 /// wait_for_child() のエラー型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitError {

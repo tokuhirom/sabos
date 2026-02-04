@@ -1277,6 +1277,15 @@ impl Shell {
             failed += 1;
         }
 
+        // 13. ユーザー空間 netd の DNS テスト
+        if self.test_network_netd_dns() {
+            Self::print_pass("network_netd_dns");
+            passed += 1;
+        } else {
+            Self::print_fail("network_netd_dns");
+            failed += 1;
+        }
+
         // サマリー出力
         let total = passed + failed;
         if failed == 0 {
@@ -1612,6 +1621,59 @@ impl Shell {
             }
             Err(_) => false,
         }
+    }
+
+    /// ユーザー空間 netd の DNS テスト
+    /// IPC 経由で netd に example.com を問い合わせる。
+    fn test_network_netd_dns(&self) -> bool {
+        // netd のタスク ID を探す（init が /NETD.ELF を起動している前提）
+        let netd_id = match crate::scheduler::find_task_id_by_name("NETD.ELF") {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // リクエストを構築: [opcode][len][payload]
+        let opcode: u32 = 1; // DNS_LOOKUP
+        let payload = b"example.com";
+        let mut req = [0u8; 2048];
+        let header_len = 8;
+        if header_len + payload.len() > req.len() {
+            return false;
+        }
+        req[0..4].copy_from_slice(&opcode.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        req[8..8 + payload.len()].copy_from_slice(payload);
+
+        // IPC 送信
+        let sender = crate::scheduler::current_task_id();
+        if crate::ipc::send(sender, netd_id, req[..header_len + payload.len()].to_vec()).is_err() {
+            return false;
+        }
+
+        // IPC 受信（5 秒タイムアウト）
+        let msg = match crate::ipc::recv(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+
+        // レスポンスをパース: [opcode][status][len][payload]
+        if msg.data.len() < 12 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status < 0 {
+            return false;
+        }
+        let len = u32::from_le_bytes([msg.data[8], msg.data[9], msg.data[10], msg.data[11]]) as usize;
+        if 12 + len > msg.data.len() || len != 4 {
+            return false;
+        }
+        let ip = [msg.data[12], msg.data[13], msg.data[14], msg.data[15]];
+        ip != [0, 0, 0, 0]
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
