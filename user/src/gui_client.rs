@@ -17,6 +17,7 @@ const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
+const OPCODE_HUD: u32 = 7;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
@@ -90,6 +91,13 @@ impl GuiClient {
     ) -> Result<(), ()> {
         let payload = build_text_payload(x, y, fg, bg, text)?;
         let status = self.request(OPCODE_TEXT, &payload)?;
+        if status < 0 { Err(()) } else { Ok(()) }
+    }
+
+    /// HUD 表示の ON/OFF
+    pub fn hud(&mut self, enable: bool) -> Result<(), ()> {
+        let payload = [enable as u8];
+        let status = self.request(OPCODE_HUD, &payload)?;
         if status < 0 { Err(()) } else { Ok(()) }
     }
 

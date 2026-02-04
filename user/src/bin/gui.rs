@@ -11,10 +11,14 @@ extern crate alloc;
 
 #[path = "../allocator_gui.rs"]
 mod allocator;
+#[path = "../json.rs"]
+mod json;
 #[path = "../syscall.rs"]
 mod syscall;
 
 use alloc::vec::Vec;
+use alloc::string::String;
+use core::fmt::Write;
 use core::panic::PanicInfo;
 use font8x8::UnicodeFonts;
 
@@ -24,10 +28,16 @@ const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
+const OPCODE_HUD: u32 = 7;
 
 const IPC_BUF_SIZE: usize = 2048;
 const CURSOR_W: u32 = 8;
 const CURSOR_H: u32 = 8;
+const HUD_TICK_INTERVAL: u32 = 30;
+const HUD_X: u32 = 8;
+const HUD_Y: u32 = 8;
+const HUD_W: u32 = 320;
+const HUD_H: u32 = 120;
 
 struct GuiState {
     width: u32,
@@ -39,6 +49,7 @@ struct CursorState {
     x: i32,
     y: i32,
     visible: bool,
+    buttons: u8,
 }
 
 #[unsafe(no_mangle)]
@@ -60,7 +71,10 @@ fn gui_loop() -> ! {
         x: 0,
         y: 0,
         visible: false,
+        buttons: 0,
     };
+    let mut hud_enabled = false;
+    let mut hud_tick: u32 = 0;
 
     loop {
         let n = syscall::ipc_recv(&mut sender, &mut buf, 16);
@@ -122,7 +136,7 @@ fn gui_loop() -> ! {
                     if present(&state).is_err() {
                         status = -99;
                     } else if cursor.visible {
-                        let _ = draw_cursor(&state, cursor.x, cursor.y, 0);
+                        let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
                     }
                 }
                 OPCODE_CIRCLE => {
@@ -166,6 +180,22 @@ fn gui_loop() -> ! {
                         status = -10;
                     }
                 }
+                OPCODE_HUD => {
+                    if payload.len() == 1 {
+                        hud_enabled = payload[0] != 0;
+                        hud_tick = 0;
+                        if hud_enabled {
+                            let _ = draw_hud(&mut state);
+                            if present(&state).is_err() {
+                                status = -99;
+                            } else if cursor.visible {
+                                let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                            }
+                        }
+                    } else {
+                        status = -10;
+                    }
+                }
                 _ => {
                     status = -10;
                 }
@@ -188,6 +218,17 @@ fn gui_loop() -> ! {
         };
         if syscall::mouse_read(&mut mouse_state) > 0 {
             let _ = update_cursor(&mut state, &mut cursor, &mouse_state);
+        }
+
+        if hud_enabled {
+            hud_tick = hud_tick.wrapping_add(1);
+            if hud_tick >= HUD_TICK_INTERVAL {
+                hud_tick = 0;
+                let _ = draw_hud(&mut state);
+                if present(&state).is_ok() && cursor.visible {
+                    let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                }
+            }
         }
     }
 }
@@ -473,6 +514,7 @@ fn update_cursor(state: &GuiState, cursor: &mut CursorState, mouse: &syscall::Mo
     cursor.x = x;
     cursor.y = y;
     cursor.visible = true;
+    cursor.buttons = mouse.buttons;
     Ok(())
 }
 
@@ -554,6 +596,58 @@ fn draw_cursor(state: &GuiState, x: i32, y: i32, buttons: u8) -> Result<(), ()> 
             }
         }
     }
+    Ok(())
+}
+
+fn draw_hud(state: &mut GuiState) -> Result<(), ()> {
+    let mut buf = [0u8; 1024];
+    let result = syscall::get_mem_info(&mut buf);
+    if result < 0 {
+        return Err(());
+    }
+
+    let len = result as usize;
+    let Ok(s) = core::str::from_utf8(&buf[..len]) else {
+        return Err(());
+    };
+
+    let total = json::json_find_u64(s, "total_frames");
+    let allocated = json::json_find_u64(s, "allocated_frames");
+    let free = json::json_find_u64(s, "free_frames");
+    let free_kib = json::json_find_u64(s, "free_kib");
+    let heap_start = json::json_find_u64(s, "heap_start");
+    let heap_size = json::json_find_u64(s, "heap_size");
+    let heap_source = json::json_find_str(s, "heap_source").unwrap_or("-");
+
+    if HUD_X + HUD_W > state.width || HUD_Y + HUD_H > state.height {
+        return Err(());
+    }
+
+    draw_rect(state, HUD_X, HUD_Y, HUD_W, HUD_H, 16, 16, 40)?;
+
+    let mut text = String::new();
+    let _ = writeln!(text, "MEMINFO HUD");
+    if let Some(v) = total {
+        let _ = writeln!(text, "total_frames: {}", v);
+    }
+    if let Some(v) = allocated {
+        let _ = writeln!(text, "allocated_frames: {}", v);
+    }
+    if let Some(v) = free {
+        let _ = writeln!(text, "free_frames: {}", v);
+    }
+    if let Some(v) = free_kib {
+        let _ = writeln!(text, "free_kib: {}", v);
+    }
+    if let Some(v) = heap_start {
+        let _ = writeln!(text, "heap_start: {}", v);
+    }
+    if let Some(v) = heap_size {
+        let _ = writeln!(text, "heap_size: {}", v);
+    }
+    let _ = writeln!(text, "heap_source: {}", heap_source);
+
+    draw_text(state, HUD_X + 8, HUD_Y + 8, (255, 255, 255), (16, 16, 40), text.as_str())?;
     Ok(())
 }
 
