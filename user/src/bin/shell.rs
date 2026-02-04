@@ -1299,6 +1299,7 @@ fn cmd_http(args: &str) {
 ///   gui circle 120 120 40 255 255 0
 ///   gui fillcircle 160 160 30 0 180 255
 ///   gui text 20 20 255 255 255 0 0 0 Hello
+///   gui meminfo
 fn cmd_gui(args: &str) {
     let (sub, rest) = split_command(args);
     let mut gui = gui_client::GuiClient::new();
@@ -1309,6 +1310,58 @@ fn cmd_gui(args: &str) {
             let _ = gui.circle(120, 120, 50, 255, 220, 64, false);
             let _ = gui.circle(280, 120, 40, 64, 200, 255, true);
             let _ = gui.text(70, 70, (255, 255, 255), (16, 16, 40), "Hello GUI");
+            let _ = gui.present();
+        }
+        "meminfo" => {
+            let mut buf = [0u8; FILE_BUFFER_SIZE];
+            let result = syscall::get_mem_info(&mut buf);
+            if result < 0 {
+                syscall::write_str("Error: Failed to get memory info\n");
+                return;
+            }
+
+            let len = result as usize;
+            let Ok(s) = core::str::from_utf8(&buf[..len]) else {
+                syscall::write_str("Error: Invalid meminfo\n");
+                return;
+            };
+
+            let total = json::json_find_u64(s, "total_frames");
+            let allocated = json::json_find_u64(s, "allocated_frames");
+            let free = json::json_find_u64(s, "free_frames");
+            let free_kib = json::json_find_u64(s, "free_kib");
+            let heap_start = json::json_find_u64(s, "heap_start");
+            let heap_size = json::json_find_u64(s, "heap_size");
+            let heap_source = json::json_find_str(s, "heap_source").unwrap_or("-");
+
+            let mut text = String::new();
+            text.push_str("Memory Information\n");
+            text.push_str("------------------\n");
+            if let Some(v) = total {
+                text.push_str(&format!("total_frames: {}\n", v));
+            }
+            if let Some(v) = allocated {
+                text.push_str(&format!("allocated_frames: {}\n", v));
+            }
+            if let Some(v) = free {
+                text.push_str(&format!("free_frames: {}\n", v));
+            }
+            if let Some(v) = free_kib {
+                text.push_str(&format!("free_kib: {}\n", v));
+            }
+            if let Some(v) = heap_start {
+                text.push_str(&format!("heap_start: {}\n", v));
+            }
+            if let Some(v) = heap_size {
+                text.push_str(&format!("heap_size: {}\n", v));
+            }
+            text.push_str(&format!("heap_source: {}\n", heap_source));
+
+            let _ = gui.clear(16, 16, 40);
+            if gui.text(16, 16, (255, 255, 255), (16, 16, 40), text.as_str()).is_err() {
+                syscall::write_str("Error: gui meminfo failed\n");
+                return;
+            }
             let _ = gui.present();
         }
         "rect" => {
@@ -1389,6 +1442,7 @@ fn cmd_gui(args: &str) {
 fn print_gui_usage() {
     syscall::write_str("Usage:\n");
     syscall::write_str("  gui demo\n");
+    syscall::write_str("  gui meminfo\n");
     syscall::write_str("  gui rect x y w h r g b\n");
     syscall::write_str("  gui circle cx cy r red green blue\n");
     syscall::write_str("  gui fillcircle cx cy r red green blue\n");
