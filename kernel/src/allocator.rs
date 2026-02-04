@@ -13,6 +13,7 @@
 
 use linked_list_allocator::LockedHeap;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
+use core::alloc::Layout;
 
 /// ヒープのサイズ（1 MiB）。
 /// 当面はこれで十分。足りなくなったら増やすか、
@@ -105,6 +106,62 @@ pub fn heap_size() -> u64 {
 /// ヒープが CONVENTIONAL 由来かどうか
 pub fn heap_from_conventional() -> bool {
     unsafe { HEAP_FROM_CONVENTIONAL }
+}
+
+/// alloc の OOM ハンドラ
+///
+/// 方針: 失敗したら即 panic で停止する。
+/// no_std での回復戦略は難しいので、まずは「原因を確実に見える化」する。
+#[alloc_error_handler]
+fn alloc_error_handler(layout: Layout) -> ! {
+    let heap_start = heap_start();
+    let heap_size = heap_size();
+    let heap_source = if heap_from_conventional() {
+        "conventional"
+    } else {
+        "bss_fallback"
+    };
+
+    let fa = crate::memory::FRAME_ALLOCATOR.lock();
+    let total = fa.total_frames();
+    let allocated = fa.allocated_count();
+    let free = fa.free_frames();
+    drop(fa);
+
+    crate::serial_println!(
+        "[OOM] alloc failed: size={} align={}",
+        layout.size(),
+        layout.align()
+    );
+    crate::serial_println!(
+        "[OOM] heap={:#x}-{:#x} source={}",
+        heap_start,
+        heap_start + heap_size,
+        heap_source
+    );
+    crate::serial_println!(
+        "[OOM] frames: total={} allocated={} free={}",
+        total,
+        allocated,
+        free
+    );
+
+    crate::kprintln!("=== OOM ===");
+    crate::kprintln!("alloc failed: size={} align={}", layout.size(), layout.align());
+    crate::kprintln!(
+        "heap: {:#x}-{:#x} source={}",
+        heap_start,
+        heap_start + heap_size,
+        heap_source
+    );
+    crate::kprintln!(
+        "frames: total={} allocated={} free={}",
+        total,
+        allocated,
+        free
+    );
+
+    panic!("Out of memory");
 }
 
 /// UEFI メモリマップからヒープ領域を選ぶ。
