@@ -155,6 +155,7 @@ impl FileSystem for ProcFs {
 /// メモリ情報を JSON 形式で生成する
 fn generate_meminfo() -> Vec<u8> {
     use crate::memory::FRAME_ALLOCATOR;
+    use crate::scheduler;
 
     // メモリ情報を取得
     let fa = FRAME_ALLOCATOR.lock();
@@ -162,18 +163,31 @@ fn generate_meminfo() -> Vec<u8> {
     let allocated = fa.allocated_count();
     let free = fa.free_frames();
     drop(fa); // ロックを早めに解放
+    let processes = scheduler::process_mem_list();
 
     // JSON 形式で書き込む
-    let mut buf = Vec::with_capacity(128);
+    let mut buf = Vec::with_capacity(256);
     let mut writer = VecWriter::new(&mut buf);
     let _ = write!(
         writer,
-        "{{\"total_frames\":{},\"allocated_frames\":{},\"free_frames\":{},\"free_kib\":{}}}\n",
+        "{{\"total_frames\":{},\"allocated_frames\":{},\"free_frames\":{},\"free_kib\":{},\"processes\":[",
         total,
         allocated,
         free,
         free * 4
     );
+    for (i, p) in processes.iter().enumerate() {
+        if i != 0 {
+            let _ = write!(writer, ",");
+        }
+        let type_str = if p.is_user_process { "user" } else { "kernel" };
+        let _ = write!(writer, "{{\"id\":{},\"type\":\"", p.id);
+        let _ = writer.write_str(type_str);
+        let _ = write!(writer, "\",\"name\":\"");
+        let _ = write_json_string(&mut writer, p.name.as_str());
+        let _ = write!(writer, "\",\"user_frames\":{}}}", p.user_frames);
+    }
+    let _ = write!(writer, "]}}\n");
 
     buf
 }

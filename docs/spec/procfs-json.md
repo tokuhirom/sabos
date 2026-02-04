@@ -61,17 +61,18 @@
 }
 ```
 
-### `/proc/mem`
+### `/proc/meminfo`
 
 ```
 {
-  "schema": "procfs-1",
-  "ok": true,
-  "data": {
-    "total_bytes": 268435456,
-    "used_bytes": 67108864,
-    "free_bytes": 201326592
-  }
+  "total_frames": 12345,
+  "allocated_frames": 6789,
+  "free_frames": 5556,
+  "free_kib": 22224,
+  "processes": [
+    { "id": 1, "type": "kernel", "name": "kernel", "user_frames": 0 },
+    { "id": 2, "type": "user", "name": "SHELL.ELF", "user_frames": 120 }
+  ]
 }
 ```
 

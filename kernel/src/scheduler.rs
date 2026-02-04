@@ -186,6 +186,15 @@ pub struct TaskInfo {
     pub is_user_process: bool,
 }
 
+/// メモリ使用量の情報（procfs 用の簡易統計）。
+pub struct ProcessMemInfo {
+    pub id: u64,
+    pub name: String,
+    pub is_user_process: bool,
+    /// そのプロセスが確保したユーザー空間フレーム数（ざっくり）。
+    pub user_frames: usize,
+}
+
 /// ユーザープロセスの情報を保持する構造体。
 /// spawn_user() でユーザープロセスをタスクとして登録する際に使う。
 pub struct UserProcessInfo {
@@ -657,6 +666,30 @@ pub fn task_list() -> Vec<TaskInfo> {
             name: t.name.clone(),
             state: t.state,
             is_user_process: t.is_user,
+        })
+        .collect()
+}
+
+/// プロセスごとのメモリ使用量を取得する（procfs 用）。
+///
+/// ユーザープロセスは `allocated_frames` の数を返す。
+/// カーネルタスクや終了済みプロセスは 0 とする。
+pub fn process_mem_list() -> Vec<ProcessMemInfo> {
+    let sched = SCHEDULER.lock();
+    sched
+        .tasks
+        .iter()
+        .map(|t| {
+            let user_frames = t.user_process_info
+                .as_ref()
+                .map(|info| info.process.allocated_frames.len())
+                .unwrap_or(0);
+            ProcessMemInfo {
+                id: t.id,
+                name: t.name.clone(),
+                is_user_process: t.is_user,
+                user_frames,
+            }
         })
         .collect()
 }
