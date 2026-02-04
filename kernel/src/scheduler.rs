@@ -228,6 +228,12 @@ pub struct Task {
     pub user_process_info: Option<UserProcessInfo>,
     /// ユーザープロセスかどうか（終了後も保持するフラグ）
     pub is_user: bool,
+    /// 親タスクの ID。カーネルタスク (task 0) や最初のユーザープロセス (init) は None。
+    /// spawn_user() で子プロセスを作成した場合、呼び出し元のタスク ID が設定される。
+    pub parent_id: Option<u64>,
+    /// プロセスの終了コード。exit() で設定され、wait() で取得できる。
+    /// Finished 状態になった時点で有効な値を持つ。
+    pub exit_code: i32,
 }
 
 // =================================================================
@@ -283,6 +289,8 @@ pub fn init() {
         cr3: None,                    // カーネルの CR3 を使用
         user_process_info: None,      // カーネルタスク
         is_user: false,               // カーネルタスク
+        parent_id: None,              // カーネルタスクに親はいない
+        exit_code: 0,                 // 初期値
     });
     sched.current = 0;
 }
@@ -356,6 +364,7 @@ pub fn spawn(name: &'static str, entry: fn()) {
 
     let initial_rsp = stack_top - 80;
 
+    // カーネルタスクには親は設定しない（内部タスクなので）
     sched.tasks.push(Task {
         id,
         name: String::from(name),
@@ -365,6 +374,8 @@ pub fn spawn(name: &'static str, entry: fn()) {
         cr3: None,                    // カーネルの CR3 を使用
         user_process_info: None,      // カーネルタスク
         is_user: false,               // カーネルタスク
+        parent_id: None,              // カーネルタスクに親はいない
+        exit_code: 0,                 // 初期値
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -426,7 +437,18 @@ pub fn yield_now() {
                     .map(|f| f.start_address().as_u64())
                     .unwrap_or_else(|| crate::paging::kernel_cr3().as_u64());
 
-                Some((old_rsp_ptr, new_rsp, new_cr3))
+                // 切り替え先タスクのカーネルスタックトップを取得（ユーザープロセスのみ）。
+                // TSS rsp0 の更新に必要。
+                let new_kernel_stack_top = sched.tasks[next_idx]
+                    .user_process_info
+                    .as_ref()
+                    .map(|info| {
+                        let ks_ptr = info.process.kernel_stack.as_ptr() as u64;
+                        let ks_len = info.process.kernel_stack.len() as u64;
+                        ks_ptr + ks_len
+                    });
+
+                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top))
             }
         }
     }; // Mutex はここで drop される（context_switch 前にロックを解放）
@@ -440,7 +462,17 @@ pub fn yield_now() {
             // タイマー割り込みが発火すると preempt() が Sleeping タスクの起床をチェックする。
             x86_64::instructions::interrupts::enable_and_hlt();
         }
-        Some((old_rsp_ptr, new_rsp, new_cr3)) => {
+        Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)) => {
+            // ユーザープロセスへの切り替え時は TSS rsp0 を更新する。
+            // ユーザーモードで割り込み/システムコールが発生したとき、
+            // CPU は TSS rsp0 のアドレスをカーネルスタックとして使用する。
+            // 各プロセスは独自のカーネルスタックを持つので、切り替え時に更新が必要。
+            if let Some(kernel_stack_top) = new_kernel_stack_top {
+                unsafe {
+                    crate::gdt::set_tss_rsp0(VirtAddr::new(kernel_stack_top));
+                }
+            }
+
             // コンテキストスイッチを実行。
             // CR3 も同時に切り替えることで、新しいタスクのアドレス空間になる。
             // この関数から「戻ってきた」時点で、このタスクは
@@ -531,13 +563,34 @@ pub fn preempt() {
                     .map(|f| f.start_address().as_u64())
                     .unwrap_or_else(|| crate::paging::kernel_cr3().as_u64());
 
-                Some((old_rsp_ptr, new_rsp, new_cr3))
+                // 切り替え先タスクのカーネルスタックトップを取得（ユーザープロセスのみ）
+                let new_kernel_stack_top = sched.tasks[next_idx]
+                    .user_process_info
+                    .as_ref()
+                    .map(|info| {
+                        let ks_ptr = info.process.kernel_stack.as_ptr() as u64;
+                        let ks_len = info.process.kernel_stack.len() as u64;
+                        ks_ptr + ks_len
+                    });
+
+                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top))
             }
         }
     }; // Mutex はここで drop
 
-    if let Some((old_rsp_ptr, new_rsp, new_cr3)) = switch_info {
+    if let Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)) = switch_info {
         PREEMPT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
+
+        // ユーザープロセスへの切り替え時は TSS rsp0 を更新。
+        // ユーザーモードで割り込み/システムコールが発生したとき、
+        // CPU は TSS rsp0 のアドレスをカーネルスタックとして使用する。
+        // 各プロセスは独自のカーネルスタックを持つので、切り替え時に更新が必要。
+        if let Some(kernel_stack_top) = new_kernel_stack_top {
+            unsafe {
+                crate::gdt::set_tss_rsp0(VirtAddr::new(kernel_stack_top));
+            }
+        }
+
         unsafe {
             context_switch(old_rsp_ptr, new_rsp, new_cr3);
         }
@@ -614,6 +667,101 @@ pub fn current_task_id() -> u64 {
 pub fn task_exists(task_id: u64) -> bool {
     let sched = SCHEDULER.lock();
     sched.tasks.iter().any(|t| t.id == task_id && t.state != TaskState::Finished)
+}
+
+/// wait_for_child() のエラー型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitError {
+    /// 子プロセスがいない
+    NoChild,
+    /// 指定したタスクは子プロセスではない
+    NotChild,
+    /// タイムアウト
+    Timeout,
+}
+
+/// 子プロセスの終了を待つ
+///
+/// # 引数
+/// - `target_task_id`: 待つ子プロセスのタスク ID (0 なら任意の子)
+/// - `timeout_ms`: タイムアウト (ms)。0 なら無期限待ち
+///
+/// # 戻り値
+/// - Ok(exit_code): 子プロセスの終了コード
+/// - Err(WaitError): エラー
+///
+/// # 動作
+/// - 現在のタスクの子プロセス（parent_id が自分のタスク）を探す
+/// - target_task_id > 0 の場合、そのタスクが子かどうかを確認
+/// - 子プロセスが Finished 状態になるまでポーリングする
+/// - Finished になったら exit_code を取得して返す
+pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitError> {
+    let my_id = current_task_id();
+    let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+
+    loop {
+        {
+            let sched = SCHEDULER.lock();
+
+            // 子プロセスの中で Finished になっているものを探す
+            let finished_child = sched.tasks.iter().find(|t| {
+                // 自分の子かどうか
+                let is_my_child = t.parent_id == Some(my_id);
+                // Finished 状態かどうか
+                let is_finished = t.state == TaskState::Finished;
+                // target_task_id が指定されていれば、そのタスクのみ対象
+                let is_target = target_task_id == 0 || t.id == target_task_id;
+
+                is_my_child && is_finished && is_target
+            });
+
+            if let Some(child) = finished_child {
+                // 子プロセスが終了している
+                let exit_code = child.exit_code;
+                // TODO: 将来的にはここでタスクエントリをクリーンアップする
+                return Ok(exit_code);
+            }
+
+            // target_task_id が指定されている場合、そのタスクが自分の子かどうか確認
+            if target_task_id > 0 {
+                let target = sched.tasks.iter().find(|t| t.id == target_task_id);
+                match target {
+                    None => return Err(WaitError::NoChild), // タスクが存在しない
+                    Some(t) if t.parent_id != Some(my_id) => return Err(WaitError::NotChild), // 子ではない
+                    Some(_) => {} // 子だが、まだ終了していない
+                }
+            } else {
+                // target_task_id == 0 の場合、子プロセスが一つもいなければエラー
+                let has_child = sched.tasks.iter().any(|t| t.parent_id == Some(my_id));
+                if !has_child {
+                    return Err(WaitError::NoChild);
+                }
+            }
+        }
+
+        // タイムアウトチェック
+        if timeout_ms > 0 {
+            let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            // PIT は約 18.2 Hz なので 1 tick ≈ 55ms
+            let elapsed_ticks = now.saturating_sub(start_tick);
+            let elapsed_ms = elapsed_ticks * 55; // 近似値
+            if elapsed_ms >= timeout_ms {
+                return Err(WaitError::Timeout);
+            }
+        }
+
+        // まだ終了していないので、yield して待つ
+        yield_now();
+    }
+}
+
+/// プロセスの終了コードを設定する（SYS_EXIT から呼ばれる）
+/// 将来的に exit(code) システムコールで使用される
+#[allow(dead_code)]
+pub fn set_exit_code(exit_code: i32) {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    sched.tasks[current].exit_code = exit_code;
 }
 
 // =================================================================
@@ -771,6 +919,16 @@ pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
     let cr3 = process.page_table_frame;
 
     let mut sched = SCHEDULER.lock();
+
+    // 親タスクの ID を取得（呼び出し元のタスク）
+    // カーネルタスク (task 0) から呼ばれた場合や初回起動時は parent_id を None にする。
+    // ユーザープロセスから spawn システムコール経由で呼ばれた場合は親タスクの ID を設定する。
+    let parent_id = if sched.tasks.is_empty() {
+        None // 最初のタスク（init）には親がない
+    } else {
+        Some(sched.tasks[sched.current].id)
+    };
+
     let id = sched.next_id;
     sched.next_id += 1;
 
@@ -833,9 +991,11 @@ pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
         cr3: Some(cr3),
         user_process_info: Some(user_process_info),
         is_user: true,                // ユーザープロセス
+        parent_id,                    // 親タスクの ID（spawn 元）
+        exit_code: 0,                 // 初期値
     });
 
-    crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x})", id, name, entry_point);
+    crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);
 
     Ok(id)
 }

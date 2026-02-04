@@ -307,34 +307,64 @@ fn main() -> Status {
     kprintln!("All sleep demo tasks finished!");
     kprintln!();
 
-    // --- ユーザーシェルの起動 ---
-    // 埋め込まれたユーザープログラム（user/ crate のシェル）を Ring 3 で実行する。
-    // ユーザーシェルが exit した場合はカーネルシェルにフォールバックする。
+    // --- init プロセスの起動 ---
+    // disk.img から INIT.ELF を読み込んで最初のユーザープロセスとして起動する。
+    // init は netd と shell を起動し、supervisor として常駐する。
+    // init が終了した場合はカーネルシェルにフォールバックする。
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
-    kprintln!("Starting user shell...");
-    kprintln!();
+    kprintln!("Loading init from disk...");
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
-    // 埋め込まれた ELF を取得してユーザープロセスとして実行
-    let elf_data = usermode::get_user_elf_data();
-    match usermode::create_elf_process(elf_data) {
-        Ok((process, entry_point, user_stack_top)) => {
-            // Ring 3 でユーザーシェルを実行（exit するまでブロック）
-            usermode::run_elf_process(&process, entry_point, user_stack_top);
-            // ユーザーシェルが終了したらプロセスを破棄
-            usermode::destroy_user_process(process);
-            kprintln!("User shell exited.");
+    // FAT16 から INIT.ELF を読み込む
+    match fat16::Fat16::new() {
+        Ok(fs) => {
+            match fs.read_file("/INIT.ELF") {
+                Ok(elf_data) => {
+                    kprintln!("Loaded INIT.ELF ({} bytes)", elf_data.len());
+
+                    // init をバックグラウンドで起動
+                    match scheduler::spawn_user("init", &elf_data) {
+                        Ok(task_id) => {
+                            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                            kprintln!("Init process started (task {})", task_id);
+                            kprintln!();
+                            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                        }
+                        Err(e) => {
+                            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                            kprintln!("Failed to start init: {}", e);
+                            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                        }
+                    }
+                }
+                Err(e) => {
+                    framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
+                    kprintln!("Failed to load INIT.ELF: {:?}", e);
+                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+                }
+            }
         }
         Err(e) => {
             framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-            kprintln!("Failed to start user shell: {}", e);
+            kprintln!("Failed to initialize FAT16: {:?}", e);
             framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
         }
     }
 
-    // --- カーネルシェルにフォールバック ---
-    // ユーザーシェルが終了した場合やエラー時はカーネルシェルを起動
+    // --- カーネルタスクは idle として待機 ---
+    // init が起動したら、カーネルタスクは yield して他のタスクに CPU を譲る。
+    // ユーザープロセスがすべて終了したらカーネルシェルにフォールバックする。
+    kprintln!("Kernel entering idle mode...");
+    kprintln!();
+
+    // ユーザープロセスが動いている間は yield で待機
+    while scheduler::has_ready_tasks() {
+        scheduler::yield_now();
+    }
+
+    // 全ユーザープロセスが終了したらカーネルシェルにフォールバック
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+    kprintln!("All user processes exited.");
     kprintln!("Falling back to kernel shell. Type 'help' for commands.");
     kprintln!();
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));

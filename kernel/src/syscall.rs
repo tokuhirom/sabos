@@ -71,6 +71,8 @@ pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラム
 pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
 pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
+pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
+pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 
 // ネットワーク (40-49)
 pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
@@ -244,6 +246,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_SPAWN => sys_spawn(arg1, arg2),
         SYS_YIELD => sys_yield(),
         SYS_SLEEP => sys_sleep(arg1),
+        SYS_WAIT => sys_wait(arg1, arg2),
+        SYS_GETPID => sys_getpid(),
         // ネットワーク
         SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
         SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
@@ -1249,6 +1253,47 @@ fn sys_sleep(arg1: u64) -> Result<u64, SyscallError> {
     x86_64::instructions::interrupts::enable();
     crate::scheduler::sleep_ms(ms);
     Ok(0)
+}
+
+/// SYS_WAIT: 子プロセスの終了を待つ
+///
+/// 引数:
+///   arg1 — 待つ子プロセスのタスク ID (0 なら任意の子)
+///   arg2 — タイムアウト (ms)。0 なら無期限待ち
+///
+/// 戻り値:
+///   終了した子プロセスの終了コード（成功時）
+///   負の値（エラー時）
+///
+/// 動作:
+///   - task_id > 0: 指定した子プロセスの終了を待つ
+///   - task_id == 0: 任意の子プロセスの終了を待つ
+///   - 子プロセスがない場合はエラー
+///   - 子プロセスが既に終了していれば即座に戻る
+fn sys_wait(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let target_task_id = arg1;
+    let timeout_ms = arg2;
+
+    // 割り込みを有効化（ポーリング中にタイマー割り込みが必要）
+    x86_64::instructions::interrupts::enable();
+
+    let result = crate::scheduler::wait_for_child(target_task_id, timeout_ms);
+    match result {
+        Ok(exit_code) => Ok(exit_code as u64),
+        Err(crate::scheduler::WaitError::NoChild) => Err(SyscallError::InvalidArgument),
+        Err(crate::scheduler::WaitError::NotChild) => Err(SyscallError::PermissionDenied),
+        Err(crate::scheduler::WaitError::Timeout) => Err(SyscallError::Timeout),
+    }
+}
+
+/// SYS_GETPID: 自分のタスク ID を取得
+///
+/// 引数: なし
+///
+/// 戻り値:
+///   現在のタスク ID（常に成功）
+fn sys_getpid() -> Result<u64, SyscallError> {
+    Ok(crate::scheduler::current_task_id())
 }
 
 // =================================================================

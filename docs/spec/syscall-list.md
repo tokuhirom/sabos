@@ -31,10 +31,18 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 ## プロセス管理 (30-39)
 
-- `30` `SYS_EXEC(path_ptr, path_len) -> never returns`
+- `30` `SYS_EXEC(path_ptr, path_len) -> 0`
 - `31` `SYS_SPAWN(path_ptr, path_len) -> task_id`
 - `32` `SYS_YIELD() -> 0`
 - `33` `SYS_SLEEP(ms) -> 0`
+- `34` `SYS_WAIT(task_id, timeout_ms) -> exit_code`
+  - `task_id == 0`: 任意の子プロセスの終了を待つ
+  - `task_id > 0`: 指定した子プロセスの終了を待つ
+  - `timeout_ms == 0`: 無期限待ち
+  - 子プロセスが既に終了していれば即座に戻る
+  - エラー: -10 (子がいない), -30 (子ではない), -42 (タイムアウト)
+- `35` `SYS_GETPID() -> task_id`
+  - 現在のタスク ID を取得
 
 ## ネットワーク (40-49)
 

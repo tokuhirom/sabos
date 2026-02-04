@@ -76,7 +76,7 @@ echo "Sending user shell mkdir command..."
 # mkdir TESTDIR
 for c in m k d i r spc t e s t d i r ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.15
+    sleep 0.25
 done
 
 echo "Waiting for mkdir output..."
@@ -98,7 +98,7 @@ echo "Sending user shell rmdir command..."
 # rmdir TESTDIR
 for c in r m d i r spc t e s t d i r ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.15
+    sleep 0.25
 done
 
 echo "Waiting for rmdir output..."
@@ -120,7 +120,7 @@ echo "Sending user shell ls command..."
 # user シェルで ls を実行
 for c in l s ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.15
+    sleep 0.25
 done
 
 # ls の結果を待つ（最大 10 秒）
@@ -143,7 +143,7 @@ echo "Exiting user shell to kernel shell..."
 # exit コマンドを送信してユーザーシェルを終了
 for c in e x i t ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.15
+    sleep 0.25
 done
 
 # カーネルシェルプロンプトが表示されるまで待機
@@ -166,7 +166,7 @@ echo "Sending selftest command..."
 # selftest コマンドを送信（各キーを個別の nc 呼び出しで送信）
 for c in s e l f t e s t ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.15
+    sleep 0.25
 done
 
 # テスト結果を待つ（最大 30 秒）

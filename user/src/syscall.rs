@@ -63,6 +63,8 @@ pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, functio
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
 pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
+pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
+pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
@@ -529,6 +531,35 @@ pub fn spawn(path: &str) -> SyscallResult {
 /// 指定した時間だけ現在のタスクをスリープ状態にする。
 pub fn sleep(ms: u64) {
     unsafe { syscall1(SYS_SLEEP, ms); }
+}
+
+/// 子プロセスの終了を待つ
+///
+/// # 引数
+/// - `task_id`: 待つ子プロセスのタスク ID (0 なら任意の子)
+/// - `timeout_ms`: タイムアウト (ms)。0 なら無期限待ち
+///
+/// # 戻り値
+/// - 終了コード（成功時）
+/// - 負の値（エラー時）
+///   - -10: 子プロセスがない、または指定したタスクが存在しない
+///   - -30: 指定したタスクは子プロセスではない
+///   - -42: タイムアウト
+///
+/// # 動作
+/// - `task_id > 0`: 指定した子プロセスの終了を待つ
+/// - `task_id == 0`: 任意の子プロセスの終了を待つ
+/// - 子プロセスが既に終了していれば即座に戻る
+pub fn wait(task_id: u64, timeout_ms: u64) -> SyscallResult {
+    unsafe { syscall2(SYS_WAIT, task_id, timeout_ms) as i64 }
+}
+
+/// 自分のタスク ID を取得
+///
+/// # 戻り値
+/// 現在のタスク ID（常に成功）
+pub fn getpid() -> u64 {
+    unsafe { syscall0(SYS_GETPID) }
 }
 
 // =================================================================
