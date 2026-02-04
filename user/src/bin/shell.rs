@@ -1304,9 +1304,11 @@ fn cmd_gui(args: &str) {
     let mut gui = gui_client::GuiClient::new();
     match sub {
         "demo" => {
-            let _ = gui.clear(0, 0, 32);
-            let _ = gui.rect(50, 40, 200, 120, 0, 200, 0);
-            let _ = gui.line(10, 10, 300, 200, 255, 255, 0);
+            let _ = gui.clear(16, 16, 40);
+            let _ = gui.rect(40, 40, 320, 200, 32, 120, 220);
+            let _ = gui.circle(120, 120, 50, 255, 220, 64, false);
+            let _ = gui.circle(280, 120, 40, 64, 200, 255, true);
+            let _ = gui.text(70, 70, (255, 255, 255), (16, 16, 40), "Hello GUI");
             let _ = gui.present();
         }
         "rect" => {

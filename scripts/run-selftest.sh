@@ -123,30 +123,70 @@ send_command() {
     send_key ret
 }
 
+log_line_count() {
+    wc -l < "$LOG_FILE"
+}
+
+grep_after() {
+    local base="$1"
+    local pattern="$2"
+    tail -n +"$((base + 1))" "$LOG_FILE" | grep -q "$pattern"
+}
+
+wait_for_prompt_after() {
+    local base="$1"
+    for i in {1..20}; do
+        if grep_after "$base" "user>"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # mkdir t
+base=$(log_line_count)
 send_command "mkdir $TEST_DIR"
 
 echo "Waiting for mkdir output..."
+mkdir_result="unknown"
 for i in {1..10}; do
-    if grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+    if grep_after "$base" "Directory created successfully"; then
+        mkdir_result="ok"
+        break
+    fi
+    if grep_after "$base" "Error: Failed to create directory"; then
+        mkdir_result="fail"
         break
     fi
     sleep 1
 done
+wait_for_prompt_after "$base" || true
 
-if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+if [ "$mkdir_result" != "ok" ]; then
     echo "Retrying mkdir command..."
+    # プロンプトに戻してからリトライ（入力の連結防止）
+    send_key ret
+    wait_for_prompt_after "$(log_line_count)" || true
     TEST_DIR="$TEST_DIR_FALLBACK"
+    base=$(log_line_count)
     send_command "mkdir $TEST_DIR"
+    mkdir_result="unknown"
     for i in {1..10}; do
-        if grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+        if grep_after "$base" "Directory created successfully"; then
+            mkdir_result="ok"
+            break
+        fi
+        if grep_after "$base" "Error: Failed to create directory"; then
+            mkdir_result="fail"
             break
         fi
         sleep 1
     done
+    wait_for_prompt_after "$base" || true
 fi
 
-if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+if [ "$mkdir_result" != "ok" ]; then
     echo -e "${RED}ERROR: mkdir output not found${NC}"
     cat "$LOG_FILE"
     exit 1
@@ -158,28 +198,47 @@ echo "Sending user shell rmdir command..."
 sleep 0.5
 
 # rmdir t
+base=$(log_line_count)
 send_command "rmdir $TEST_DIR"
 
 echo "Waiting for rmdir output..."
+rmdir_result="unknown"
 for i in {1..10}; do
-    if grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+    if grep_after "$base" "Directory removed successfully"; then
+        rmdir_result="ok"
+        break
+    fi
+    if grep_after "$base" "Error: Failed to remove directory"; then
+        rmdir_result="fail"
         break
     fi
     sleep 1
 done
+wait_for_prompt_after "$base" || true
 
-if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+if [ "$rmdir_result" != "ok" ]; then
     echo "Retrying rmdir command..."
+    # プロンプトに戻してからリトライ（入力の連結防止）
+    send_key ret
+    wait_for_prompt_after "$(log_line_count)" || true
+    base=$(log_line_count)
     send_command "rmdir $TEST_DIR"
+    rmdir_result="unknown"
     for i in {1..10}; do
-        if grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+        if grep_after "$base" "Directory removed successfully"; then
+            rmdir_result="ok"
+            break
+        fi
+        if grep_after "$base" "Error: Failed to remove directory"; then
+            rmdir_result="fail"
             break
         fi
         sleep 1
     done
+    wait_for_prompt_after "$base" || true
 fi
 
-if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+if [ "$rmdir_result" != "ok" ]; then
     echo -e "${RED}ERROR: rmdir output not found${NC}"
     cat "$LOG_FILE"
     exit 1
@@ -188,40 +247,38 @@ fi
 echo "Sending user shell ls command..."
 
 # user シェルで ls を実行
+base=$(log_line_count)
 send_command "ls"
 
 # ls の結果を待つ（最大 10 秒）
 echo "Waiting for ls output..."
 for i in {1..10}; do
-    if grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
+    if grep_after "$base" "HELLO.TXT"; then
         break
     fi
     sleep 1
 done
 
-if ! grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
+if ! grep_after "$base" "HELLO.TXT"; then
     echo -e "${RED}ERROR: ls output did not contain HELLO.TXT${NC}"
     cat "$LOG_FILE"
     exit 1
 fi
 
 # ls 実行後に user> プロンプトが戻るまで待つ
-for i in {1..10}; do
-    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
+wait_for_prompt_after "$base" || true
+sleep 0.5
 
 echo "Sending selftest command..."
 
 # user シェルで selftest を実行
+base=$(log_line_count)
 send_command "selftest"
 
 # テスト結果を待つ（最大 30 秒）
 echo "Waiting for selftest to complete..."
 for i in {1..30}; do
-    if grep -q "SELFTEST END" "$LOG_FILE" 2>/dev/null; then
+    if grep_after "$base" "SELFTEST END"; then
         break
     fi
     sleep 1
