@@ -18,7 +18,7 @@ use linked_list_allocator::LockedHeap;
 /// ヒープのサイズ（1 MiB）。
 /// 当面はこれで十分。足りなくなったら増やすか、
 /// メモリマップベースの動的確保に移行する。
-const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// ヒープ用の静的メモリ領域。
 /// BSS セクションに配置されるので、バイナリサイズには影響しない。
