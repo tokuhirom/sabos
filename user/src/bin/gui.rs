@@ -31,6 +31,14 @@ const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
 const OPCODE_HUD: u32 = 7;
 const OPCODE_MOUSE: u32 = 8;
+const OPCODE_WINDOW_CREATE: u32 = 16;
+const OPCODE_WINDOW_CLOSE: u32 = 17;
+const OPCODE_WINDOW_MOVE: u32 = 18;
+const OPCODE_WINDOW_CLEAR: u32 = 19;
+const OPCODE_WINDOW_RECT: u32 = 20;
+const OPCODE_WINDOW_TEXT: u32 = 21;
+const OPCODE_WINDOW_PRESENT: u32 = 22;
+const OPCODE_WINDOW_MOUSE: u32 = 23;
 
 const IPC_BUF_SIZE: usize = 2048;
 const CURSOR_W: u32 = 8;
@@ -48,6 +56,12 @@ const HUD_WARN: (u8, u8, u8) = (255, 120, 120);
 const HUD_OK: (u8, u8, u8) = (120, 220, 120);
 const HUD_BAR_BG: (u8, u8, u8) = (24, 24, 60);
 const HUD_BAR_FILL: (u8, u8, u8) = (90, 180, 255);
+const WINDOW_BG: (u8, u8, u8) = (24, 28, 44);
+const WINDOW_BORDER: (u8, u8, u8) = (80, 120, 200);
+const WINDOW_TITLE_BG: (u8, u8, u8) = (36, 44, 72);
+const WINDOW_TITLE_TEXT: (u8, u8, u8) = (255, 220, 120);
+const WINDOW_TITLE_H: u32 = 24;
+const WINDOW_BORDER_W: u32 = 2;
 
 struct GuiState {
     width: u32,
@@ -60,6 +74,34 @@ struct CursorState {
     y: i32,
     visible: bool,
     buttons: u8,
+}
+
+struct Window {
+    id: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    content_w: u32,
+    content_h: u32,
+    title: String,
+    buf: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct DragState {
+    id: u32,
+    offset_x: i32,
+    offset_y: i32,
+}
+
+struct WindowManager {
+    windows: Vec<Window>,
+    next_id: u32,
+    active_id: Option<u32>,
+    drag: Option<DragState>,
+    last_mouse: syscall::MouseState,
+    mouse_seq: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -75,6 +117,8 @@ fn gui_loop() -> ! {
         },
     };
 
+    let mut wm = WindowManager::new();
+
     let mut buf = [0u8; IPC_BUF_SIZE];
     let mut sender: u64 = 0;
     let mut cursor = CursorState {
@@ -83,15 +127,6 @@ fn gui_loop() -> ! {
         visible: false,
         buttons: 0,
     };
-    let mut last_mouse = syscall::MouseState {
-        x: 0,
-        y: 0,
-        dx: 0,
-        dy: 0,
-        buttons: 0,
-        _pad: [0; 3],
-    };
-    let mut mouse_seq: u32 = 0;
     let mut hud_enabled = false;
     let mut hud_tick: u32 = 0;
     let mut hud_tick_interval: u32 = HUD_TICK_INTERVAL_DEFAULT;
@@ -210,6 +245,7 @@ fn gui_loop() -> ! {
                         }
                         hud_tick = 0;
                         if hud_enabled {
+                            let _ = wm.present_all(&mut state);
                             let _ = draw_hud(&mut state);
                             if present(&state).is_err() {
                                 status = -99;
@@ -225,10 +261,138 @@ fn gui_loop() -> ! {
                     if payload.is_empty() {
                         // マウス状態を返す（最後に更新された値）
                         let mut out = [0u8; 16];
-                        out[0..4].copy_from_slice(&last_mouse.x.to_le_bytes());
-                        out[4..8].copy_from_slice(&last_mouse.y.to_le_bytes());
-                        out[8..12].copy_from_slice(&(last_mouse.buttons as u32).to_le_bytes());
-                        out[12..16].copy_from_slice(&mouse_seq.to_le_bytes());
+                        out[0..4].copy_from_slice(&wm.last_mouse.x.to_le_bytes());
+                        out[4..8].copy_from_slice(&wm.last_mouse.y.to_le_bytes());
+                        out[8..12].copy_from_slice(&(wm.last_mouse.buttons as u32).to_le_bytes());
+                        out[12..16].copy_from_slice(&wm.mouse_seq.to_le_bytes());
+
+                        let mut resp = [0u8; IPC_BUF_SIZE];
+                        resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+                        resp[4..8].copy_from_slice(&0i32.to_le_bytes());
+                        resp[8..12].copy_from_slice(&(out.len() as u32).to_le_bytes());
+                        resp[12..12 + out.len()].copy_from_slice(&out);
+                        let _ = syscall::ipc_send(sender, &resp[..12 + out.len()]);
+                        continue;
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_CREATE => {
+                    if payload.len() >= 12 {
+                        let w = read_u32(payload, 0).unwrap_or(0);
+                        let h = read_u32(payload, 4).unwrap_or(0);
+                        let len = read_u32(payload, 8).unwrap_or(0) as usize;
+                        if 12 + len == payload.len() {
+                            let title_bytes = &payload[12..12 + len];
+                            if let Ok(title) = core::str::from_utf8(title_bytes) {
+                                match wm.create_window(&state, w, h, title) {
+                                    Ok(id) => {
+                                        let mut resp = [0u8; IPC_BUF_SIZE];
+                                        resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+                                        resp[4..8].copy_from_slice(&0i32.to_le_bytes());
+                                        resp[8..12].copy_from_slice(&4u32.to_le_bytes());
+                                        resp[12..16].copy_from_slice(&id.to_le_bytes());
+                                        let _ = syscall::ipc_send(sender, &resp[..16]);
+                                        continue;
+                                    }
+                                    Err(code) => status = code,
+                                }
+                            } else {
+                                status = -10;
+                            }
+                        } else {
+                            status = -10;
+                        }
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_CLOSE => {
+                    if payload.len() == 4 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        status = if wm.close_window(id) { 0 } else { -10 };
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_MOVE => {
+                    if payload.len() == 12 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        let x = read_i32(payload, 4).unwrap_or(0);
+                        let y = read_i32(payload, 8).unwrap_or(0);
+                        status = if wm.move_window(&state, id, x, y) { 0 } else { -10 };
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_CLEAR => {
+                    if payload.len() == 7 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        let r = payload[4];
+                        let g = payload[5];
+                        let b = payload[6];
+                        status = if wm.clear_window(id, r, g, b) { 0 } else { -10 };
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_RECT => {
+                    if payload.len() == 23 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        let x = read_u32(payload, 4).unwrap_or(0);
+                        let y = read_u32(payload, 8).unwrap_or(0);
+                        let w = read_u32(payload, 12).unwrap_or(0);
+                        let h = read_u32(payload, 16).unwrap_or(0);
+                        let r = payload[20];
+                        let g = payload[21];
+                        let b = payload[22];
+                        status = if wm.draw_rect(id, x, y, w, h, r, g, b) { 0 } else { -10 };
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_TEXT => {
+                    if payload.len() >= 22 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        let x = read_u32(payload, 4).unwrap_or(0);
+                        let y = read_u32(payload, 8).unwrap_or(0);
+                        let fg = (payload[12], payload[13], payload[14]);
+                        let bg = (payload[15], payload[16], payload[17]);
+                        let len = read_u32(payload, 18).unwrap_or(0) as usize;
+                        if 22 + len == payload.len() {
+                            let text_bytes = &payload[22..22 + len];
+                            let text = core::str::from_utf8(text_bytes).map_err(|_| ()).ok();
+                            if let Some(text) = text {
+                                status = if wm.draw_text(id, x, y, fg, bg, text) { 0 } else { -10 };
+                            } else {
+                                status = -10;
+                            }
+                        } else {
+                            status = -10;
+                        }
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_PRESENT => {
+                    if payload.len() == 4 {
+                        let _id = read_u32(payload, 0).unwrap_or(0);
+                        if wm.present_all(&mut state).is_err() {
+                            status = -99;
+                        }
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_WINDOW_MOUSE => {
+                    if payload.len() == 4 {
+                        let id = read_u32(payload, 0).unwrap_or(0);
+                        let (x, y, buttons, seq) = wm.window_mouse_state(id);
+                        let mut out = [0u8; 16];
+                        out[0..4].copy_from_slice(&x.to_le_bytes());
+                        out[4..8].copy_from_slice(&y.to_le_bytes());
+                        out[8..12].copy_from_slice(&(buttons as u32).to_le_bytes());
+                        out[12..16].copy_from_slice(&seq.to_le_bytes());
 
                         let mut resp = [0u8; IPC_BUF_SIZE];
                         resp[0..4].copy_from_slice(&opcode.to_le_bytes());
@@ -262,15 +426,14 @@ fn gui_loop() -> ! {
             _pad: [0; 3],
         };
         if syscall::mouse_read(&mut mouse_state) > 0 {
-            last_mouse = mouse_state;
-            mouse_seq = mouse_seq.wrapping_add(1);
-            let _ = update_cursor(&mut state, &mut cursor, &mouse_state);
+            wm.update_mouse(&mut state, &mut cursor, &mouse_state);
         }
 
         if hud_enabled {
             hud_tick = hud_tick.wrapping_add(1);
             if hud_tick >= hud_tick_interval {
                 hud_tick = 0;
+                let _ = wm.present_all(&mut state);
                 let _ = draw_hud(&mut state);
                 if present(&state).is_ok() && cursor.visible {
                     let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
@@ -646,6 +809,412 @@ fn draw_cursor(state: &GuiState, x: i32, y: i32, buttons: u8) -> Result<(), ()> 
     Ok(())
 }
 
+impl WindowManager {
+    fn new() -> Self {
+        Self {
+            windows: Vec::new(),
+            next_id: 1,
+            active_id: None,
+            drag: None,
+            last_mouse: syscall::MouseState {
+                x: 0,
+                y: 0,
+                dx: 0,
+                dy: 0,
+                buttons: 0,
+                _pad: [0; 3],
+            },
+            mouse_seq: 0,
+        }
+    }
+
+    fn create_window(&mut self, state: &GuiState, w: u32, h: u32, title: &str) -> Result<u32, i32> {
+        if w == 0 || h == 0 {
+            return Err(-10);
+        }
+        if w > state.width || h > state.height {
+            return Err(-10);
+        }
+        let content_w = w.saturating_sub(WINDOW_BORDER_W * 2);
+        let content_h = h.saturating_sub(WINDOW_BORDER_W * 2 + WINDOW_TITLE_H);
+        if content_w == 0 || content_h == 0 {
+            return Err(-10);
+        }
+        let buf_len = (content_w as usize)
+            .saturating_mul(content_h as usize)
+            .saturating_mul(4);
+        let mut buf = Vec::with_capacity(buf_len);
+        buf.resize(buf_len, 0);
+        fill_buf(&mut buf, content_w, content_h, WINDOW_BG.0, WINDOW_BG.1, WINDOW_BG.2);
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let x = ((state.width - w) / 2) as i32;
+        let y = ((state.height - h) / 2) as i32;
+        self.windows.push(Window {
+            id,
+            x,
+            y,
+            w,
+            h,
+            content_w,
+            content_h,
+            title: title.into(),
+            buf,
+        });
+        self.active_id = Some(id);
+        Ok(id)
+    }
+
+    fn close_window(&mut self, id: u32) -> bool {
+        let idx = match self.find_window_index(id) {
+            Some(v) => v,
+            None => return false,
+        };
+        self.windows.remove(idx);
+        if self.active_id == Some(id) {
+            self.active_id = self.windows.last().map(|w| w.id);
+        }
+        true
+    }
+
+    fn move_window(&mut self, state: &GuiState, id: u32, x: i32, y: i32) -> bool {
+        let Some(win) = self.find_window_mut(id) else { return false; };
+        let max_x = state.width.saturating_sub(win.w) as i32;
+        let max_y = state.height.saturating_sub(win.h) as i32;
+        win.x = x.clamp(0, max_x);
+        win.y = y.clamp(0, max_y);
+        true
+    }
+
+    fn clear_window(&mut self, id: u32, r: u8, g: u8, b: u8) -> bool {
+        let Some(win) = self.find_window_mut(id) else { return false; };
+        fill_buf(&mut win.buf, win.content_w, win.content_h, r, g, b);
+        true
+    }
+
+    fn draw_rect(&mut self, id: u32, x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> bool {
+        let Some(win) = self.find_window_mut(id) else { return false; };
+        draw_rect_buf(&mut win.buf, win.content_w, win.content_h, x, y, w, h, r, g, b)
+    }
+
+    fn draw_text(
+        &mut self,
+        id: u32,
+        x: u32,
+        y: u32,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+        text: &str,
+    ) -> bool {
+        let Some(win) = self.find_window_mut(id) else { return false; };
+        draw_text_buf(&mut win.buf, win.content_w, win.content_h, x, y, fg, bg, text)
+    }
+
+    fn present_all(&mut self, state: &mut GuiState) -> Result<(), ()> {
+        clear_screen(state, 8, 8, 16);
+        for win in &self.windows {
+            draw_window_frame(state, win);
+            blit_window_content(state, win);
+        }
+        present(state)?;
+        Ok(())
+    }
+
+    fn update_mouse(
+        &mut self,
+        state: &mut GuiState,
+        cursor: &mut CursorState,
+        mouse: &syscall::MouseState,
+    ) {
+        let prev_buttons = self.last_mouse.buttons;
+        self.last_mouse = *mouse;
+        self.mouse_seq = self.mouse_seq.wrapping_add(1);
+
+        let left_now = (mouse.buttons & 0x01) != 0;
+        let left_prev = (prev_buttons & 0x01) != 0;
+
+        if left_now && !left_prev {
+            if let Some(id) = self.find_window_at(mouse.x, mouse.y) {
+                self.bring_to_top(id);
+                if self.hit_title_bar(id, mouse.x, mouse.y) {
+                    if let Some(win) = self.find_window(id) {
+                        self.drag = Some(DragState {
+                            id,
+                            offset_x: mouse.x - win.x,
+                            offset_y: mouse.y - win.y,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !left_now && left_prev {
+            self.drag = None;
+        }
+
+        let mut moved = false;
+        if let Some(drag) = self.drag {
+            if let Some(win) = self.find_window_mut(drag.id) {
+                let max_x = state.width.saturating_sub(win.w) as i32;
+                let max_y = state.height.saturating_sub(win.h) as i32;
+                let new_x = (mouse.x - drag.offset_x).clamp(0, max_x);
+                let new_y = (mouse.y - drag.offset_y).clamp(0, max_y);
+                if new_x != win.x || new_y != win.y {
+                    win.x = new_x;
+                    win.y = new_y;
+                    moved = true;
+                }
+            }
+        }
+
+        if moved {
+            let _ = self.present_all(state);
+            cursor.visible = false;
+        }
+
+        let _ = update_cursor(state, cursor, mouse);
+    }
+
+    fn window_mouse_state(&self, id: u32) -> (i32, i32, u8, u32) {
+        let Some(win) = self.find_window(id) else {
+            return (-1, -1, self.last_mouse.buttons, self.mouse_seq);
+        };
+        let (cx, cy) = window_content_origin(win);
+        let mx = self.last_mouse.x;
+        let my = self.last_mouse.y;
+        if mx >= cx && my >= cy && mx < cx + win.content_w as i32 && my < cy + win.content_h as i32 {
+            (mx - cx, my - cy, self.last_mouse.buttons, self.mouse_seq)
+        } else {
+            (-1, -1, self.last_mouse.buttons, self.mouse_seq)
+        }
+    }
+
+    fn find_window_index(&self, id: u32) -> Option<usize> {
+        self.windows.iter().position(|w| w.id == id)
+    }
+
+    fn find_window(&self, id: u32) -> Option<&Window> {
+        self.windows.iter().find(|w| w.id == id)
+    }
+
+    fn find_window_mut(&mut self, id: u32) -> Option<&mut Window> {
+        self.windows.iter_mut().find(|w| w.id == id)
+    }
+
+    fn find_window_at(&self, x: i32, y: i32) -> Option<u32> {
+        for win in self.windows.iter().rev() {
+            if x >= win.x && y >= win.y && x < win.x + win.w as i32 && y < win.y + win.h as i32 {
+                return Some(win.id);
+            }
+        }
+        None
+    }
+
+    fn bring_to_top(&mut self, id: u32) {
+        if self.active_id == Some(id) {
+            return;
+        }
+        if let Some(idx) = self.find_window_index(id) {
+            let win = self.windows.remove(idx);
+            self.windows.push(win);
+            self.active_id = Some(id);
+        }
+    }
+
+    fn hit_title_bar(&self, id: u32, x: i32, y: i32) -> bool {
+        let Some(win) = self.find_window(id) else { return false; };
+        let bx = win.x + WINDOW_BORDER_W as i32;
+        let by = win.y + WINDOW_BORDER_W as i32;
+        let bw = (win.w - WINDOW_BORDER_W * 2) as i32;
+        let bh = WINDOW_TITLE_H as i32;
+        x >= bx && x < bx + bw && y >= by && y < by + bh
+    }
+}
+
+fn window_content_origin(win: &Window) -> (i32, i32) {
+    let x = win.x + WINDOW_BORDER_W as i32;
+    let y = win.y + WINDOW_BORDER_W as i32 + WINDOW_TITLE_H as i32;
+    (x, y)
+}
+
+fn clear_screen(state: &mut GuiState, r: u8, g: u8, b: u8) {
+    fill_buf(&mut state.buf, state.width, state.height, r, g, b);
+}
+
+fn fill_buf(buf: &mut [u8], w: u32, h: u32, r: u8, g: u8, b: u8) {
+    let mut i = 0;
+    let total = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+    while i + 3 < total {
+        buf[i] = r;
+        buf[i + 1] = g;
+        buf[i + 2] = b;
+        buf[i + 3] = 0;
+        i += 4;
+    }
+}
+
+fn draw_window_frame(state: &mut GuiState, win: &Window) {
+    let x = win.x.max(0) as u32;
+    let y = win.y.max(0) as u32;
+    let w = win.w;
+    let h = win.h;
+    let _ = draw_rect(state, x, y, w, h, WINDOW_BORDER.0, WINDOW_BORDER.1, WINDOW_BORDER.2);
+    let _ = draw_rect(
+        state,
+        x + WINDOW_BORDER_W,
+        y + WINDOW_BORDER_W,
+        w - WINDOW_BORDER_W * 2,
+        h - WINDOW_BORDER_W * 2,
+        WINDOW_BG.0,
+        WINDOW_BG.1,
+        WINDOW_BG.2,
+    );
+    let _ = draw_rect(
+        state,
+        x + WINDOW_BORDER_W,
+        y + WINDOW_BORDER_W,
+        w - WINDOW_BORDER_W * 2,
+        WINDOW_TITLE_H,
+        WINDOW_TITLE_BG.0,
+        WINDOW_TITLE_BG.1,
+        WINDOW_TITLE_BG.2,
+    );
+    let _ = draw_text(
+        state,
+        x + WINDOW_BORDER_W + 6,
+        y + WINDOW_BORDER_W + 4,
+        WINDOW_TITLE_TEXT,
+        WINDOW_TITLE_BG,
+        win.title.as_str(),
+    );
+}
+
+fn blit_window_content(state: &mut GuiState, win: &Window) {
+    let (cx, cy) = window_content_origin(win);
+    let cx = cx.max(0) as u32;
+    let cy = cy.max(0) as u32;
+    let w = win.content_w;
+    let h = win.content_h;
+    for row in 0..h {
+        let src_offset = (row * w * 4) as usize;
+        let dst_y = cy + row;
+        if dst_y >= state.height {
+            break;
+        }
+        let dst_offset = ((dst_y * state.width + cx) * 4) as usize;
+        let len = (w * 4) as usize;
+        if dst_offset + len <= state.buf.len() && src_offset + len <= win.buf.len() {
+            state.buf[dst_offset..dst_offset + len]
+                .copy_from_slice(&win.buf[src_offset..src_offset + len]);
+        }
+    }
+}
+
+fn draw_rect_buf(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    x: u32,
+    y: u32,
+    rw: u32,
+    rh: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> bool {
+    if x >= w || y >= h {
+        return false;
+    }
+    let max_x = (x + rw).min(w);
+    let max_y = (y + rh).min(h);
+    for yy in y..max_y {
+        let row_offset = (yy * w * 4) as usize;
+        for xx in x..max_x {
+            let idx = row_offset + (xx * 4) as usize;
+            if idx + 3 < buf.len() {
+                buf[idx] = r;
+                buf[idx + 1] = g;
+                buf[idx + 2] = b;
+                buf[idx + 3] = 0;
+            }
+        }
+    }
+    true
+}
+
+fn draw_text_buf(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    x: u32,
+    y: u32,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    text: &str,
+) -> bool {
+    if x >= w || y >= h {
+        return false;
+    }
+    let mut cursor_x = x;
+    let mut cursor_y = y;
+    for ch in text.chars() {
+        if ch == '\n' {
+            cursor_x = x;
+            cursor_y = cursor_y.saturating_add(9);
+            if cursor_y + 8 > h {
+                return false;
+            }
+            continue;
+        }
+        if cursor_x + 8 > w {
+            cursor_x = x;
+            cursor_y = cursor_y.saturating_add(9);
+            if cursor_y + 8 > h {
+                return false;
+            }
+        }
+        draw_char_buf(buf, w, h, cursor_x, cursor_y, fg, bg, ch);
+        cursor_x = cursor_x.saturating_add(9);
+    }
+    true
+}
+
+fn draw_char_buf(
+    buf: &mut [u8],
+    w: u32,
+    h: u32,
+    x: u32,
+    y: u32,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    ch: char,
+) {
+    let glyph = font8x8::BASIC_FONTS
+        .get(ch)
+        .unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap());
+
+    for (row, &bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            let on = (bits >> col) & 1 == 1;
+            let px = x + col as u32;
+            let py = y + row as u32;
+            if px >= w || py >= h {
+                continue;
+            }
+            let idx = ((py * w + px) * 4) as usize;
+            if idx + 3 >= buf.len() {
+                continue;
+            }
+            let (r, g, b) = if on { fg } else { bg };
+            buf[idx] = r;
+            buf[idx + 1] = g;
+            buf[idx + 2] = b;
+            buf[idx + 3] = 0;
+        }
+    }
+}
+
 fn draw_hud(state: &mut GuiState) -> Result<(), ()> {
     let mut buf = [0u8; 1024];
     let result = syscall::get_mem_info(&mut buf);
@@ -737,6 +1306,10 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
         buf[offset + 2],
         buf[offset + 3],
     ]))
+}
+
+fn read_i32(buf: &[u8], offset: usize) -> Option<i32> {
+    read_u32(buf, offset).map(|v| v as i32)
 }
 
 #[panic_handler]

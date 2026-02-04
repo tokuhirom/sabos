@@ -2079,6 +2079,113 @@ impl Shell {
             return false;
         }
         kprintln!("[selftest] gui_ipc: mouse ok");
+
+        // WINDOW_CREATE (opcode=16) を送る
+        kprintln!("[selftest] gui_ipc: window create send");
+        let opcode_win_create: u32 = 16;
+        let title = b"TEST";
+        let mut payload_win = [0u8; 12 + 4];
+        payload_win[0..4].copy_from_slice(&200u32.to_le_bytes()); // w
+        payload_win[4..8].copy_from_slice(&120u32.to_le_bytes()); // h
+        payload_win[8..12].copy_from_slice(&(title.len() as u32).to_le_bytes());
+        payload_win[12..16].copy_from_slice(title);
+        req[0..4].copy_from_slice(&opcode_win_create.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_win.len() as u32).to_le_bytes());
+        req[8..8 + payload_win.len()].copy_from_slice(&payload_win);
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_win.len()].to_vec()).is_err() {
+            return false;
+        }
+        let msg = match recv_with_timeout(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msg.data.len() < 16 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode_win_create {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+        let len = u32::from_le_bytes([msg.data[8], msg.data[9], msg.data[10], msg.data[11]]) as usize;
+        if len != 4 || msg.data.len() < 12 + len {
+            return false;
+        }
+        let win_id = u32::from_le_bytes([msg.data[12], msg.data[13], msg.data[14], msg.data[15]]);
+        kprintln!("[selftest] gui_ipc: window create ok (id={})", win_id);
+
+        // WINDOW_CLEAR (opcode=19)
+        kprintln!("[selftest] gui_ipc: window clear send");
+        let opcode_win_clear: u32 = 19;
+        let mut payload_clear = [0u8; 7];
+        payload_clear[0..4].copy_from_slice(&win_id.to_le_bytes());
+        payload_clear[4] = 16;
+        payload_clear[5] = 16;
+        payload_clear[6] = 32;
+        req[0..4].copy_from_slice(&opcode_win_clear.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_clear.len() as u32).to_le_bytes());
+        req[8..8 + payload_clear.len()].copy_from_slice(&payload_clear);
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_clear.len()].to_vec()).is_err() {
+            return false;
+        }
+        let msg = match recv_with_timeout(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+        kprintln!("[selftest] gui_ipc: window clear ok");
+
+        // WINDOW_PRESENT (opcode=22)
+        kprintln!("[selftest] gui_ipc: window present send");
+        let opcode_win_present: u32 = 22;
+        let mut payload_present = [0u8; 4];
+        payload_present.copy_from_slice(&win_id.to_le_bytes());
+        req[0..4].copy_from_slice(&opcode_win_present.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_present.len() as u32).to_le_bytes());
+        req[8..12].copy_from_slice(&payload_present);
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_present.len()].to_vec()).is_err() {
+            return false;
+        }
+        let msg = match recv_with_timeout(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+        kprintln!("[selftest] gui_ipc: window present ok");
+
+        // WINDOW_MOUSE (opcode=23)
+        kprintln!("[selftest] gui_ipc: window mouse send");
+        let opcode_win_mouse: u32 = 23;
+        let mut payload_wm = [0u8; 4];
+        payload_wm.copy_from_slice(&win_id.to_le_bytes());
+        req[0..4].copy_from_slice(&opcode_win_mouse.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_wm.len() as u32).to_le_bytes());
+        req[8..12].copy_from_slice(&payload_wm);
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_wm.len()].to_vec()).is_err() {
+            return false;
+        }
+        let msg = match recv_with_timeout(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+        let len = u32::from_le_bytes([msg.data[8], msg.data[9], msg.data[10], msg.data[11]]) as usize;
+        if len != 16 || msg.data.len() < 12 + len {
+            return false;
+        }
+        kprintln!("[selftest] gui_ipc: window mouse ok");
         true
     }
 
