@@ -18,6 +18,7 @@ const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
 const OPCODE_HUD: u32 = 7;
+const OPCODE_MOUSE: u32 = 8;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
@@ -27,6 +28,14 @@ const IPC_BUF_SIZE: usize = 2048;
 /// GUI クライアント
 pub struct GuiClient {
     gui_id: u64,
+}
+
+/// GUI サービスが返すマウス状態
+pub struct GuiMouseState {
+    pub x: i32,
+    pub y: i32,
+    pub buttons: u8,
+    pub seq: u32,
 }
 
 impl GuiClient {
@@ -148,6 +157,55 @@ impl GuiClient {
         }
         let status = i32::from_le_bytes([resp[4], resp[5], resp[6], resp[7]]);
         Ok(status)
+    }
+
+    /// GUI サービスからマウス状態を取得する
+    pub fn mouse_state(&mut self) -> Result<GuiMouseState, ()> {
+        let gui_id = self.ensure_gui_id()?;
+
+        let mut req = [0u8; IPC_BUF_SIZE];
+        req[0..4].copy_from_slice(&OPCODE_MOUSE.to_le_bytes());
+        req[4..8].copy_from_slice(&0u32.to_le_bytes());
+
+        if syscall::ipc_send(gui_id, &req[..8]) < 0 {
+            // PID 変更に備えて再解決して1回だけリトライ
+            self.gui_id = 0;
+            let gui_id = self.ensure_gui_id()?;
+            if syscall::ipc_send(gui_id, &req[..8]) < 0 {
+                return Err(());
+            }
+        }
+
+        let mut resp = [0u8; IPC_BUF_SIZE];
+        let mut sender = 0u64;
+        let n = syscall::ipc_recv(&mut sender, &mut resp, 5000);
+        if n < 0 {
+            return Err(());
+        }
+        let n = n as usize;
+        if n < IPC_RESP_HEADER {
+            return Err(());
+        }
+
+        let resp_opcode = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+        if resp_opcode != OPCODE_MOUSE {
+            return Err(());
+        }
+        let status = i32::from_le_bytes([resp[4], resp[5], resp[6], resp[7]]);
+        if status < 0 {
+            return Err(());
+        }
+        let payload_len = u32::from_le_bytes([resp[8], resp[9], resp[10], resp[11]]) as usize;
+        if IPC_RESP_HEADER + payload_len > n || payload_len != 16 {
+            return Err(());
+        }
+
+        let x = i32::from_le_bytes([resp[12], resp[13], resp[14], resp[15]]);
+        let y = i32::from_le_bytes([resp[16], resp[17], resp[18], resp[19]]);
+        let buttons = u32::from_le_bytes([resp[20], resp[21], resp[22], resp[23]]) as u8;
+        let seq = u32::from_le_bytes([resp[24], resp[25], resp[26], resp[27]]);
+
+        Ok(GuiMouseState { x, y, buttons, seq })
     }
 
     /// GUI のタスク ID を確保する

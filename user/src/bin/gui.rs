@@ -30,6 +30,7 @@ const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
 const OPCODE_HUD: u32 = 7;
+const OPCODE_MOUSE: u32 = 8;
 
 const IPC_BUF_SIZE: usize = 2048;
 const CURSOR_W: u32 = 8;
@@ -82,6 +83,15 @@ fn gui_loop() -> ! {
         visible: false,
         buttons: 0,
     };
+    let mut last_mouse = syscall::MouseState {
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        buttons: 0,
+        _pad: [0; 3],
+    };
+    let mut mouse_seq: u32 = 0;
     let mut hud_enabled = false;
     let mut hud_tick: u32 = 0;
     let mut hud_tick_interval: u32 = HUD_TICK_INTERVAL_DEFAULT;
@@ -211,6 +221,26 @@ fn gui_loop() -> ! {
                         status = -10;
                     }
                 }
+                OPCODE_MOUSE => {
+                    if payload.is_empty() {
+                        // マウス状態を返す（最後に更新された値）
+                        let mut out = [0u8; 16];
+                        out[0..4].copy_from_slice(&last_mouse.x.to_le_bytes());
+                        out[4..8].copy_from_slice(&last_mouse.y.to_le_bytes());
+                        out[8..12].copy_from_slice(&(last_mouse.buttons as u32).to_le_bytes());
+                        out[12..16].copy_from_slice(&mouse_seq.to_le_bytes());
+
+                        let mut resp = [0u8; IPC_BUF_SIZE];
+                        resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+                        resp[4..8].copy_from_slice(&0i32.to_le_bytes());
+                        resp[8..12].copy_from_slice(&(out.len() as u32).to_le_bytes());
+                        resp[12..12 + out.len()].copy_from_slice(&out);
+                        let _ = syscall::ipc_send(sender, &resp[..12 + out.len()]);
+                        continue;
+                    } else {
+                        status = -10;
+                    }
+                }
                 _ => {
                     status = -10;
                 }
@@ -232,6 +262,8 @@ fn gui_loop() -> ! {
             _pad: [0; 3],
         };
         if syscall::mouse_read(&mut mouse_state) > 0 {
+            last_mouse = mouse_state;
+            mouse_seq = mouse_seq.wrapping_add(1);
             let _ = update_cursor(&mut state, &mut cursor, &mouse_state);
         }
 

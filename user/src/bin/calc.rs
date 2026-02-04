@@ -33,6 +33,7 @@ const BUTTON_TEXT: (u8, u8, u8) = (230, 240, 255);
 const TITLE_TEXT: (u8, u8, u8) = (255, 220, 120);
 const INFO_TEXT: (u8, u8, u8) = (180, 200, 220);
 const DISPLAY_TEXT: (u8, u8, u8) = (220, 240, 255);
+const QUIT_TEXT: (u8, u8, u8) = (255, 160, 160);
 
 const PAD: u32 = 12;
 const GAP: u32 = 8;
@@ -40,6 +41,8 @@ const TITLE_H: u32 = 18;
 const DISPLAY_H: u32 = 40;
 const BTN_W: u32 = 70;
 const BTN_H: u32 = 50;
+const QUIT_W: u32 = 24;
+const QUIT_H: u32 = 18;
 
 const MAX_DIGITS: usize = 16;
 
@@ -69,6 +72,10 @@ struct Layout {
     display_h: u32,
     button_x: u32,
     button_y: u32,
+    quit_x: u32,
+    quit_y: u32,
+    quit_w: u32,
+    quit_h: u32,
 }
 
 #[unsafe(no_mangle)]
@@ -91,15 +98,32 @@ fn calc_main() -> ! {
 
     draw_ui(&mut gui, &layout, &state);
 
+    // マウスの更新カウンタとボタン状態で「クリックの立ち上がり」を検出する
+    let mut last_seq: u32 = 0;
+    let mut last_buttons: u8 = 0;
+
     loop {
-        let ch = syscall::read_char();
-        if ch == 'q' || ch == 'Q' {
-            syscall::exit();
+        // GUI サービスからマウス状態を取得してクリックを判定する
+        if let Ok(mouse) = gui.mouse_state() {
+            if mouse.seq != last_seq {
+                let left_now = (mouse.buttons & 0x1) != 0;
+                let left_prev = (last_buttons & 0x1) != 0;
+                last_seq = mouse.seq;
+                last_buttons = mouse.buttons;
+
+                // 左クリックの立ち上がりだけ処理する
+                if left_now && !left_prev {
+                    if let Some(action) = hit_test(&layout, mouse.x, mouse.y) {
+                        if apply_action(&mut state, action) {
+                            update_display(&mut gui, &layout, &state);
+                            let _ = gui.present();
+                        }
+                    }
+                }
+            }
         }
-        if handle_input(&mut state, ch) {
-            update_display(&mut gui, &layout, &state);
-            let _ = gui.present();
-        }
+        // 入力待ちで固まらないように短い sleep を挟む
+        syscall::sleep(16);
     }
 }
 
@@ -133,6 +157,8 @@ fn build_layout() -> Layout {
     let display_h = DISPLAY_H;
     let button_x = x + PAD;
     let button_y = display_y + display_h + GAP;
+    let quit_x = x + panel_w - PAD - QUIT_W;
+    let quit_y = y + PAD - 2;
 
     Layout {
         x,
@@ -145,6 +171,10 @@ fn build_layout() -> Layout {
         display_h,
         button_x,
         button_y,
+        quit_x,
+        quit_y,
+        quit_w: QUIT_W,
+        quit_h: QUIT_H,
     }
 }
 
@@ -159,6 +189,7 @@ fn draw_ui(gui: &mut gui_client::GuiClient, layout: &Layout, state: &CalcState) 
     let title_x = layout.x + PAD;
     let title_y = layout.y + PAD;
     let _ = gui.text(title_x, title_y, TITLE_TEXT, PANEL_BG, "SABOS CALC");
+    draw_quit_button(gui, layout);
 
     // ディスプレイ
     draw_display(gui, layout, state);
@@ -178,9 +209,9 @@ fn draw_ui(gui: &mut gui_client::GuiClient, layout: &Layout, state: &CalcState) 
         }
     }
 
-    // キー説明
+    // 操作説明
     let info_y = layout.button_y + (BTN_H + GAP) * 4 + 4;
-    let _ = gui.text(layout.x + PAD, info_y, INFO_TEXT, PANEL_BG, "Keys: 0-9 + - * / =  C(clear)  Q(quit)");
+    let _ = gui.text(layout.x + PAD, info_y, INFO_TEXT, PANEL_BG, "Click: 0-9 + - * / =  C(clear)  Q(quit)");
 
     let _ = gui.present();
 }
@@ -193,10 +224,21 @@ fn draw_button(gui: &mut gui_client::GuiClient, x: u32, y: u32, w: u32, h: u32, 
     let _ = gui.text(text_x, text_y, BUTTON_TEXT, BUTTON_BG, label);
 }
 
+fn draw_quit_button(gui: &mut gui_client::GuiClient, layout: &Layout) {
+    let x = layout.quit_x;
+    let y = layout.quit_y;
+    let w = layout.quit_w;
+    let h = layout.quit_h;
+    let _ = gui.rect(x, y, w, h, BUTTON_BORDER.0, BUTTON_BORDER.1, BUTTON_BORDER.2);
+    let _ = gui.rect(x + 1, y + 1, w - 2, h - 2, BUTTON_BG.0, BUTTON_BG.1, BUTTON_BG.2);
+    let _ = gui.text(x + 6, y + 5, QUIT_TEXT, BUTTON_BG, "Q");
+}
+
 fn draw_display(gui: &mut gui_client::GuiClient, layout: &Layout, state: &CalcState) {
     let _ = gui.rect(layout.display_x, layout.display_y, layout.display_w, layout.display_h, DISPLAY_BORDER.0, DISPLAY_BORDER.1, DISPLAY_BORDER.2);
     let _ = gui.rect(layout.display_x + 2, layout.display_y + 2, layout.display_w - 4, layout.display_h - 4, DISPLAY_BG.0, DISPLAY_BG.1, DISPLAY_BG.2);
 
+    // エラー時は ERR 表示に切り替える
     let text = if state.error {
         String::from("ERR")
     } else {
@@ -211,9 +253,19 @@ fn update_display(gui: &mut gui_client::GuiClient, layout: &Layout, state: &Calc
     draw_display(gui, layout, state);
 }
 
-fn handle_input(state: &mut CalcState, ch: char) -> bool {
-    match ch {
-        '0'..='9' => {
+#[derive(Clone, Copy)]
+enum CalcAction {
+    Digit(char),
+    Operator(char),
+    Equal,
+    Clear,
+    Quit,
+}
+
+fn apply_action(state: &mut CalcState, action: CalcAction) -> bool {
+    // クリックされたボタンに応じて状態を更新する
+    match action {
+        CalcAction::Digit(ch) => {
             if state.error {
                 reset_state(state);
             }
@@ -224,26 +276,66 @@ fn handle_input(state: &mut CalcState, ch: char) -> bool {
             push_digit(state, ch);
             true
         }
-        '+' | '-' | '*' | '/' => {
+        CalcAction::Operator(op) => {
             if state.error {
                 return false;
             }
-            handle_operator(state, ch);
+            handle_operator(state, op);
             true
         }
-        '=' => {
+        CalcAction::Equal => {
             if state.error {
                 return false;
             }
             handle_equals(state);
             true
         }
-        'c' | 'C' => {
+        CalcAction::Clear => {
             reset_state(state);
             true
         }
-        _ => false,
+        CalcAction::Quit => {
+            syscall::exit();
+        }
     }
+}
+
+fn hit_test(layout: &Layout, x: i32, y: i32) -> Option<CalcAction> {
+    if x < 0 || y < 0 {
+        return None;
+    }
+    let x = x as u32;
+    let y = y as u32;
+
+    // まずは終了ボタンを優先
+    if x >= layout.quit_x && x < layout.quit_x + layout.quit_w &&
+        y >= layout.quit_y && y < layout.quit_y + layout.quit_h {
+        return Some(CalcAction::Quit);
+    }
+
+    // ボタン配置（4x4）
+    let labels = [
+        ['7', '8', '9', '/'],
+        ['4', '5', '6', '*'],
+        ['1', '2', '3', '-'],
+        ['0', 'C', '=', '+'],
+    ];
+    for (row, cols) in labels.iter().enumerate() {
+        for (col, label) in cols.iter().enumerate() {
+            let bx = layout.button_x + (BTN_W + GAP) * col as u32;
+            let by = layout.button_y + (BTN_H + GAP) * row as u32;
+            if x >= bx && x < bx + BTN_W && y >= by && y < by + BTN_H {
+                return match label {
+                    '0'..='9' => Some(CalcAction::Digit(*label)),
+                    '+' | '-' | '*' | '/' => Some(CalcAction::Operator(*label)),
+                    '=' => Some(CalcAction::Equal),
+                    'C' => Some(CalcAction::Clear),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
 }
 
 fn push_digit(state: &mut CalcState, ch: char) {

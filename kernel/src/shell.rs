@@ -2048,6 +2048,37 @@ impl Shell {
             return false;
         }
         kprintln!("[selftest] gui_ipc: text ok");
+
+        // MOUSE (opcode=8) を送る
+        kprintln!("[selftest] gui_ipc: mouse send");
+        let opcode_mouse: u32 = 8;
+        req[0..4].copy_from_slice(&opcode_mouse.to_le_bytes());
+        req[4..8].copy_from_slice(&0u32.to_le_bytes());
+
+        if crate::ipc::send(sender, gui_id, req[..header_len].to_vec()).is_err() {
+            return false;
+        }
+
+        let msg = match recv_with_timeout(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msg.data.len() < 12 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode_mouse {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+        let len = u32::from_le_bytes([msg.data[8], msg.data[9], msg.data[10], msg.data[11]]) as usize;
+        if len != 16 || msg.data.len() < 12 + len {
+            return false;
+        }
+        kprintln!("[selftest] gui_ipc: mouse ok");
         true
     }
 
