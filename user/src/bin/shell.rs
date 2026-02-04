@@ -130,14 +130,9 @@ fn print_welcome() {
 /// netd の PID を探す（ps コマンド相当の処理）
 /// init が先に netd を起動しているはずなので、タスク一覧から探す
 fn find_netd() {
-    // 現時点では netd の PID を直接指定する
-    // 将来的には init から IPC で通知を受け取る仕組みにする
-    // または ps 出力をパースして "NETD.ELF" を探す
-    //
-    // 暫定: init (PID 1) → netd (PID 2) → shell (PID 3) の順で起動するので
-    // netd は PID 2 のはず
+    let netd_id = resolve_task_id_by_name("NETD.ELF").unwrap_or(0);
     unsafe {
-        NETD_TASK_ID = 2;
+        NETD_TASK_ID = netd_id;
     }
 }
 
@@ -1517,13 +1512,25 @@ fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32
     req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     req[8..8 + payload.len()].copy_from_slice(payload);
 
-    let netd_id = unsafe { NETD_TASK_ID };
+    let mut netd_id = unsafe { NETD_TASK_ID };
     if netd_id == 0 {
-        return Err(());
+        find_netd();
+        netd_id = unsafe { NETD_TASK_ID };
+        if netd_id == 0 {
+            return Err(());
+        }
     }
 
     if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
-        return Err(());
+        // netd の PID が変わった可能性があるので再解決して1回だけリトライ
+        find_netd();
+        netd_id = unsafe { NETD_TASK_ID };
+        if netd_id == 0 {
+            return Err(());
+        }
+        if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
+            return Err(());
+        }
     }
 
     let mut sender = 0u64;
@@ -1547,6 +1554,47 @@ fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32
     }
 
     Ok((status, len))
+}
+
+/// タスク一覧から指定名のタスク ID を探す
+fn resolve_task_id_by_name(name: &str) -> Option<u64> {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_task_list(&mut buf);
+    if result < 0 {
+        return None;
+    }
+    let len = result as usize;
+    let Ok(s) = core::str::from_utf8(&buf[..len]) else {
+        return None;
+    };
+
+    let (tasks_start, tasks_end) = json_find_array_bounds(s, "tasks")?;
+    let mut i = tasks_start;
+    let bytes = s.as_bytes();
+    while i < tasks_end {
+        while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
+            i += 1;
+        }
+        if i >= tasks_end || bytes[i] == b']' {
+            break;
+        }
+
+        let obj_end = find_matching_brace(s, i)?;
+        if obj_end > tasks_end {
+            break;
+        }
+
+        let obj = &s[i + 1..obj_end];
+        let id = json_find_u64(obj, "id");
+        let task_name = json_find_str(obj, "name");
+        if let (Some(id), Some(task_name)) = (id, task_name) {
+            if task_name == name {
+                return Some(id);
+            }
+        }
+        i = obj_end + 1;
+    }
+    None
 }
 
 /// IP アドレスを表示

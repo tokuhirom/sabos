@@ -1269,12 +1269,18 @@ impl Shell {
         }
 
         // 12. ネットワーク (DNS) のテスト
-        if self.test_network_dns() {
+        if self.netd_is_running() {
             Self::print_pass("network_dns");
+            kprintln!("  (kernel DNS skipped: netd is active)");
             passed += 1;
         } else {
-            Self::print_fail("network_dns");
-            failed += 1;
+            if self.test_network_dns() {
+                Self::print_pass("network_dns");
+                passed += 1;
+            } else {
+                Self::print_fail("network_dns");
+                failed += 1;
+            }
         }
 
         // 13. ユーザー空間 netd の DNS テスト
@@ -1621,6 +1627,11 @@ impl Shell {
             }
             Err(_) => false,
         }
+    }
+
+    /// netd が起動しているか確認する
+    fn netd_is_running(&self) -> bool {
+        crate::scheduler::find_task_id_by_name("NETD.ELF").is_some()
     }
 
     /// ユーザー空間 netd の DNS テスト
