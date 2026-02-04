@@ -1859,7 +1859,35 @@ impl Shell {
             None => return false,
         };
 
+        fn recv_with_timeout(task_id: u64, timeout_ms: u64) -> Result<crate::ipc::IpcMessage, crate::user_ptr::SyscallError> {
+            let start_tick =
+                crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            let deadline_tick = if timeout_ms == 0 {
+                None
+            } else {
+                let ticks = (timeout_ms * 182 / 10000).max(1);
+                Some(start_tick + ticks)
+            };
+
+            loop {
+                if let Some(msg) = crate::ipc::try_recv(task_id) {
+                    return Ok(msg);
+                }
+
+                if let Some(deadline) = deadline_tick {
+                    let now = crate::interrupts::TIMER_TICK_COUNT
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    if now >= deadline {
+                        return Err(crate::user_ptr::SyscallError::Timeout);
+                    }
+                }
+
+                crate::scheduler::yield_now();
+            }
+        }
+
         // CLEAR (opcode=1) を送る
+        kprintln!("[selftest] gui_ipc: clear send");
         let opcode_clear: u32 = 1;
         let payload_clear = [0u8, 0u8, 32u8];
         let mut req = [0u8; 2048];
@@ -1873,7 +1901,7 @@ impl Shell {
             return false;
         }
 
-        let msg = match crate::ipc::recv(sender, 5000) {
+        let msg = match recv_with_timeout(sender, 5000) {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -1888,8 +1916,10 @@ impl Shell {
         if status != 0 {
             return false;
         }
+        kprintln!("[selftest] gui_ipc: clear ok");
 
         // CIRCLE (opcode=5) を送る
+        kprintln!("[selftest] gui_ipc: circle send");
         let opcode_circle: u32 = 5;
         let mut payload_circle = [0u8; 17];
         let cx = 120u32.to_le_bytes();
@@ -1911,7 +1941,7 @@ impl Shell {
             return false;
         }
 
-        let msg = match crate::ipc::recv(sender, 5000) {
+        let msg = match recv_with_timeout(sender, 5000) {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -1926,8 +1956,10 @@ impl Shell {
         if status != 0 {
             return false;
         }
+        kprintln!("[selftest] gui_ipc: circle ok");
 
         // TEXT (opcode=6) を送る
+        kprintln!("[selftest] gui_ipc: text send");
         let opcode_text: u32 = 6;
         let text = b"HI";
         let mut payload_text = [0u8; 18 + 2];
@@ -1950,7 +1982,7 @@ impl Shell {
             return false;
         }
 
-        let msg = match crate::ipc::recv(sender, 5000) {
+        let msg = match recv_with_timeout(sender, 5000) {
             Ok(m) => m,
             Err(_) => return false,
         };
@@ -1962,7 +1994,11 @@ impl Shell {
             return false;
         }
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
-        status == 0
+        if status != 0 {
+            return false;
+        }
+        kprintln!("[selftest] gui_ipc: text ok");
+        true
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。

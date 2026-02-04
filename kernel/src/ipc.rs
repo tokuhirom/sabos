@@ -73,7 +73,7 @@ pub fn recv(task_id: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
     };
 
     loop {
-        if let Some(msg) = try_recv_once(task_id) {
+        if let Some(msg) = try_recv(task_id) {
             return Ok(msg);
         }
 
@@ -90,7 +90,7 @@ pub fn recv(task_id: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
 }
 
 /// 1 回だけ受信を試みる
-fn try_recv_once(task_id: u64) -> Option<IpcMessage> {
+pub fn try_recv(task_id: u64) -> Option<IpcMessage> {
     let mut queues = IPC_QUEUES.lock();
     let q = queues.get_mut(&task_id)?;
     q.pop_front()

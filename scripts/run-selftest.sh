@@ -20,6 +20,8 @@ cd "$SCRIPT_DIR/.."
 LOG_FILE="/tmp/sabos-selftest-$$.log"
 MONITOR_PORT=55582
 KEY_DELAY=0.8
+TEST_DIR="t"
+TEST_DIR_FALLBACK="u"
 
 # クリーンアップ関数
 cleanup() {
@@ -97,11 +99,32 @@ echo "Sending user shell mkdir command..."
 # キー入力前に少し待つ（プロンプト安定化）
 sleep 0.5
 
-# mkdir TESTDIR
-for c in m k d i r spc t e s t d i r ret; do
-    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+send_key() {
+    local key="$1"
+    echo "sendkey $key" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
     sleep "$KEY_DELAY"
-done
+}
+
+send_string() {
+    local s="$1"
+    local i ch
+    for ((i = 0; i < ${#s}; i++)); do
+        ch="${s:i:1}"
+        case "$ch" in
+            ' ') send_key spc ;;
+            *) send_key "$ch" ;;
+        esac
+    done
+}
+
+send_command() {
+    local cmd="$1"
+    send_string "$cmd"
+    send_key ret
+}
+
+# mkdir t
+send_command "mkdir $TEST_DIR"
 
 echo "Waiting for mkdir output..."
 for i in {1..10}; do
@@ -113,10 +136,8 @@ done
 
 if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
     echo "Retrying mkdir command..."
-    for c in m k d i r spc t e s t d i r ret; do
-        echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-        sleep "$KEY_DELAY"
-    done
+    TEST_DIR="$TEST_DIR_FALLBACK"
+    send_command "mkdir $TEST_DIR"
     for i in {1..10}; do
         if grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
             break
@@ -136,11 +157,8 @@ echo "Sending user shell rmdir command..."
 # キー入力前に少し待つ（プロンプト安定化）
 sleep 0.5
 
-# rmdir TESTDIR
-for c in r m d i r spc t e s t d i r ret; do
-    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep "$KEY_DELAY"
-done
+# rmdir t
+send_command "rmdir $TEST_DIR"
 
 echo "Waiting for rmdir output..."
 for i in {1..10}; do
@@ -152,10 +170,7 @@ done
 
 if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
     echo "Retrying rmdir command..."
-    for c in r m d i r spc t e s t d i r ret; do
-        echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-        sleep "$KEY_DELAY"
-    done
+    send_command "rmdir $TEST_DIR"
     for i in {1..10}; do
         if grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
             break
@@ -173,10 +188,7 @@ fi
 echo "Sending user shell ls command..."
 
 # user シェルで ls を実行
-for c in l s ret; do
-    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep "$KEY_DELAY"
-done
+send_command "ls"
 
 # ls の結果を待つ（最大 10 秒）
 echo "Waiting for ls output..."
@@ -204,10 +216,7 @@ done
 echo "Sending selftest command..."
 
 # user シェルで selftest を実行
-for c in s e l f t e s t ret; do
-    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep "$KEY_DELAY"
-done
+send_command "selftest"
 
 # テスト結果を待つ（最大 30 秒）
 echo "Waiting for selftest to complete..."

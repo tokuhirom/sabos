@@ -368,17 +368,37 @@ fn draw_text(
     if x >= state.width || y >= state.height {
         return Err(());
     }
-    let char_count = text.chars().count() as u32;
-    let total_w = char_count.checked_mul(8).ok_or(())?;
-    if x + total_w > state.width || y + 8 > state.height {
-        return Err(());
-    }
+
+    let char_w: u32 = 8;
+    let char_h: u32 = 8;
+    let spacing: u32 = 1;
+    let line_advance = char_h + spacing;
 
     let mut cursor_x = x;
+    let mut cursor_y = y;
+
     for ch in text.chars() {
-        draw_char(state, cursor_x, y, fg, bg, ch)?;
-        cursor_x += 8;
+        if ch == '\n' {
+            cursor_x = x;
+            cursor_y = cursor_y.checked_add(line_advance).ok_or(())?;
+            if cursor_y + char_h > state.height {
+                return Err(());
+            }
+            continue;
+        }
+
+        if cursor_x + char_w > state.width {
+            cursor_x = x;
+            cursor_y = cursor_y.checked_add(line_advance).ok_or(())?;
+            if cursor_y + char_h > state.height {
+                return Err(());
+            }
+        }
+
+        draw_char(state, cursor_x, cursor_y, fg, bg, ch)?;
+        cursor_x = cursor_x.checked_add(char_w + spacing).ok_or(())?;
     }
+
     Ok(())
 }
 
