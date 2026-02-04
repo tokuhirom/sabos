@@ -72,7 +72,8 @@
   "processes": [
     { "id": 1, "type": "kernel", "name": "kernel", "user_frames": 0 },
     { "id": 2, "type": "user", "name": "SHELL.ELF", "user_frames": 120 }
-  ]
+  ],
+  "invalid_deallocs": 0
 }
 ```
 

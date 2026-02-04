@@ -55,6 +55,8 @@ pub struct BitmapFrameAllocator {
     total_frames: u64,
     /// 現在使用中のフレーム数
     allocated_count: u64,
+    /// 無効な解放の回数（デバッグ用）
+    invalid_dealloc_count: u64,
     /// 次に探索を開始するビットマップのインデックス（検索高速化のヒント）
     /// 直前の割り当て位置の近くから探すことで、毎回先頭から探す無駄を減らす。
     next_search_hint: usize,
@@ -68,6 +70,7 @@ impl BitmapFrameAllocator {
             bitmap: Vec::new(),
             total_frames: 0,
             allocated_count: 0,
+            invalid_dealloc_count: 0,
             next_search_hint: 0,
         }
     }
@@ -86,6 +89,7 @@ impl BitmapFrameAllocator {
         self.bitmap = vec![0u64; bitmap_size]; // 全ビット 0 = 全フレーム空き
         self.total_frames = total;
         self.allocated_count = 0;
+        self.invalid_dealloc_count = 0;
         self.next_search_hint = 0;
     }
 
@@ -97,6 +101,11 @@ impl BitmapFrameAllocator {
     /// 現在使用中のフレーム数を返す。
     pub fn allocated_count(&self) -> u64 {
         self.allocated_count
+    }
+
+    /// 無効な解放の回数を返す（デバッグ用）
+    pub fn invalid_dealloc_count(&self) -> u64 {
+        self.invalid_dealloc_count
     }
 
     /// 現在の空きフレーム数を返す。
@@ -179,7 +188,20 @@ impl BitmapFrameAllocator {
                 if word < self.next_search_hint {
                     self.next_search_hint = word;
                 }
+            } else {
+                // 二重解放や未割り当て解放を検出（panic せずカウント）
+                self.invalid_dealloc_count += 1;
+                crate::serial_println!(
+                    "[memory] WARNING: invalid dealloc (phys={:#x})",
+                    addr.as_u64()
+                );
             }
+        } else {
+            self.invalid_dealloc_count += 1;
+            crate::serial_println!(
+                "[memory] WARNING: invalid dealloc (phys={:#x})",
+                addr.as_u64()
+            );
         }
     }
 }

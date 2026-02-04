@@ -162,6 +162,7 @@ fn generate_meminfo() -> Vec<u8> {
     let total = fa.total_frames();
     let allocated = fa.allocated_count();
     let free = fa.free_frames();
+    let invalid_deallocs = fa.invalid_dealloc_count();
     drop(fa); // ロックを早めに解放
     let processes = scheduler::process_mem_list();
 
@@ -187,7 +188,7 @@ fn generate_meminfo() -> Vec<u8> {
         let _ = write_json_string(&mut writer, p.name.as_str());
         let _ = write!(writer, "\",\"user_frames\":{}}}", p.user_frames);
     }
-    let _ = write!(writer, "]}}\n");
+    let _ = write!(writer, "],\"invalid_deallocs\":{}}}\n", invalid_deallocs);
 
     buf
 }
