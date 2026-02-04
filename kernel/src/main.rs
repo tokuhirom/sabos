@@ -116,7 +116,7 @@ fn main() -> Status {
     interrupts::init();
 
     // --- ヒープアロケータの初期化 ---
-    allocator::init();
+    allocator::init(&memory_map);
 
     // --- ページング管理の初期化 ---
     // UEFI が設定済みのページテーブルを OffsetPageTable でラップし、

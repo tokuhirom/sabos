@@ -169,6 +169,36 @@ impl BitmapFrameAllocator {
         }
     }
 
+    /// ビットマップの指定インデックスのビットをセットする（使用中にする）。
+    fn set_allocated(&mut self, index: u64) {
+        let word = (index / 64) as usize;
+        let bit = (index % 64) as u32;
+        if word < self.bitmap.len() {
+            self.bitmap[word] |= 1u64 << bit;
+        }
+    }
+
+    /// 指定範囲のフレームを予約済みにする。
+    pub fn reserve_range(&mut self, start: u64, size: u64) {
+        if size == 0 {
+            return;
+        }
+
+        let start = start & !0xfff;
+        let end = (start + size + 0xfff) & !0xfff;
+        let mut addr = start;
+        while addr < end {
+            let phys = PhysAddr::new(addr);
+            if let Some(index) = self.phys_to_index(phys) {
+                if !self.is_allocated(index) {
+                    self.set_allocated(index);
+                    self.allocated_count += 1;
+                }
+            }
+            addr += 4096;
+        }
+    }
+
     /// 物理フレームを解放する。
     ///
     /// 指定されたフレームの物理アドレスに対応するビットマップのビットをクリアして、
@@ -275,4 +305,9 @@ lazy_static! {
 /// 1MiB 以下の低メモリ領域はスキップする（レガシーハードウェアが使う可能性があるため）。
 pub fn init(regions: Vec<MemoryRegion>) {
     FRAME_ALLOCATOR.lock().init(regions);
+}
+
+/// 指定範囲のフレームを予約する（ヒープ等の除外）。
+pub fn reserve_range(start: u64, size: u64) {
+    FRAME_ALLOCATOR.lock().reserve_range(start, size);
 }

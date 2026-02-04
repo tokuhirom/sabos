@@ -226,6 +226,16 @@ pub fn init(memory_map: &MemoryMapOwned) {
     let total_frames: u64 = regions.iter().map(|r| r.page_count).sum();
     memory::init(regions);
 
+    // ヒープ領域をフレームアロケータから除外する。
+    if let Some((start, size)) = crate::allocator::heap_region_for_reserve() {
+        memory::reserve_range(start, size);
+        crate::kprintln!(
+            "Reserved heap frames: {:#x} - {:#x}",
+            start,
+            start + size
+        );
+    }
+
     // --- ページテーブル領域を書き込み可能にする ---
     // UEFI はページテーブルが配置された 2MiB ページを読み取り専用にしていることがある。
     // カーネルがページテーブルを変更するためには、これらを書き込み可能にする必要がある。
