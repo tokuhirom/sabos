@@ -15,10 +15,13 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `1` `SYS_WRITE(buf_ptr, len) -> n`
 - `2` `SYS_CLEAR_SCREEN() -> 0`
 
-## ファイルシステム (10-19)
+## テスト/デバッグ (10-11)
 
-- `10` `SYS_FILE_READ(path_ptr, path_len, buf_ptr, buf_len) -> n`
-- `11` `SYS_FILE_WRITE(path_ptr, path_len, data_ptr, data_len) -> n`
+- `10` `SYS_SELFTEST() -> 0`
+  - カーネル selftest を実行する（CI 用）
+
+## ファイルシステム (12-19)
+
 - `12` `SYS_FILE_DELETE(path_ptr, path_len) -> 0`
 - `13` `SYS_DIR_LIST(path_ptr, path_len, buf_ptr, buf_len) -> n`
 

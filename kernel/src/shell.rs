@@ -1631,3 +1631,11 @@ impl Shell {
         }
     }
 }
+
+/// カーネル側から selftest を実行するための公開関数。
+///
+/// syscall から呼べるように、最小限の Shell を生成して selftest を実行する。
+pub fn run_selftest() {
+    let shell = Shell::new(0, 0);
+    shell.cmd_selftest();
+}

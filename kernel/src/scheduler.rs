@@ -234,6 +234,8 @@ pub struct Task {
     /// プロセスの終了コード。exit() で設定され、wait() で取得できる。
     /// Finished 状態になった時点で有効な値を持つ。
     pub exit_code: i32,
+    /// wait() 済みかどうか（同じ終了を繰り返し返さないためのフラグ）
+    pub reaped: bool,
 }
 
 // =================================================================
@@ -291,6 +293,7 @@ pub fn init() {
         is_user: false,               // カーネルタスク
         parent_id: None,              // カーネルタスクに親はいない
         exit_code: 0,                 // 初期値
+        reaped: false,                // wait() は不要
     });
     sched.current = 0;
 }
@@ -376,6 +379,7 @@ pub fn spawn(name: &'static str, entry: fn()) {
         is_user: false,               // カーネルタスク
         parent_id: None,              // カーネルタスクに親はいない
         exit_code: 0,                 // 初期値
+        reaped: false,                // wait() は不要
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -701,23 +705,27 @@ pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitE
 
     loop {
         {
-            let sched = SCHEDULER.lock();
+            let mut sched = SCHEDULER.lock();
 
-            // 子プロセスの中で Finished になっているものを探す
-            let finished_child = sched.tasks.iter().find(|t| {
+            // 子プロセスの中で Finished かつ未回収のものを探す
+            let finished_child_idx = sched.tasks.iter().position(|t| {
                 // 自分の子かどうか
                 let is_my_child = t.parent_id == Some(my_id);
                 // Finished 状態かどうか
                 let is_finished = t.state == TaskState::Finished;
+                // まだ wait() で回収されていないか
+                let is_not_reaped = !t.reaped;
                 // target_task_id が指定されていれば、そのタスクのみ対象
                 let is_target = target_task_id == 0 || t.id == target_task_id;
 
-                is_my_child && is_finished && is_target
+                is_my_child && is_finished && is_not_reaped && is_target
             });
 
-            if let Some(child) = finished_child {
+            if let Some(idx) = finished_child_idx {
                 // 子プロセスが終了している
-                let exit_code = child.exit_code;
+                let exit_code = sched.tasks[idx].exit_code;
+                // 同じ終了を繰り返し返さないように回収済みにする
+                sched.tasks[idx].reaped = true;
                 // TODO: 将来的にはここでタスクエントリをクリーンアップする
                 return Ok(exit_code);
             }
@@ -728,11 +736,18 @@ pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitE
                 match target {
                     None => return Err(WaitError::NoChild), // タスクが存在しない
                     Some(t) if t.parent_id != Some(my_id) => return Err(WaitError::NotChild), // 子ではない
+                    Some(t) if t.state == TaskState::Finished && t.reaped => {
+                        return Err(WaitError::NoChild); // 既に wait() 済み
+                    }
                     Some(_) => {} // 子だが、まだ終了していない
                 }
             } else {
-                // target_task_id == 0 の場合、子プロセスが一つもいなければエラー
-                let has_child = sched.tasks.iter().any(|t| t.parent_id == Some(my_id));
+                // target_task_id == 0 の場合、未回収の子プロセスが一つもいなければエラー
+                let has_child = sched.tasks.iter().any(|t| {
+                    let is_my_child = t.parent_id == Some(my_id);
+                    let is_unreaped = !(t.state == TaskState::Finished && t.reaped);
+                    is_my_child && is_unreaped
+                });
                 if !has_child {
                     return Err(WaitError::NoChild);
                 }
@@ -993,6 +1008,7 @@ pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
         is_user: true,                // ユーザープロセス
         parent_id,                    // 親タスクの ID（spawn 元）
         exit_code: 0,                 // 初期値
+        reaped: false,                // wait() が呼ばれるまで未回収
     });
 
     crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);

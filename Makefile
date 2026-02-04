@@ -119,6 +119,6 @@ clean:
 # 自動テストを実行する。
 # QEMU を起動して selftest コマンドを実行し、結果を検証する。
 # CI で使う場合はこのターゲットを呼ぶ。
-test: build $(ESP_DIR) $(DISK_IMG)
+test: build $(ESP_DIR) disk-img
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh

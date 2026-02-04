@@ -22,6 +22,7 @@
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
+// - selftest: カーネル selftest を実行
 // - halt: システム停止
 
 #![no_std]
@@ -175,6 +176,7 @@ fn execute_command(line: &[u8]) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "selftest" => cmd_selftest(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
         _ => {
@@ -224,6 +226,7 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  selftest          - Run kernel selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
 }
@@ -237,6 +240,12 @@ fn cmd_clear() {
 fn cmd_exit() {
     syscall::write_str("Goodbye!\n");
     syscall::exit();
+}
+
+/// selftest コマンド: カーネル selftest を実行
+fn cmd_selftest() {
+    syscall::write_str("Running kernel selftest...\n");
+    let _ = syscall::selftest();
 }
 
 // =================================================================

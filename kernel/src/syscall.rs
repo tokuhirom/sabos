@@ -40,7 +40,8 @@ use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 ///
 /// 番号体系は計画に従う:
 /// - コンソール I/O: 0-9
-/// - ファイルシステム: 10-19
+/// - テスト/デバッグ: 10-11
+/// - ファイルシステム: 12-19
 /// - システム情報: 20-29
 /// - プロセス管理: 30-39
 /// - ネットワーク: 40-49
@@ -54,9 +55,10 @@ pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソール�
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面をクリア
 
-// ファイルシステム (10-19)
-pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len) — ファイル読み取り
-pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len) — ファイル書き込み
+// テスト/デバッグ (10-11)
+pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を実行
+
+// ファイルシステム (12-19)
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len) — ファイル削除
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len) — ディレクトリ一覧
 
@@ -231,9 +233,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_READ => sys_read(arg1, arg2),
         SYS_WRITE => sys_write(arg1, arg2),
         SYS_CLEAR_SCREEN => sys_clear_screen(),
+        // テスト/デバッグ
+        SYS_SELFTEST => sys_selftest(),
         // ファイルシステム
-        SYS_FILE_READ => sys_file_read(arg1, arg2, arg3, arg4),
-        SYS_FILE_WRITE => sys_file_write(arg1, arg2, arg3, arg4),
         SYS_FILE_DELETE => sys_file_delete(arg1, arg2),
         SYS_DIR_LIST => sys_dir_list(arg1, arg2, arg3, arg4),
         // システム情報
@@ -352,82 +354,18 @@ fn sys_clear_screen() -> Result<u64, SyscallError> {
 }
 
 // =================================================================
-// ファイルシステム関連システムコール
+// テスト/デバッグ関連システムコール
 // =================================================================
 
-/// SYS_FILE_READ: ファイルの内容を読み取る
+/// SYS_SELFTEST: カーネル selftest を実行する
 ///
-/// 引数:
-///   arg1 — パスのポインタ（ユーザー空間）
-///   arg2 — パスの長さ
-///   arg3 — バッファのポインタ（ユーザー空間、書き込み先）
-///   arg4 — バッファの長さ
-///
-/// 戻り値:
-///   読み取ったバイト数（成功時）
-///   負の値（エラー時）
-fn sys_file_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-    let buf_len = arg4 as usize;
-
-    // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
-    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-
-    // バッファを取得
-    let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
-    let buf = buf_slice.as_mut_slice();
-
-    // /proc 配下は procfs で処理
-    if path.starts_with("/proc") {
-        let written = crate::procfs::procfs_read(path, buf)?;
-        return Ok(written as u64);
-    }
-
-    // FAT16 からファイルを読み取る
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
-
-    // バッファにコピー
-    let copy_len = core::cmp::min(data.len(), buf_len);
-    buf[..copy_len].copy_from_slice(&data[..copy_len]);
-
-    Ok(copy_len as u64)
-}
-
-/// SYS_FILE_WRITE: ファイルを作成または上書き
-///
-/// 引数:
-///   arg1 — パスのポインタ（ユーザー空間）
-///   arg2 — パスの長さ
-///   arg3 — データのポインタ（ユーザー空間）
-///   arg4 — データの長さ
-///
-/// 戻り値:
-///   書き込んだバイト数（成功時）
-///   負の値（エラー時）
-fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-    let data_len = arg4 as usize;
-
-    // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
-    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-
-    // データを取得
-    let data_slice = UserSlice::<u8>::from_raw(arg3, data_len)?;
-    let data = data_slice.as_slice();
-
-    // /proc 配下は読み取り専用
-    if path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT16 にファイルを書き込む
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    fat16.create_file(path, data).map_err(|_| SyscallError::Other)?;
-
-    Ok(data_len as u64)
+/// 引数: なし
+/// 戻り値: 0（成功）
+fn sys_selftest() -> Result<u64, SyscallError> {
+    // selftest 中にタイマー割り込みやタスク切り替えが動くように有効化
+    x86_64::instructions::interrupts::enable();
+    crate::shell::run_selftest();
+    Ok(0)
 }
 
 // =================================================================

@@ -34,7 +34,8 @@ use core::arch::asm;
 ///
 /// 番号体系:
 /// - コンソール I/O: 0-9
-/// - ファイルシステム: 10-19
+/// - テスト/デバッグ: 10-11
+/// - ファイルシステム: 12-19
 /// - システム情報: 20-29
 /// - プロセス管理: 30-39
 /// - システム制御: 50-59
@@ -47,9 +48,10 @@ pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソール�
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
 
-// ファイルシステム (10-19) — パスベース（レガシー）
-pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len)
-pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len)
+// テスト/デバッグ (10-11)
+pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を実行
+
+// ファイルシステム (12-19) — パスベース（レガシー）
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
 
@@ -335,6 +337,19 @@ pub fn clear_screen() {
     unsafe { syscall0(SYS_CLEAR_SCREEN); }
 }
 
+// =================================================================
+// テスト/デバッグ関連
+// =================================================================
+
+/// カーネル selftest を実行する
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn selftest() -> SyscallResult {
+    unsafe { syscall0(SYS_SELFTEST) as i64 }
+}
+
 /// プログラムを終了する
 ///
 /// この関数は戻らない。カーネルがプロセスを終了し、
@@ -580,40 +595,6 @@ pub fn halt() -> ! {
 // =================================================================
 // ファイルシステム関連（パスベース — レガシー API）
 // =================================================================
-
-/// ファイルを読み取る（パスベース）
-///
-/// # 引数
-/// - `path`: ファイルパス
-/// - `buf`: 読み取り先バッファ
-///
-/// # 戻り値
-/// - 読み取ったバイト数（成功時）
-/// - 負の値（エラー時）
-pub fn file_read(path: &str, buf: &mut [u8]) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall4(SYS_FILE_READ, path_ptr, path_len, buf_ptr, buf_len) as i64 }
-}
-
-/// ファイルを書き込む（パスベース）
-///
-/// # 引数
-/// - `path`: ファイルパス
-/// - `data`: 書き込むデータ
-///
-/// # 戻り値
-/// - 書き込んだバイト数（成功時）
-/// - 負の値（エラー時）
-pub fn file_write(path: &str, data: &[u8]) -> SyscallResult {
-    let path_ptr = path.as_ptr() as u64;
-    let path_len = path.len() as u64;
-    let data_ptr = data.as_ptr() as u64;
-    let data_len = data.len() as u64;
-    unsafe { syscall4(SYS_FILE_WRITE, path_ptr, path_len, data_ptr, data_len) as i64 }
-}
 
 /// ファイルを削除する（パスベース）
 ///

@@ -138,32 +138,9 @@ if ! grep -q "HELLO.TXT" "$LOG_FILE" 2>/dev/null; then
     exit 1
 fi
 
-echo "Exiting user shell to kernel shell..."
-
-# exit コマンドを送信してユーザーシェルを終了
-for c in e x i t ret; do
-    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.25
-done
-
-# カーネルシェルプロンプトが表示されるまで待機
-echo "Waiting for kernel shell prompt..."
-for i in {1..30}; do
-    if grep -q "sabos>" "$LOG_FILE" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-
-if ! grep -q "sabos>" "$LOG_FILE" 2>/dev/null; then
-    echo -e "${RED}ERROR: Kernel shell prompt not found after 30 seconds${NC}"
-    cat "$LOG_FILE"
-    exit 1
-fi
-
 echo "Sending selftest command..."
 
-# selftest コマンドを送信（各キーを個別の nc 呼び出しで送信）
+# user シェルで selftest を実行
 for c in s e l f t e s t ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
     sleep 0.25
