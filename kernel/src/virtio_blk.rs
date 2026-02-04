@@ -327,10 +327,11 @@ impl VirtioBlk {
 
         // --- ディスクリプタチェーンの構築 ---
         // 3 つのディスクリプタを使う: header → data → status
+        // 各インデックスは queue_size でラップする（境界を超えないように）
         let desc_base = self.next_desc;
         let d0 = desc_base;
-        let d1 = desc_base + 1;
-        let d2 = desc_base + 2;
+        let d1 = (desc_base + 1) % self.queue_size;
+        let d2 = (desc_base + 2) % self.queue_size;
 
         // ディスクリプタ 0: リクエストヘッダー（デバイスが読む = ゲスト読み取り専用）
         self.write_desc(
@@ -458,10 +459,11 @@ impl VirtioBlk {
         let mut status_byte: u8 = 0xFF;
 
         // --- ディスクリプタチェーンの構築 ---
+        // 各インデックスは queue_size でラップする（境界を超えないように）
         let desc_base = self.next_desc;
         let d0 = desc_base;
-        let d1 = desc_base + 1;
-        let d2 = desc_base + 2;
+        let d1 = (desc_base + 1) % self.queue_size;
+        let d2 = (desc_base + 2) % self.queue_size;
 
         // ディスクリプタ 0: リクエストヘッダー（デバイスが読む = WRITE フラグなし）
         self.write_desc(
