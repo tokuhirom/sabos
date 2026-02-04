@@ -275,9 +275,22 @@ echo "Sending selftest command..."
 base=$(log_line_count)
 send_command "selftest"
 
-# テスト結果を待つ（最大 30 秒）
+# テスト開始の反応を待つ（最大 10 秒）
+for i in {1..10}; do
+    if grep_after "$base" "Running kernel selftest" || grep_after "$base" "SELFTEST START"; then
+        break
+    fi
+    sleep 1
+done
+
+# 反応がない場合は改行を送って入力の取りこぼしを回避
+if ! grep_after "$base" "Running kernel selftest" && ! grep_after "$base" "SELFTEST START"; then
+    send_key ret
+fi
+
+# テスト結果を待つ（最大 60 秒）
 echo "Waiting for selftest to complete..."
-for i in {1..30}; do
+for i in {1..60}; do
     if grep_after "$base" "SELFTEST END"; then
         break
     fi
