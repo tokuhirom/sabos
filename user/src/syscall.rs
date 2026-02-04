@@ -81,6 +81,7 @@ pub const SYS_HANDLE_WRITE: u64 = 72;    // handle_write(handle_ptr, buf_ptr, le
 pub const SYS_HANDLE_CLOSE: u64 = 73;    // handle_close(handle_ptr)
 pub const SYS_OPENAT: u64 = 74;          // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
 pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
+pub const SYS_HANDLE_ENUM: u64 = 76;     // handle_enum(dir_handle_ptr, buf_ptr, len)
 
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
@@ -126,6 +127,17 @@ pub const HANDLE_RIGHT_LOOKUP: u32 = 0x0080;
 
 /// 読み取り専用ファイル用の権限セット
 pub const HANDLE_RIGHTS_FILE_READ: u32 = HANDLE_RIGHT_READ | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
+
+/// 読み書き可能ファイル用の権限セット
+pub const HANDLE_RIGHTS_FILE_RW: u32 = HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
+
+/// ディレクトリ用の権限セット（フルアクセス）
+pub const HANDLE_RIGHTS_DIRECTORY: u32 =
+    HANDLE_RIGHT_STAT | HANDLE_RIGHT_ENUM | HANDLE_RIGHT_CREATE | HANDLE_RIGHT_DELETE | HANDLE_RIGHT_LOOKUP;
+
+/// ディレクトリ用の権限セット（読み取りのみ）
+pub const HANDLE_RIGHTS_DIRECTORY_READ: u32 =
+    HANDLE_RIGHT_STAT | HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP;
 
 /// システムコールの戻り値を表す型
 ///
@@ -707,6 +719,22 @@ pub fn handle_write(handle: &Handle, data: &[u8]) -> SyscallResult {
 pub fn handle_close(handle: &Handle) -> SyscallResult {
     let handle_ptr = handle as *const Handle as u64;
     unsafe { syscall1(SYS_HANDLE_CLOSE, handle_ptr) as i64 }
+}
+
+/// ディレクトリハンドルの内容を一覧する
+///
+/// # 引数
+/// - `handle`: ディレクトリハンドル（ENUM 権限が必要）
+/// - `buf`: 結果を書き込むバッファ（エントリ名を改行区切り）
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn handle_enum(handle: &Handle, buf: &mut [u8]) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_ENUM, handle_ptr, buf_ptr, buf_len) as i64 }
 }
 
 /// ディレクトリハンドルからの相対パスでファイルを開く

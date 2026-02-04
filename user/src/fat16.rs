@@ -32,9 +32,6 @@ pub struct Fat16Bpb {
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub name: String,
-    pub attr: u8,
-    pub first_cluster: u16,
-    pub size: u32,
 }
 
 /// FAT16 ドライバ
@@ -124,19 +121,8 @@ impl Fat16 {
                 }
 
                 let name = parse_8_3_name(&buf[offset..offset + 11]);
-                let first_cluster = u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
-                let size = u32::from_le_bytes([
-                    buf[offset + 28],
-                    buf[offset + 29],
-                    buf[offset + 30],
-                    buf[offset + 31],
-                ]);
-
                 entries.push(DirEntry {
                     name,
-                    attr,
-                    first_cluster,
-                    size,
                 });
 
                 read_entries += 1;
@@ -146,12 +132,6 @@ impl Fat16 {
         }
 
         Ok(entries)
-    }
-
-    /// ファイルを読み取る
-    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
-        let entry = self.find_file(path)?;
-        self.read_file_data(&entry)
     }
 
     /// ディレクトリを作成する（ルートのみ対応）
@@ -384,46 +364,6 @@ impl Fat16 {
         }
 
         Err("directory full")
-    }
-
-    fn find_file(&self, path: &str) -> Result<DirEntry, &'static str> {
-        let upper = path.trim_start_matches('/').to_ascii_uppercase();
-
-        let entries = self.list_dir("/")?;
-        for entry in entries {
-            if entry.name.to_ascii_uppercase() == upper {
-                return Ok(entry);
-            }
-        }
-
-        Err("file not found")
-    }
-
-    fn read_file_data(&self, entry: &DirEntry) -> Result<Vec<u8>, &'static str> {
-        let mut data = Vec::new();
-        let mut cluster = entry.first_cluster;
-        let mut remaining = entry.size as usize;
-
-        if cluster < 2 {
-            return Ok(data);
-        }
-
-        while remaining > 0 && cluster < FAT16_EOC_MIN {
-            let mut buf = [0u8; SECTOR_SIZE];
-            let sector = self.cluster_to_sector(cluster);
-            for i in 0..self.bpb.sectors_per_cluster {
-                block_read((sector + i as u32) as u64, &mut buf)?;
-                let copy_len = core::cmp::min(remaining, SECTOR_SIZE);
-                data.extend_from_slice(&buf[..copy_len]);
-                remaining -= copy_len;
-                if remaining == 0 {
-                    break;
-                }
-            }
-            cluster = self.read_fat_entry(cluster)?;
-        }
-
-        Ok(data)
     }
 
     fn write_file_data(&self, data: &[u8]) -> Result<(u16, usize), &'static str> {

@@ -110,6 +110,10 @@ Capability-based security を実現するためのハンドル操作。
   - ハンドルの権限を縮小して新しいハンドルを作成
   - **セキュリティ**: 権限は縮小のみ可能、拡大はエラー
 
+- `76` `SYS_HANDLE_ENUM(dir_handle_ptr, buf_ptr, len) -> n`
+  - ディレクトリハンドルの内容を一覧
+  - ENUM 権限が必要
+
 ## ブロックデバイス (80-89)
 
 - `80` `SYS_BLOCK_READ(sector, buf_ptr, len) -> n`

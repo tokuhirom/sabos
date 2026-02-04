@@ -13,6 +13,10 @@
 // - cat <file>: ファイル内容を表示
 // - write <file> <text>: ファイルを作成/上書き
 // - rm <file>: ファイルを削除
+// - cd <dir>: カレントディレクトリを変更
+// - pwd: カレントディレクトリを表示
+// - pushd <dir>: ディレクトリスタックに積んで移動
+// - popd: ディレクトリスタックから戻る
 // - mem: メモリ情報を表示
 // - ps: タスク一覧を表示
 // - ip: ネットワーク情報を表示
@@ -26,6 +30,9 @@
 
 use crate::syscall;
 use crate::fat16::Fat16;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 /// netd のタスクID（起動できた場合のみ設定）
 static mut NETD_TASK_ID: u64 = 0;
@@ -36,10 +43,41 @@ const LINE_BUFFER_SIZE: usize = 256;
 /// ファイル読み取り/ディレクトリ一覧用のバッファサイズ
 const FILE_BUFFER_SIZE: usize = 4096;
 
+/// シェルの状態
+///
+/// カーネル側にカレントディレクトリ情報を持たせない方針なので、
+/// ユーザーシェル内で cwd を保持する。
+/// 真実は cwd_handle。cwd_text は表示専用。
+struct ShellState {
+    /// カレントディレクトリのハンドル（真実）
+    cwd_handle: syscall::Handle,
+    /// カレントディレクトリの表示用文字列
+    cwd_text: String,
+    /// 過去の cwd を戻るためのスタック（ハンドル）
+    cwd_stack: Vec<syscall::Handle>,
+    /// 過去の cwd を戻るためのスタック（表示用）
+    cwd_text_stack: Vec<String>,
+}
+
 /// シェルのメインループを実行
 pub fn run() -> ! {
     print_welcome();
     init_net_service();
+
+    let cwd_handle = match open_root_dir() {
+        Ok(h) => h,
+        Err(_) => {
+            syscall::write_str("Error: Failed to open root directory handle\n");
+            syscall::exit();
+        }
+    };
+    // カレントディレクトリはユーザー空間で管理する
+    let mut state = ShellState {
+        cwd_handle,
+        cwd_text: String::from("/"),
+        cwd_stack: Vec::new(),
+        cwd_text_stack: Vec::new(),
+    };
 
     let mut line_buf = [0u8; LINE_BUFFER_SIZE];
 
@@ -57,7 +95,7 @@ pub fn run() -> ! {
 
         // コマンドを実行
         let line = &line_buf[..line_len];
-        execute_command(line);
+        execute_command(line, &mut state);
     }
 }
 
@@ -111,7 +149,7 @@ fn read_line(buf: &mut [u8]) -> usize {
 }
 
 /// コマンドを実行
-fn execute_command(line: &[u8]) {
+fn execute_command(line: &[u8], state: &mut ShellState) {
     // UTF-8 として解釈
     let line_str = match core::str::from_utf8(line) {
         Ok(s) => s.trim(),
@@ -129,18 +167,22 @@ fn execute_command(line: &[u8]) {
         "help" => cmd_help(),
         "clear" => cmd_clear(),
         "exit" => cmd_exit(),
-        "ls" => cmd_ls(args),
-        "cat" => cmd_cat(args),
-        "write" => cmd_write(args),
-        "rm" => cmd_rm(args),
-        "mkdir" => cmd_mkdir(args),
-        "rmdir" => cmd_rmdir(args),
+        "ls" => cmd_ls(args, state),
+        "cat" => cmd_cat(args, state),
+        "write" => cmd_write(args, state),
+        "rm" => cmd_rm(args, state),
+        "mkdir" => cmd_mkdir(args, state),
+        "rmdir" => cmd_rmdir(args, state),
+        "cd" => cmd_cd(args, state),
+        "pwd" => cmd_pwd(state),
+        "pushd" => cmd_pushd(args, state),
+        "popd" => cmd_popd(state),
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
         "ip" => cmd_ip(),
         "lspci" => cmd_lspci(),
-        "run" => cmd_run(args),
-        "spawn" => cmd_spawn(args),
+        "run" => cmd_run(args, state),
+        "spawn" => cmd_spawn(args, state),
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
@@ -160,6 +202,110 @@ fn split_command(line: &str) -> (&str, &str) {
         Some(pos) => (&line[..pos], line[pos + 1..].trim_start()),
         None => (line, ""),
     }
+}
+
+/// ルートディレクトリのハンドルを開く
+fn open_root_dir() -> Result<syscall::Handle, syscall::SyscallResult> {
+    syscall::open("/", syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+}
+
+/// 引数からディレクトリハンドルを開く
+fn open_dir_from_args(state: &ShellState, args: &str) -> Result<syscall::Handle, &'static str> {
+    if args.starts_with('/') {
+        syscall::open(args, syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+            .map_err(|_| "Error: Failed to open directory")
+    } else {
+        syscall::openat(&state.cwd_handle, args, syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+            .map_err(|_| "Error: Failed to open directory")
+    }
+}
+
+/// 引数からファイルハンドルを開く
+fn open_file_from_args(state: &ShellState, args: &str) -> Result<syscall::Handle, &'static str> {
+    if args.starts_with('/') {
+        syscall::open(args, syscall::HANDLE_RIGHTS_FILE_READ)
+            .map_err(|_| "Error: File not found or cannot be read")
+    } else {
+        syscall::openat(&state.cwd_handle, args, syscall::HANDLE_RIGHTS_FILE_READ)
+            .map_err(|_| "Error: File not found or cannot be read")
+    }
+}
+
+/// cwd スタックのハンドルを閉じる
+fn close_handle_stack(state: &mut ShellState) {
+    for handle in state.cwd_stack.drain(..) {
+        let _ = syscall::handle_close(&handle);
+    }
+    state.cwd_text_stack.clear();
+}
+
+/// カレントディレクトリと入力パスから絶対パスを作る
+///
+/// 例:
+/// - cwd="/", input="FOO" -> "/FOO"
+/// - cwd="/A", input="../B" -> "/B"
+fn resolve_path(cwd: &str, input: &str) -> String {
+    if input.starts_with('/') {
+        return normalize_path(input);
+    }
+    if cwd == "/" {
+        return normalize_path(&format!("/{}", input));
+    }
+    normalize_path(&format!("{}/{}", cwd, input))
+}
+
+/// 絶対パスを正規化する（"." と ".." を処理）
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            let _ = parts.pop();
+            continue;
+        }
+        parts.push(part);
+    }
+
+    if parts.is_empty() {
+        return String::from("/");
+    }
+
+    let mut result = String::from("/");
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            result.push('/');
+        }
+        result.push_str(part);
+    }
+    result
+}
+
+/// ルート直下だけを許可する簡易チェック
+fn is_root_only_path(path: &str) -> bool {
+    if path == "/" {
+        return true;
+    }
+    let trimmed = path.trim_start_matches('/');
+    !trimmed.is_empty() && !trimmed.contains('/')
+}
+
+/// ルート直下のファイル名を取り出す
+fn root_entry_name(path: &str) -> Result<&str, &'static str> {
+    if !is_root_only_path(path) {
+        return Err("Error: Only root directory is supported yet");
+    }
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err("Error: Invalid path");
+    }
+    Ok(trimmed)
+}
+
+/// ルート直下のディレクトリ名を取り出す
+fn root_dir_name(path: &str) -> Result<&str, &'static str> {
+    root_entry_name(path)
 }
 
 /// echo コマンド: 引数をそのまま出力
@@ -184,6 +330,10 @@ fn cmd_help() {
     syscall::write_str("  rm <file>         - Delete file\n");
     syscall::write_str("  mkdir <dir>       - Create directory (root only)\n");
     syscall::write_str("  rmdir <dir>       - Remove empty directory (root only)\n");
+    syscall::write_str("  cd <dir>          - Change current directory\n");
+    syscall::write_str("  pwd               - Print current directory\n");
+    syscall::write_str("  pushd <dir>       - Push directory and change to it\n");
+    syscall::write_str("  popd              - Pop directory and change to it\n");
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
     syscall::write_str("  ip                - Show network information\n");
@@ -213,77 +363,79 @@ fn cmd_exit() {
 // =================================================================
 
 /// ls コマンド: ディレクトリ一覧を表示
-fn cmd_ls(args: &str) {
-    // パスが指定されなければルートディレクトリ
-    let path = if args.is_empty() { "/" } else { args };
-
-    let fs = match Fat16::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
-            return;
+fn cmd_ls(args: &str, state: &ShellState) {
+    let target = args.trim();
+    let (handle, need_close) = if target.is_empty() {
+        (state.cwd_handle, false)
+    } else {
+        match open_dir_from_args(state, target) {
+            Ok(h) => (h, true),
+            Err(msg) => {
+                syscall::write_str(msg);
+                syscall::write_str("\n");
+                return;
+            }
         }
     };
 
-    let entries = match fs.list_dir(path) {
-        Ok(v) => v,
-        Err(_) => {
-            syscall::write_str("Error: Failed to list directory\n");
-            return;
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let n = syscall::handle_enum(&handle, &mut buf);
+    if n < 0 {
+        syscall::write_str("Error: Failed to list directory\n");
+        if need_close {
+            let _ = syscall::handle_close(&handle);
         }
-    };
+        return;
+    }
 
-    for entry in entries {
-        syscall::write_str(&entry.name);
-        if (entry.attr & 0x10) != 0 {
-            syscall::write_str("/");
+    if n > 0 {
+        let len = n as usize;
+        syscall::write(&buf[..len]);
+        if buf[len - 1] != b'\n' {
+            syscall::write_str("\n");
         }
-        syscall::write_str("\n");
+    }
+
+    if need_close {
+        let _ = syscall::handle_close(&handle);
     }
 }
 
 /// cat コマンド: ファイル内容を表示
-fn cmd_cat(args: &str) {
+fn cmd_cat(args: &str, state: &ShellState) {
     if args.is_empty() {
         syscall::write_str("Usage: cat <filename>\n");
         return;
     }
 
-    // パスの正規化: "/" で始まらなければ "/" を付ける
-    let path = if args.starts_with('/') {
-        args
-    } else {
-        // 簡易実装: 先頭に "/" がない場合は一時バッファに結合
-        // 注意: この実装ではスタック上のバッファを使うので長いパスは非対応
-        &args  // とりあえずそのまま渡す（FAT16側で対応）
-    };
-
-    let fs = match Fat16::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
-            return;
-        }
-    };
-
-    let data = match fs.read_file(path.trim_start_matches('/')) {
-        Ok(d) => d,
-        Err(_) => {
-            syscall::write_str("Error: File not found or cannot be read\n");
-            return;
-        }
-    };
-
-    if !data.is_empty() {
-        syscall::write(&data);
-        if *data.last().unwrap() != b'\n' {
+    let handle = match open_file_from_args(state, args.trim()) {
+        Ok(h) => h,
+        Err(msg) => {
+            syscall::write_str(msg);
             syscall::write_str("\n");
+            return;
         }
+    };
+
+    let mut buf = [0u8; 512];
+    loop {
+        let n = syscall::handle_read(&handle, &mut buf);
+        if n < 0 {
+            syscall::write_str("Error: File not found or cannot be read\n");
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        let len = n as usize;
+        syscall::write(&buf[..len]);
     }
+
+    let _ = syscall::handle_close(&handle);
 }
 
 /// write コマンド: ファイルを作成/上書き
-fn cmd_write(args: &str) {
+fn cmd_write(args: &str, state: &ShellState) {
     // ファイル名とデータを分割
     let (filename, data) = split_command(args);
 
@@ -292,6 +444,16 @@ fn cmd_write(args: &str) {
         return;
     }
 
+    let abs_path = resolve_path(&state.cwd_text, filename);
+    let name = match root_entry_name(&abs_path) {
+        Ok(n) => n,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
     let fs = match Fat16::new() {
         Ok(f) => f,
         Err(_) => {
@@ -300,7 +462,6 @@ fn cmd_write(args: &str) {
         }
     };
 
-    let name = filename.trim_start_matches('/');
     if fs.create_file(name, data.as_bytes()).is_err() {
         syscall::write_str("Error: Failed to write file\n");
         return;
@@ -310,11 +471,21 @@ fn cmd_write(args: &str) {
 }
 
 /// rm コマンド: ファイルを削除
-fn cmd_rm(args: &str) {
+fn cmd_rm(args: &str, state: &ShellState) {
     if args.is_empty() {
         syscall::write_str("Usage: rm <filename>\n");
         return;
     }
+
+    let abs_path = resolve_path(&state.cwd_text, args);
+    let name = match root_entry_name(&abs_path) {
+        Ok(n) => n,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
     let fs = match Fat16::new() {
         Ok(f) => f,
@@ -324,7 +495,6 @@ fn cmd_rm(args: &str) {
         }
     };
 
-    let name = args.trim_start_matches('/');
     if fs.delete_file(name).is_err() {
         syscall::write_str("Error: Failed to delete file\n");
         return;
@@ -334,12 +504,22 @@ fn cmd_rm(args: &str) {
 }
 
 /// mkdir コマンド: ディレクトリを作成
-fn cmd_mkdir(args: &str) {
+fn cmd_mkdir(args: &str, state: &ShellState) {
     let name = args.trim();
     if name.is_empty() {
         syscall::write_str("Usage: mkdir <dirname>\n");
         return;
     }
+
+    let abs_path = resolve_path(&state.cwd_text, name);
+    let entry_name = match root_dir_name(&abs_path) {
+        Ok(n) => n,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
     let fs = match Fat16::new() {
         Ok(f) => f,
@@ -349,7 +529,7 @@ fn cmd_mkdir(args: &str) {
         }
     };
 
-    if fs.create_dir(name).is_err() {
+    if fs.create_dir(entry_name).is_err() {
         syscall::write_str("Error: Failed to create directory\n");
         return;
     }
@@ -358,12 +538,22 @@ fn cmd_mkdir(args: &str) {
 }
 
 /// rmdir コマンド: 空のディレクトリを削除
-fn cmd_rmdir(args: &str) {
+fn cmd_rmdir(args: &str, state: &ShellState) {
     let name = args.trim();
     if name.is_empty() {
         syscall::write_str("Usage: rmdir <dirname>\n");
         return;
     }
+
+    let abs_path = resolve_path(&state.cwd_text, name);
+    let entry_name = match root_dir_name(&abs_path) {
+        Ok(n) => n,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
     let fs = match Fat16::new() {
         Ok(f) => f,
@@ -373,12 +563,117 @@ fn cmd_rmdir(args: &str) {
         }
     };
 
-    if fs.remove_dir(name).is_err() {
+    if fs.remove_dir(entry_name).is_err() {
         syscall::write_str("Error: Failed to remove directory\n");
         return;
     }
 
     syscall::write_str("Directory removed successfully\n");
+}
+
+/// cd コマンド: カレントディレクトリを変更
+fn cmd_cd(args: &str, state: &mut ShellState) {
+    let target = args.trim();
+    if target.is_empty() || target == "/" {
+        // ルートに戻る（スタックは破棄）
+        close_handle_stack(state);
+        if let Ok(new_root) = open_root_dir() {
+            let _ = syscall::handle_close(&state.cwd_handle);
+            state.cwd_handle = new_root;
+            state.cwd_text = String::from("/");
+        } else {
+            syscall::write_str("Error: Failed to open root directory\n");
+        }
+        return;
+    }
+
+    if target == ".." || target == "-" {
+        // スタックから戻る
+        if let Some(prev_handle) = state.cwd_stack.pop() {
+            if let Some(prev_text) = state.cwd_text_stack.pop() {
+                let _ = syscall::handle_close(&state.cwd_handle);
+                state.cwd_handle = prev_handle;
+                state.cwd_text = prev_text;
+            }
+        } else {
+            syscall::write_str("Error: No previous directory\n");
+        }
+        return;
+    }
+
+    // 新しいディレクトリを開く
+    let new_handle = match open_dir_from_args(state, target) {
+        Ok(h) => h,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    // ディレクトリかどうか確認（ENUM できるか）
+    let mut buf = [0u8; 8];
+    if syscall::handle_enum(&new_handle, &mut buf) < 0 {
+        let _ = syscall::handle_close(&new_handle);
+        syscall::write_str("Error: Not a directory\n");
+        return;
+    }
+
+    // 現在の cwd をスタックに保存して切り替え
+    state.cwd_stack.push(state.cwd_handle);
+    state.cwd_text_stack.push(state.cwd_text.clone());
+    state.cwd_handle = new_handle;
+    state.cwd_text = resolve_path(&state.cwd_text, target);
+}
+
+/// pwd コマンド: カレントディレクトリを表示
+fn cmd_pwd(state: &ShellState) {
+    syscall::write_str(&state.cwd_text);
+    syscall::write_str("\n");
+}
+
+/// pushd コマンド: ディレクトリスタックに積んで移動
+fn cmd_pushd(args: &str, state: &mut ShellState) {
+    let target = args.trim();
+    if target.is_empty() {
+        syscall::write_str("Usage: pushd <dir>\n");
+        return;
+    }
+
+    let new_handle = match open_dir_from_args(state, target) {
+        Ok(h) => h,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    // ディレクトリかどうか確認（ENUM できるか）
+    let mut buf = [0u8; 8];
+    if syscall::handle_enum(&new_handle, &mut buf) < 0 {
+        let _ = syscall::handle_close(&new_handle);
+        syscall::write_str("Error: Not a directory\n");
+        return;
+    }
+
+    state.cwd_stack.push(state.cwd_handle);
+    state.cwd_text_stack.push(state.cwd_text.clone());
+    state.cwd_handle = new_handle;
+    state.cwd_text = resolve_path(&state.cwd_text, target);
+}
+
+/// popd コマンド: ディレクトリスタックから戻る
+fn cmd_popd(state: &mut ShellState) {
+    if let Some(prev_handle) = state.cwd_stack.pop() {
+        if let Some(prev_text) = state.cwd_text_stack.pop() {
+            let _ = syscall::handle_close(&state.cwd_handle);
+            state.cwd_handle = prev_handle;
+            state.cwd_text = prev_text;
+        }
+    } else {
+        syscall::write_str("Error: No previous directory\n");
+    }
 }
 
 // =================================================================
@@ -642,7 +937,7 @@ fn cmd_lspci() {
 ///
 /// 指定した ELF ファイルを読み込んで同期実行する。
 /// プログラムが終了するまでシェルはブロックする。
-fn cmd_run(args: &str) {
+fn cmd_run(args: &str, state: &ShellState) {
     let filename = args.trim();
     if filename.is_empty() {
         syscall::write_str("Usage: run <FILENAME>\n");
@@ -650,11 +945,13 @@ fn cmd_run(args: &str) {
         return;
     }
 
+    let abs_path = resolve_path(&state.cwd_text, filename);
+
     syscall::write_str("Running ");
-    syscall::write_str(filename);
+    syscall::write_str(&abs_path);
     syscall::write_str("...\n");
 
-    let result = syscall::exec(filename);
+    let result = syscall::exec(&abs_path);
 
     if result < 0 {
         syscall::write_str("Error: Failed to run program\n");
@@ -668,7 +965,7 @@ fn cmd_run(args: &str) {
 ///
 /// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
 /// 即座にシェルに戻り、プログラムはスケジューラで管理される。
-fn cmd_spawn(args: &str) {
+fn cmd_spawn(args: &str, state: &ShellState) {
     let filename = args.trim();
     if filename.is_empty() {
         syscall::write_str("Usage: spawn <FILENAME>\n");
@@ -677,11 +974,13 @@ fn cmd_spawn(args: &str) {
         return;
     }
 
+    let abs_path = resolve_path(&state.cwd_text, filename);
+
     syscall::write_str("Spawning ");
-    syscall::write_str(filename);
+    syscall::write_str(&abs_path);
     syscall::write_str("...\n");
 
-    let result = syscall::spawn(filename);
+    let result = syscall::spawn(&abs_path);
 
     if result < 0 {
         syscall::write_str("Error: Failed to spawn process\n");

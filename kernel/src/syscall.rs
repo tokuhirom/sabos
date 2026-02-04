@@ -96,6 +96,7 @@ pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
 pub const SYS_OPENAT: u64 = 74;       // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
 pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
+pub const SYS_HANDLE_ENUM: u64 = 76;  // handle_enum(dir_handle_ptr, buf_ptr, len)
 
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
@@ -263,6 +264,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
         SYS_OPENAT => sys_openat(arg1, arg2, arg3, arg4),
         SYS_RESTRICT_RIGHTS => sys_restrict_rights(arg1, arg2, arg3),
+        SYS_HANDLE_ENUM => sys_handle_enum(arg1, arg2, arg3),
         // ブロックデバイス
         SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
         SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
@@ -384,7 +386,7 @@ fn sys_selftest() -> Result<u64, SyscallError> {
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    use crate::handle::{Handle, HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE};
+    use crate::handle::{Handle, HANDLE_RIGHT_WRITE};
 
     let path_len = arg2 as usize;
     let rights = arg4 as u32;
@@ -396,10 +398,6 @@ fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallEr
     // Handle の書き込み先
     let handle_ptr = UserPtr::<Handle>::from_raw(arg3)?;
 
-    // 現状は READ だけ許可
-    if (rights & HANDLE_RIGHT_READ) == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
     if (rights & HANDLE_RIGHT_WRITE) != 0 {
         if path.starts_with("/proc") {
             return Err(SyscallError::ReadOnly);
@@ -500,15 +498,13 @@ fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
 ///   - path に ".." が含まれていたらエラー（パストラバーサル防止）
 ///   - 新しいハンドルの権限 = requested_rights & dir_handle.rights
 fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_LOOKUP, HANDLE_RIGHT_READ};
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_LOOKUP};
 
     let path_len = arg3 as usize;
 
-    // arg4 を分解: 下位32ビットが new_handle_ptr、上位32ビットが rights
-    // 注: 現在の実装では arg4 全体を new_handle_ptr として扱い、
-    // rights は READ のみをデフォルトとする（将来拡張時に変更）
+    // 注: 現在の実装では arg4 全体を new_handle_ptr として扱う。
+    // rights は open_path_to_handle() 内で種別に応じてデフォルトを設定する。
     let new_handle_ptr_raw = arg4;
-    let requested_rights = HANDLE_RIGHT_READ; // 将来は arg5 から取得
 
     // ディレクトリハンドルを取得
     let dir_handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
@@ -549,15 +545,44 @@ fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Syscall
         format!("{}/{}", dir_path, path)
     };
 
-    // ディレクトリハンドルの権限を取得し、要求権限と AND を取る
-    let dir_rights = crate::handle::get_rights(&dir_handle)?;
-    let effective_rights = requested_rights & dir_rights;
+    // ディレクトリハンドルの権限を取得（open_path_to_handle で検証）
+    let _ = crate::handle::get_rights(&dir_handle)?;
 
-    // ファイルを開く
-    let handle = open_path_to_handle(&full_path, effective_rights)?;
+    // ファイル/ディレクトリを開く（権限はデフォルト）
+    let handle = open_path_to_handle(&full_path, 0)?;
     new_handle_ptr.write(handle);
 
     Ok(0)
+}
+
+/// SYS_HANDLE_ENUM: ディレクトリハンドルの内容を一覧
+///
+/// 引数:
+///   arg1 — ディレクトリハンドルのポインタ（ユーザー空間）
+///   arg2 — バッファのポインタ（ユーザー空間、エントリ名を改行区切りで書き込む）
+///   arg3 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+fn sys_handle_enum(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_ENUM};
+
+    let buf_len = arg3 as usize;
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle = handle_ptr.read();
+
+    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    crate::handle::check_rights(&handle, HANDLE_RIGHT_ENUM)?;
+    if crate::handle::get_kind(&handle)? != HandleKind::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let path = crate::handle::get_path(&handle)?;
+    let written = list_dir_to_buffer(&path, buf)?;
+    Ok(written as u64)
 }
 
 /// SYS_RESTRICT_RIGHTS: ハンドルの権限を縮小する
@@ -755,10 +780,16 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
     let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
     let buf = buf_slice.as_mut_slice();
 
+    let written = list_dir_to_buffer(path, buf)?;
+    Ok(written as u64)
+}
+
+/// ディレクトリ一覧をバッファに書き込む（共通ヘルパー）
+fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
     // /proc 配下は procfs で処理
     if path.starts_with("/proc") {
         let written = crate::procfs::procfs_list_dir(path, buf)?;
-        return Ok(written as u64);
+        return Ok(written);
     }
 
     // FAT16 からディレクトリ一覧を取得
@@ -776,7 +807,7 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 
         // 名前のバイト数 + 改行 (+ "/" for directories)
         let needed = name.len() + if is_dir { 2 } else { 1 };
-        if offset + needed > buf_len {
+        if offset + needed > buf.len() {
             break;  // バッファがいっぱい
         }
 
@@ -799,7 +830,7 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
     if path == "/" || path.is_empty() {
         let name = b"proc/";
         let needed = name.len() + 1;
-        if offset + needed <= buf_len {
+        if offset + needed <= buf.len() {
             buf[offset..offset + name.len()].copy_from_slice(name);
             offset += name.len();
             buf[offset] = b'\n';
@@ -807,7 +838,7 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
         }
     }
 
-    Ok(offset as u64)
+    Ok(offset)
 }
 
 // =================================================================
@@ -843,19 +874,67 @@ fn procfs_read_to_vec(path: &str) -> Result<Vec<u8>, SyscallError> {
 
 /// パスから Handle を作成する
 pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::handle::Handle, SyscallError> {
+    use crate::handle::{
+        create_directory_handle, create_handle, HANDLE_RIGHT_ENUM, HANDLE_RIGHT_LOOKUP,
+        HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_RIGHTS_DIRECTORY_READ, HANDLE_RIGHTS_FILE_READ,
+    };
+
+    // /proc ディレクトリは一覧のみ許可
     if path == PROC_ROOT || path == "/proc/" {
+        let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+        if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        return Ok(create_directory_handle(String::from("/proc"), dir_rights));
+    }
+
+    // /proc 配下のファイルは procfs で読み取る
+    if path.starts_with("/proc") {
+        let file_rights = if rights == 0 { HANDLE_RIGHTS_FILE_READ } else { rights };
+        if (file_rights & HANDLE_RIGHT_READ) == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if (file_rights & HANDLE_RIGHT_WRITE) != 0 {
+            return Err(SyscallError::ReadOnly);
+        }
+        let data = procfs_read_to_vec(path)?;
+        return Ok(create_handle(data, file_rights));
+    }
+
+    // ルートディレクトリは特別扱い
+    if path == "/" || path.is_empty() {
+        let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+        if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        return Ok(create_directory_handle(String::from("/"), dir_rights));
+    }
+
+    // FAT16 からエントリを取得して種別判定
+    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
+    let entry = fat16.find_entry(path).map_err(|_| SyscallError::FileNotFound)?;
+
+    // ATTR_DIRECTORY = 0x10
+    const ATTR_DIRECTORY: u8 = 0x10;
+    if (entry.attr & ATTR_DIRECTORY) != 0 {
+        let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+        if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        return Ok(create_directory_handle(String::from(path), dir_rights));
+    }
+
+    // ファイルは読み取りのみ許可（書き込みは未対応）
+    let file_rights = if rights == 0 { HANDLE_RIGHTS_FILE_READ } else { rights };
+    if (file_rights & HANDLE_RIGHT_READ) == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if (file_rights & HANDLE_RIGHT_WRITE) != 0 {
         return Err(SyscallError::NotSupported);
     }
 
-    if path.starts_with("/proc") {
-        let data = procfs_read_to_vec(path)?;
-        return Ok(crate::handle::create_handle(data, rights));
-    }
-
-    // FAT16 から読み取り
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
     let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
-    Ok(crate::handle::create_handle(data, rights))
+    Ok(create_handle(data, file_rights))
 }
 
 /// メモリ情報をテキスト形式で書き込む（SYS_GET_MEM_INFO 用）
