@@ -1300,7 +1300,7 @@ fn cmd_http(args: &str) {
 ///   gui fillcircle 160 160 30 0 180 255
 ///   gui text 20 20 255 255 255 0 0 0 Hello
 ///   gui meminfo
-///   gui hud on|off
+///   gui hud on|off [interval]
 fn cmd_gui(args: &str) {
     let (sub, rest) = split_command(args);
     let mut gui = gui_client::GuiClient::new();
@@ -1366,22 +1366,33 @@ fn cmd_gui(args: &str) {
             let _ = gui.present();
         }
         "hud" => {
-            match rest.trim() {
-                "on" => {
-                    if gui.hud(true).is_err() {
+            let mut parts = rest.split_whitespace();
+            match parts.next() {
+                Some("on") => {
+                    if let Some(interval) = parts.next() {
+                        if parts.next().is_some() {
+                            return print_gui_usage();
+                        }
+                        let Some(interval) = parse_u32_arg(Some(interval)) else { return print_gui_usage(); };
+                        if gui.hud_with_interval(true, interval).is_err() {
+                            syscall::write_str("Error: gui hud on failed\n");
+                            return;
+                        }
+                    } else if gui.hud(true).is_err() {
                         syscall::write_str("Error: gui hud on failed\n");
                         return;
                     }
                 }
-                "off" => {
+                Some("off") => {
+                    if parts.next().is_some() {
+                        return print_gui_usage();
+                    }
                     if gui.hud(false).is_err() {
                         syscall::write_str("Error: gui hud off failed\n");
                         return;
                     }
                 }
-                _ => {
-                    return print_gui_usage();
-                }
+                _ => return print_gui_usage(),
             }
             let _ = gui.present();
         }
@@ -1464,7 +1475,7 @@ fn print_gui_usage() {
     syscall::write_str("Usage:\n");
     syscall::write_str("  gui demo\n");
     syscall::write_str("  gui meminfo\n");
-    syscall::write_str("  gui hud on|off\n");
+    syscall::write_str("  gui hud on|off [interval]\n");
     syscall::write_str("  gui rect x y w h r g b\n");
     syscall::write_str("  gui circle cx cy r red green blue\n");
     syscall::write_str("  gui fillcircle cx cy r red green blue\n");

@@ -34,7 +34,7 @@ const OPCODE_HUD: u32 = 7;
 const IPC_BUF_SIZE: usize = 2048;
 const CURSOR_W: u32 = 8;
 const CURSOR_H: u32 = 8;
-const HUD_TICK_INTERVAL: u32 = 30;
+const HUD_TICK_INTERVAL_DEFAULT: u32 = 30;
 const HUD_X: u32 = 8;
 const HUD_Y: u32 = 8;
 const HUD_W: u32 = 360;
@@ -84,6 +84,7 @@ fn gui_loop() -> ! {
     };
     let mut hud_enabled = false;
     let mut hud_tick: u32 = 0;
+    let mut hud_tick_interval: u32 = HUD_TICK_INTERVAL_DEFAULT;
 
     loop {
         let n = syscall::ipc_recv(&mut sender, &mut buf, 16);
@@ -190,8 +191,13 @@ fn gui_loop() -> ! {
                     }
                 }
                 OPCODE_HUD => {
-                    if payload.len() == 1 {
+                    if payload.len() == 1 || payload.len() == 5 {
                         hud_enabled = payload[0] != 0;
+                        if payload.len() == 5 {
+                            // 更新間隔（tick）は 0 を避けるため最低 1 に丸める
+                            let interval = read_u32(payload, 1).unwrap_or(HUD_TICK_INTERVAL_DEFAULT);
+                            hud_tick_interval = if interval == 0 { 1 } else { interval };
+                        }
                         hud_tick = 0;
                         if hud_enabled {
                             let _ = draw_hud(&mut state);
@@ -231,7 +237,7 @@ fn gui_loop() -> ! {
 
         if hud_enabled {
             hud_tick = hud_tick.wrapping_add(1);
-            if hud_tick >= HUD_TICK_INTERVAL {
+            if hud_tick >= hud_tick_interval {
                 hud_tick = 0;
                 let _ = draw_hud(&mut state);
                 if present(&state).is_ok() && cursor.visible {

@@ -101,6 +101,15 @@ impl GuiClient {
         if status < 0 { Err(()) } else { Ok(()) }
     }
 
+    /// HUD 表示の ON/OFF（更新間隔つき）
+    pub fn hud_with_interval(&mut self, enable: bool, interval: u32) -> Result<(), ()> {
+        let mut payload = [0u8; 5];
+        payload[0] = enable as u8;
+        payload[1..5].copy_from_slice(&interval.to_le_bytes());
+        let status = self.request(OPCODE_HUD, &payload)?;
+        if status < 0 { Err(()) } else { Ok(()) }
+    }
+
     /// GUI サービスに IPC 送信してレスポンスを受け取る
     fn request(&mut self, opcode: u32, payload: &[u8]) -> Result<i32, ()> {
         let gui_id = self.ensure_gui_id()?;
