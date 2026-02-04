@@ -71,6 +71,50 @@ if ! grep -q "user>" "$LOG_FILE" 2>/dev/null; then
     exit 1
 fi
 
+echo "Sending user shell mkdir command..."
+
+# mkdir TESTDIR
+for c in m k d i r spc t e s t d i r ret; do
+    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    sleep 0.15
+done
+
+echo "Waiting for mkdir output..."
+for i in {1..10}; do
+    if grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+    echo -e "${RED}ERROR: mkdir output not found${NC}"
+    cat "$LOG_FILE"
+    exit 1
+fi
+
+echo "Sending user shell rmdir command..."
+
+# rmdir TESTDIR
+for c in r m d i r spc t e s t d i r ret; do
+    echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    sleep 0.15
+done
+
+echo "Waiting for rmdir output..."
+for i in {1..10}; do
+    if grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+        break
+    fi
+    sleep 1
+done
+
+if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+    echo -e "${RED}ERROR: rmdir output not found${NC}"
+    cat "$LOG_FILE"
+    exit 1
+fi
+
 echo "Sending user shell ls command..."
 
 # user シェルで ls を実行

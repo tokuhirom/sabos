@@ -15,6 +15,7 @@ const FAT16_EOC_MIN: u16 = 0xFFF8;
 
 /// ディレクトリエントリの属性
 const ATTR_LFN: u8 = 0x0F;
+const ATTR_DIRECTORY: u8 = 0x10;
 
 /// BPB (BIOS Parameter Block)
 #[derive(Debug)]
@@ -151,6 +152,133 @@ impl Fat16 {
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
         let entry = self.find_file(path)?;
         self.read_file_data(&entry)
+    }
+
+    /// ディレクトリを作成する（ルートのみ対応）
+    pub fn create_dir(&self, name: &str) -> Result<(), &'static str> {
+        let upper = name.trim().trim_start_matches('/').to_ascii_uppercase();
+        if upper.is_empty() {
+            return Err("directory name is empty");
+        }
+        if upper.contains('/') {
+            return Err("only root dir supported");
+        }
+        if upper.contains('.') {
+            return Err("invalid directory name");
+        }
+
+        // 既存エントリがあればエラー
+        let entries = self.list_dir("/")?;
+        if entries.iter().any(|e| e.name.to_ascii_uppercase() == upper) {
+            return Err("already exists");
+        }
+
+        let total_entries = self.bpb.root_entry_count as usize;
+        let bytes_per_sector = self.bpb.bytes_per_sector as usize;
+        let mut sector = self.root_dir_start_sector;
+
+        let mut read_entries = 0usize;
+        while read_entries < total_entries {
+            let mut buf = [0u8; SECTOR_SIZE];
+            block_read(sector as u64, &mut buf)?;
+
+            let entries_in_sector = bytes_per_sector / 32;
+            for i in 0..entries_in_sector {
+                if read_entries >= total_entries {
+                    break;
+                }
+
+                let offset = i * 32;
+                let first = buf[offset];
+                if first == 0x00 || first == 0xE5 {
+                    let dir_cluster = self.alloc_cluster()?;
+                    if let Err(e) = self.init_dir_cluster(dir_cluster, 0) {
+                        let _ = self.free_cluster_chain(dir_cluster);
+                        return Err(e);
+                    }
+
+                    let name_bytes = format_8_3_name(&upper)?;
+                    self.write_dir_entry(&mut buf, offset, &name_bytes, ATTR_DIRECTORY, dir_cluster, 0);
+                    block_write(sector as u64, &buf)?;
+                    return Ok(());
+                }
+
+                read_entries += 1;
+            }
+
+            sector += 1;
+        }
+
+        Err("root directory full")
+    }
+
+    /// ディレクトリを削除する（ルートのみ対応）
+    pub fn remove_dir(&self, name: &str) -> Result<(), &'static str> {
+        let upper = name.trim().trim_start_matches('/').to_ascii_uppercase();
+        if upper.is_empty() {
+            return Err("directory name is empty");
+        }
+        if upper.contains('/') {
+            return Err("only root dir supported");
+        }
+
+        let total_entries = self.bpb.root_entry_count as usize;
+        let bytes_per_sector = self.bpb.bytes_per_sector as usize;
+        let mut sector = self.root_dir_start_sector;
+
+        let mut read_entries = 0usize;
+        while read_entries < total_entries {
+            let mut buf = [0u8; SECTOR_SIZE];
+            block_read(sector as u64, &mut buf)?;
+
+            let entries_in_sector = bytes_per_sector / 32;
+            for i in 0..entries_in_sector {
+                if read_entries >= total_entries {
+                    break;
+                }
+
+                let offset = i * 32;
+                let first = buf[offset];
+                if first == 0x00 {
+                    return Err("directory not found");
+                }
+                if first == 0xE5 {
+                    read_entries += 1;
+                    continue;
+                }
+
+                let attr = buf[offset + 11];
+                if attr == ATTR_LFN {
+                    read_entries += 1;
+                    continue;
+                }
+
+                let entry_name = parse_8_3_name(&buf[offset..offset + 11]);
+                if entry_name.to_ascii_uppercase() == upper {
+                    if attr & ATTR_DIRECTORY == 0 {
+                        return Err("not a directory");
+                    }
+
+                    let first_cluster = u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
+                    if first_cluster >= 2 {
+                        if !self.is_dir_empty(first_cluster)? {
+                            return Err("directory not empty");
+                        }
+                        self.free_cluster_chain(first_cluster)?;
+                    }
+
+                    buf[offset] = 0xE5;
+                    block_write(sector as u64, &buf)?;
+                    return Ok(());
+                }
+
+                read_entries += 1;
+            }
+
+            sector += 1;
+        }
+
+        Err("directory not found")
     }
 
     /// ファイルを削除する
@@ -339,6 +467,79 @@ impl Fat16 {
         self.data_start_sector + (cluster as u32 - 2) * self.bpb.sectors_per_cluster as u32
     }
 
+    fn init_dir_cluster(&self, cluster: u16, parent_cluster: u16) -> Result<(), &'static str> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        buf.fill(0);
+
+        let name_dot = format_dir_name(".")?;
+        self.write_dir_entry(&mut buf, 0, &name_dot, ATTR_DIRECTORY, cluster, 0);
+        let name_dotdot = format_dir_name("..")?;
+        self.write_dir_entry(&mut buf, 32, &name_dotdot, ATTR_DIRECTORY, parent_cluster, 0);
+
+        let first_sector = self.cluster_to_sector(cluster);
+        block_write(first_sector as u64, &buf)?;
+
+        for i in 1..self.bpb.sectors_per_cluster {
+            let mut zero = [0u8; SECTOR_SIZE];
+            zero.fill(0);
+            block_write((first_sector + i as u32) as u64, &zero)?;
+        }
+
+        Ok(())
+    }
+
+    fn is_dir_empty(&self, cluster: u16) -> Result<bool, &'static str> {
+        let first_sector = self.cluster_to_sector(cluster);
+        for i in 0..self.bpb.sectors_per_cluster {
+            let mut buf = [0u8; SECTOR_SIZE];
+            block_read((first_sector + i as u32) as u64, &mut buf)?;
+            let entries_in_sector = SECTOR_SIZE / 32;
+            for e in 0..entries_in_sector {
+                let offset = e * 32;
+                let first = buf[offset];
+                if first == 0x00 {
+                    return Ok(true);
+                }
+                if first == 0xE5 {
+                    continue;
+                }
+                let attr = buf[offset + 11];
+                if attr == ATTR_LFN {
+                    continue;
+                }
+                let name = parse_8_3_name(&buf[offset..offset + 11]);
+                if name != "." && name != ".." {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn write_dir_entry(
+        &self,
+        buf: &mut [u8; SECTOR_SIZE],
+        offset: usize,
+        name_bytes: &[u8; 11],
+        attr: u8,
+        first_cluster: u16,
+        size: u32,
+    ) {
+        buf[offset..offset + 11].copy_from_slice(name_bytes);
+        buf[offset + 11] = attr;
+        for j in 12..26 {
+            buf[offset + j] = 0;
+        }
+        let cluster_bytes = first_cluster.to_le_bytes();
+        buf[offset + 26] = cluster_bytes[0];
+        buf[offset + 27] = cluster_bytes[1];
+        let size_bytes = size.to_le_bytes();
+        buf[offset + 28] = size_bytes[0];
+        buf[offset + 29] = size_bytes[1];
+        buf[offset + 30] = size_bytes[2];
+        buf[offset + 31] = size_bytes[3];
+    }
+
     fn read_fat_entry(&self, cluster: u16) -> Result<u16, &'static str> {
         let fat_offset = cluster as u32 * 2;
         let sector = self.fat_start_sector + (fat_offset / SECTOR_SIZE as u32);
@@ -426,6 +627,21 @@ fn format_8_3_name(name: &str) -> Result<[u8; 11], &'static str> {
         out[8 + i] = b.to_ascii_uppercase();
     }
     Ok(out)
+}
+
+fn format_dir_name(name: &str) -> Result<[u8; 11], &'static str> {
+    if name == "." {
+        let mut out = [b' '; 11];
+        out[0] = b'.';
+        return Ok(out);
+    }
+    if name == ".." {
+        let mut out = [b' '; 11];
+        out[0] = b'.';
+        out[1] = b'.';
+        return Ok(out);
+    }
+    format_8_3_name(name)
 }
 
 fn block_read(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {

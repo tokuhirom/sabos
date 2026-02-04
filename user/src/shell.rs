@@ -133,6 +133,8 @@ fn execute_command(line: &[u8]) {
         "cat" => cmd_cat(args),
         "write" => cmd_write(args),
         "rm" => cmd_rm(args),
+        "mkdir" => cmd_mkdir(args),
+        "rmdir" => cmd_rmdir(args),
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
         "ip" => cmd_ip(),
@@ -180,6 +182,8 @@ fn cmd_help() {
     syscall::write_str("  cat <file>        - Display file contents\n");
     syscall::write_str("  write <file> <text> - Create/overwrite file\n");
     syscall::write_str("  rm <file>         - Delete file\n");
+    syscall::write_str("  mkdir <dir>       - Create directory (root only)\n");
+    syscall::write_str("  rmdir <dir>       - Remove empty directory (root only)\n");
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
     syscall::write_str("  ip                - Show network information\n");
@@ -327,6 +331,54 @@ fn cmd_rm(args: &str) {
     }
 
     syscall::write_str("File deleted successfully\n");
+}
+
+/// mkdir コマンド: ディレクトリを作成
+fn cmd_mkdir(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        syscall::write_str("Usage: mkdir <dirname>\n");
+        return;
+    }
+
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
+            return;
+        }
+    };
+
+    if fs.create_dir(name).is_err() {
+        syscall::write_str("Error: Failed to create directory\n");
+        return;
+    }
+
+    syscall::write_str("Directory created successfully\n");
+}
+
+/// rmdir コマンド: 空のディレクトリを削除
+fn cmd_rmdir(args: &str) {
+    let name = args.trim();
+    if name.is_empty() {
+        syscall::write_str("Usage: rmdir <dirname>\n");
+        return;
+    }
+
+    let fs = match Fat16::new() {
+        Ok(f) => f,
+        Err(_) => {
+            syscall::write_str("Error: FAT16 not available\n");
+            return;
+        }
+    };
+
+    if fs.remove_dir(name).is_err() {
+        syscall::write_str("Error: Failed to remove directory\n");
+        return;
+    }
+
+    syscall::write_str("Directory removed successfully\n");
 }
 
 // =================================================================
