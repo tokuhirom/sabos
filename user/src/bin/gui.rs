@@ -122,7 +122,7 @@ fn gui_loop() -> ! {
                     if present(&state).is_err() {
                         status = -99;
                     } else if cursor.visible {
-                        let _ = draw_cursor(&state, cursor.x, cursor.y);
+                        let _ = draw_cursor(&state, cursor.x, cursor.y, 0);
                     }
                 }
                 OPCODE_CIRCLE => {
@@ -469,7 +469,7 @@ fn update_cursor(state: &GuiState, cursor: &mut CursorState, mouse: &syscall::Mo
 
     let x = mouse.x;
     let y = mouse.y;
-    draw_cursor(state, x, y)?;
+    draw_cursor(state, x, y, mouse.buttons)?;
     cursor.x = x;
     cursor.y = y;
     cursor.visible = true;
@@ -508,7 +508,7 @@ fn restore_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
     Ok(())
 }
 
-fn draw_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
+fn draw_cursor(state: &GuiState, x: i32, y: i32, buttons: u8) -> Result<(), ()> {
     if x < 0 || y < 0 {
         return Ok(());
     }
@@ -518,6 +518,23 @@ fn draw_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
         return Ok(());
     }
 
+    let mut r = 255;
+    let mut g = 255;
+    let mut b = 255;
+    if buttons & 0x01 != 0 {
+        r = 255;
+        g = 64;
+        b = 64;
+    } else if buttons & 0x02 != 0 {
+        r = 64;
+        g = 255;
+        b = 64;
+    } else if buttons & 0x04 != 0 {
+        r = 64;
+        g = 160;
+        b = 255;
+    }
+
     for dy in 0..CURSOR_H {
         for dx in 0..CURSOR_W {
             let px = x0 + dx;
@@ -525,9 +542,13 @@ fn draw_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
             if px >= state.width || py >= state.height {
                 continue;
             }
-            let on = dx == 0 || dy == 0 || dx == dy;
+            let on = if buttons == 0 {
+                dx == 0 || dy == 0 || dx == dy
+            } else {
+                true
+            };
             if on {
-                if syscall::draw_pixel(px, py, 255, 255, 255) < 0 {
+                if syscall::draw_pixel(px, py, r, g, b) < 0 {
                     return Err(());
                 }
             }
