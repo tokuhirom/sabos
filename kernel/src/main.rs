@@ -14,6 +14,7 @@ mod handle;
 mod interrupts;
 mod ipc;
 mod memory;
+mod mouse;
 mod paging;
 mod panic;
 mod procfs;
@@ -127,6 +128,14 @@ fn main() -> Status {
     // これ以降は kprint!/kprintln! マクロでどこからでも画面に出力できる。
     // 割り込みハンドラ（キーボード）からも安全に書ける。
     framebuffer::init_global_writer(fb_info);
+
+    // --- PS/2 マウスの初期化 ---
+    // IRQ12 を有効化し、マウスからのパケット受信を開始する。
+    if mouse::init() {
+        kprintln!("Mouse initialized.");
+    } else {
+        kprintln!("Mouse not available.");
+    }
 
     // タイトルを黄色で表示
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));

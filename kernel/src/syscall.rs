@@ -69,6 +69,7 @@ pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — �
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報取得
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報取得
+pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -270,6 +271,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_GET_NET_INFO => sys_get_net_info(arg1, arg2),
         SYS_PCI_CONFIG_READ => sys_pci_config_read(arg1, arg2, arg3, arg4),
         SYS_GET_FB_INFO => sys_get_fb_info(arg1, arg2),
+        SYS_MOUSE_READ => sys_mouse_read(arg1, arg2),
         // プロセス管理
         SYS_EXEC => sys_exec(arg1, arg2),
         SYS_SPAWN => sys_spawn(arg1, arg2),
@@ -420,6 +422,40 @@ fn sys_get_fb_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     };
     buf[..info_size].copy_from_slice(bytes);
     Ok(info_size as u64)
+}
+
+/// SYS_MOUSE_READ: マウス状態を取得する
+///
+/// 引数:
+///   arg1 — 書き込み先バッファ（ユーザー空間）
+///   arg2 — バッファ長
+///
+/// 戻り値:
+///   0（更新なし）
+///   sizeof(MouseState)（更新あり）
+///   負の値（エラー）
+fn sys_mouse_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let state = match crate::mouse::read_state() {
+        Some(s) => s,
+        None => return Ok(0),
+    };
+
+    let size = core::mem::size_of::<crate::mouse::MouseState>();
+    if buf.len() < size {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let src = unsafe {
+        core::slice::from_raw_parts(
+            (&state as *const crate::mouse::MouseState) as *const u8,
+            size,
+        )
+    };
+    buf[..size].copy_from_slice(src);
+    Ok(size as u64)
 }
 
 /// SYS_DRAW_PIXEL: 1 ピクセルを描画する

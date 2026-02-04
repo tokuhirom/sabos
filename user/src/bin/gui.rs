@@ -26,11 +26,19 @@ const OPCODE_CIRCLE: u32 = 5;
 const OPCODE_TEXT: u32 = 6;
 
 const IPC_BUF_SIZE: usize = 2048;
+const CURSOR_W: u32 = 8;
+const CURSOR_H: u32 = 8;
 
 struct GuiState {
     width: u32,
     height: u32,
     buf: Vec<u8>,
+}
+
+struct CursorState {
+    x: i32,
+    y: i32,
+    visible: bool,
 }
 
 #[unsafe(no_mangle)]
@@ -48,99 +56,107 @@ fn gui_loop() -> ! {
 
     let mut buf = [0u8; IPC_BUF_SIZE];
     let mut sender: u64 = 0;
+    let mut cursor = CursorState {
+        x: 0,
+        y: 0,
+        visible: false,
+    };
 
     loop {
-        let n = syscall::ipc_recv(&mut sender, &mut buf, 0);
-        if n < 0 {
-            continue;
-        }
-        let n = n as usize;
-        if n < 8 {
-            continue;
-        }
+        let n = syscall::ipc_recv(&mut sender, &mut buf, 16);
+        if n >= 0 {
+            let n = n as usize;
+            if n < 8 {
+                continue;
+            }
 
-        let opcode = read_u32(&buf, 0).unwrap_or(0);
-        let len = read_u32(&buf, 4).unwrap_or(0) as usize;
-        if 8 + len > n {
-            continue;
-        }
-        let payload = &buf[8..8 + len];
+            let opcode = read_u32(&buf, 0).unwrap_or(0);
+            let len = read_u32(&buf, 4).unwrap_or(0) as usize;
+            if 8 + len > n {
+                continue;
+            }
+            let payload = &buf[8..8 + len];
 
-        let mut status: i32 = 0;
-        match opcode {
-            OPCODE_CLEAR => {
-                if payload.len() == 3 {
-                    clear(&mut state, payload[0], payload[1], payload[2]);
-                } else {
-                    status = -10;
-                }
-            }
-            OPCODE_RECT => {
-                if payload.len() == 19 {
-                    let x = read_u32(payload, 0).unwrap_or(0);
-                    let y = read_u32(payload, 4).unwrap_or(0);
-                    let w = read_u32(payload, 8).unwrap_or(0);
-                    let h = read_u32(payload, 12).unwrap_or(0);
-                    let r = payload[16];
-                    let g = payload[17];
-                    let b = payload[18];
-                    if draw_rect(&mut state, x, y, w, h, r, g, b).is_err() {
+            let mut status: i32 = 0;
+            match opcode {
+                OPCODE_CLEAR => {
+                    if payload.len() == 3 {
+                        clear(&mut state, payload[0], payload[1], payload[2]);
+                    } else {
                         status = -10;
                     }
-                } else {
-                    status = -10;
                 }
-            }
-            OPCODE_LINE => {
-                if payload.len() == 19 {
-                    let x0 = read_u32(payload, 0).unwrap_or(0);
-                    let y0 = read_u32(payload, 4).unwrap_or(0);
-                    let x1 = read_u32(payload, 8).unwrap_or(0);
-                    let y1 = read_u32(payload, 12).unwrap_or(0);
-                    let r = payload[16];
-                    let g = payload[17];
-                    let b = payload[18];
-                    if draw_line(&mut state, x0, y0, x1, y1, r, g, b).is_err() {
+                OPCODE_RECT => {
+                    if payload.len() == 19 {
+                        let x = read_u32(payload, 0).unwrap_or(0);
+                        let y = read_u32(payload, 4).unwrap_or(0);
+                        let w = read_u32(payload, 8).unwrap_or(0);
+                        let h = read_u32(payload, 12).unwrap_or(0);
+                        let r = payload[16];
+                        let g = payload[17];
+                        let b = payload[18];
+                        if draw_rect(&mut state, x, y, w, h, r, g, b).is_err() {
+                            status = -10;
+                        }
+                    } else {
                         status = -10;
                     }
-                } else {
-                    status = -10;
                 }
-            }
-            OPCODE_PRESENT => {
-                if present(&state).is_err() {
-                    status = -99;
-                }
-            }
-            OPCODE_CIRCLE => {
-                if payload.len() == 17 {
-                    let cx = read_u32(payload, 0).unwrap_or(0);
-                    let cy = read_u32(payload, 4).unwrap_or(0);
-                    let r = read_u32(payload, 8).unwrap_or(0);
-                    let red = payload[12];
-                    let green = payload[13];
-                    let blue = payload[14];
-                    let filled = payload[15] != 0;
-                    let _ = payload[16]; // 予約（将来のアルファなど）
-                    if draw_circle(&mut state, cx, cy, r, red, green, blue, filled).is_err() {
+                OPCODE_LINE => {
+                    if payload.len() == 19 {
+                        let x0 = read_u32(payload, 0).unwrap_or(0);
+                        let y0 = read_u32(payload, 4).unwrap_or(0);
+                        let x1 = read_u32(payload, 8).unwrap_or(0);
+                        let y1 = read_u32(payload, 12).unwrap_or(0);
+                        let r = payload[16];
+                        let g = payload[17];
+                        let b = payload[18];
+                        if draw_line(&mut state, x0, y0, x1, y1, r, g, b).is_err() {
+                            status = -10;
+                        }
+                    } else {
                         status = -10;
                     }
-                } else {
-                    status = -10;
                 }
-            }
-            OPCODE_TEXT => {
-                if payload.len() >= 18 {
-                    let x = read_u32(payload, 0).unwrap_or(0);
-                    let y = read_u32(payload, 4).unwrap_or(0);
-                    let fg = (payload[8], payload[9], payload[10]);
-                    let bg = (payload[11], payload[12], payload[13]);
-                    let len = read_u32(payload, 14).unwrap_or(0) as usize;
-                    if 18 + len == payload.len() {
-                        let text_bytes = &payload[18..18 + len];
-                        let text = core::str::from_utf8(text_bytes).map_err(|_| ()).ok();
-                        if let Some(text) = text {
-                            if draw_text(&mut state, x, y, fg, bg, text).is_err() {
+                OPCODE_PRESENT => {
+                    if present(&state).is_err() {
+                        status = -99;
+                    } else if cursor.visible {
+                        let _ = draw_cursor(&state, cursor.x, cursor.y);
+                    }
+                }
+                OPCODE_CIRCLE => {
+                    if payload.len() == 17 {
+                        let cx = read_u32(payload, 0).unwrap_or(0);
+                        let cy = read_u32(payload, 4).unwrap_or(0);
+                        let r = read_u32(payload, 8).unwrap_or(0);
+                        let red = payload[12];
+                        let green = payload[13];
+                        let blue = payload[14];
+                        let filled = payload[15] != 0;
+                        let _ = payload[16]; // 予約（将来のアルファなど）
+                        if draw_circle(&mut state, cx, cy, r, red, green, blue, filled).is_err() {
+                            status = -10;
+                        }
+                    } else {
+                        status = -10;
+                    }
+                }
+                OPCODE_TEXT => {
+                    if payload.len() >= 18 {
+                        let x = read_u32(payload, 0).unwrap_or(0);
+                        let y = read_u32(payload, 4).unwrap_or(0);
+                        let fg = (payload[8], payload[9], payload[10]);
+                        let bg = (payload[11], payload[12], payload[13]);
+                        let len = read_u32(payload, 14).unwrap_or(0) as usize;
+                        if 18 + len == payload.len() {
+                            let text_bytes = &payload[18..18 + len];
+                            let text = core::str::from_utf8(text_bytes).map_err(|_| ()).ok();
+                            if let Some(text) = text {
+                                if draw_text(&mut state, x, y, fg, bg, text).is_err() {
+                                    status = -10;
+                                }
+                            } else {
                                 status = -10;
                             }
                         } else {
@@ -149,20 +165,30 @@ fn gui_loop() -> ! {
                     } else {
                         status = -10;
                     }
-                } else {
+                }
+                _ => {
                     status = -10;
                 }
             }
-            _ => {
-                status = -10;
-            }
+
+            let mut resp = [0u8; IPC_BUF_SIZE];
+            resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+            resp[4..8].copy_from_slice(&status.to_le_bytes());
+            resp[8..12].copy_from_slice(&0u32.to_le_bytes());
+            let _ = syscall::ipc_send(sender, &resp[..12]);
         }
 
-        let mut resp = [0u8; IPC_BUF_SIZE];
-        resp[0..4].copy_from_slice(&opcode.to_le_bytes());
-        resp[4..8].copy_from_slice(&status.to_le_bytes());
-        resp[8..12].copy_from_slice(&0u32.to_le_bytes());
-        let _ = syscall::ipc_send(sender, &resp[..12]);
+        let mut mouse_state = syscall::MouseState {
+            x: 0,
+            y: 0,
+            dx: 0,
+            dy: 0,
+            buttons: 0,
+            _pad: [0; 3],
+        };
+        if syscall::mouse_read(&mut mouse_state) > 0 {
+            let _ = update_cursor(&mut state, &mut cursor, &mouse_state);
+        }
     }
 }
 
@@ -432,6 +458,80 @@ fn draw_char(
 fn present(state: &GuiState) -> Result<(), ()> {
     if syscall::draw_blit(0, 0, state.width, state.height, &state.buf) < 0 {
         return Err(());
+    }
+    Ok(())
+}
+
+fn update_cursor(state: &GuiState, cursor: &mut CursorState, mouse: &syscall::MouseState) -> Result<(), ()> {
+    if cursor.visible {
+        restore_cursor(state, cursor.x, cursor.y)?;
+    }
+
+    let x = mouse.x;
+    let y = mouse.y;
+    draw_cursor(state, x, y)?;
+    cursor.x = x;
+    cursor.y = y;
+    cursor.visible = true;
+    Ok(())
+}
+
+fn restore_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
+    if x < 0 || y < 0 {
+        return Ok(());
+    }
+    let x0 = x as u32;
+    let y0 = y as u32;
+    if x0 >= state.width || y0 >= state.height {
+        return Ok(());
+    }
+    let w = core::cmp::min(CURSOR_W, state.width - x0);
+    let h = core::cmp::min(CURSOR_H, state.height - y0);
+    if w == 0 || h == 0 {
+        return Ok(());
+    }
+
+    let mut tmp = Vec::with_capacity((w * h * 4) as usize);
+    tmp.resize((w * h * 4) as usize, 0);
+    for row in 0..h {
+        let src_y = y0 + row;
+        let src_offset = ((src_y * state.width + x0) * 4) as usize;
+        let dst_offset = (row * w * 4) as usize;
+        let len = (w * 4) as usize;
+        tmp[dst_offset..dst_offset + len]
+            .copy_from_slice(&state.buf[src_offset..src_offset + len]);
+    }
+
+    if syscall::draw_blit(x0, y0, w, h, &tmp) < 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn draw_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
+    if x < 0 || y < 0 {
+        return Ok(());
+    }
+    let x0 = x as u32;
+    let y0 = y as u32;
+    if x0 >= state.width || y0 >= state.height {
+        return Ok(());
+    }
+
+    for dy in 0..CURSOR_H {
+        for dx in 0..CURSOR_W {
+            let px = x0 + dx;
+            let py = y0 + dy;
+            if px >= state.width || py >= state.height {
+                continue;
+            }
+            let on = dx == 0 || dy == 0 || dx == dy;
+            if on {
+                if syscall::draw_pixel(px, py, 255, 255, 255) < 0 {
+                    return Err(());
+                }
+            }
+        }
     }
     Ok(())
 }

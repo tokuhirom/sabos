@@ -61,6 +61,7 @@ pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — �
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報
+pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -112,6 +113,18 @@ pub struct Handle {
     pub id: u64,
     /// 偽造防止用のトークン
     pub token: u64,
+}
+
+/// マウス状態（ユーザー空間向け）
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MouseState {
+    pub x: i32,
+    pub y: i32,
+    pub dx: i32,
+    pub dy: i32,
+    pub buttons: u8,
+    pub _pad: [u8; 3],
 }
 
 /// Handle の読み取り権限（ファイル内容を読む）
@@ -515,6 +528,21 @@ pub fn get_mem_info(buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall2(SYS_GET_MEM_INFO, buf_ptr, buf_len) as i64 }
+}
+
+/// マウス状態を取得
+///
+/// # 引数
+/// - `state`: 書き込み先
+///
+/// # 戻り値
+/// - 0（更新なし）
+/// - 正の値（書き込んだバイト数）
+/// - 負の値（エラー）
+pub fn mouse_read(state: &mut MouseState) -> SyscallResult {
+    let ptr = state as *mut MouseState as u64;
+    let len = core::mem::size_of::<MouseState>() as u64;
+    unsafe { syscall2(SYS_MOUSE_READ, ptr, len) as i64 }
 }
 
 /// タスク一覧を取得

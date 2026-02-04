@@ -82,6 +82,9 @@ pub enum InterruptIndex {
     /// IRQ 1: キーボード (PS/2)
     /// キーが押された/離されたときに発火する。
     Keyboard,
+    /// IRQ 12: マウス (PS/2)
+    /// マウスのパケット受信時に発火する。
+    Mouse = PIC_2_OFFSET + 4,
 }
 
 impl InterruptIndex {
@@ -133,6 +136,8 @@ lazy_static! {
 
         // IRQ 1: キーボード割り込み
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
+        // IRQ 12: マウス割り込み
+        idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
 
         // --- ソフトウェア割り込み: システムコール (int 0x80) ---
         //
@@ -173,11 +178,12 @@ pub fn init() {
         // ここで明示的にタイマー (IRQ 0) とキーボード (IRQ 1) をアンマスクする。
         //
         // マスクは各ビットが 1 = マスク（無効）、0 = アンマスク（有効）。
-        // マスタ PIC: bit 0 = IRQ 0 (タイマー), bit 1 = IRQ 1 (キーボード)
-        //   0b11111100 → IRQ 0, 1 のみ有効
-        // スレーブ PIC: すべてマスク（IRQ 8〜15 は今は使わない）
-        //   0b11111111 → すべて無効
-        pics.write_masks(0b11111100, 0b11111111);
+        // マスタ PIC: bit 0 = IRQ 0 (タイマー), bit 1 = IRQ 1 (キーボード),
+        //             bit 2 = IRQ 2 (スレーブ連携)
+        //   0b11111000 → IRQ 0, 1, 2 のみ有効
+        // スレーブ PIC: bit 4 = IRQ 12 (マウス)
+        //   0b11101111 → IRQ 12 のみ有効
+        pics.write_masks(0b11111000, 0b11101111);
     }
 }
 
@@ -358,5 +364,19 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+    }
+}
+
+/// IRQ 12: マウス割り込みハンドラ。
+/// PS/2 マウスからの 1 バイトを読み取り、パケット組み立てへ渡す。
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    use x86_64::instructions::port::Port;
+
+    let byte = unsafe { Port::<u8>::new(0x60).read() };
+    crate::mouse::handle_irq_byte(byte);
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
     }
 }

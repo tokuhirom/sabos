@@ -1232,6 +1232,15 @@ impl Shell {
             failed += 1;
         }
 
+        // 6.5. マウス初期化のテスト
+        if self.test_mouse() {
+            Self::print_pass("mouse");
+            passed += 1;
+        } else {
+            Self::print_fail("mouse");
+            failed += 1;
+        }
+
         // 7. ハンドル open/read のテスト
         if self.test_handle_open_read() {
             Self::print_pass("handle_open");
@@ -1626,6 +1635,12 @@ impl Shell {
             return false;
         }
         info.pixel_format != 0
+    }
+
+    /// マウス初期化のテスト
+    /// PS/2 マウスが初期化できているかだけを確認する。
+    fn test_mouse(&self) -> bool {
+        crate::mouse::is_initialized()
     }
 
     /// ハンドル open/read のテスト

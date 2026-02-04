@@ -32,6 +32,9 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `22` `SYS_GET_NET_INFO(buf_ptr, buf_len) -> n`
 - `23` `SYS_PCI_CONFIG_READ(bus, device, function, offset, size) -> value`
 - `24` `SYS_GET_FB_INFO(buf_ptr, buf_len) -> n`
+- `25` `SYS_MOUSE_READ(buf_ptr, buf_len) -> n`
+  - 更新があれば `MouseState` を書き込んでサイズを返す
+  - 更新がなければ `0`
 
 ## プロセス管理 (30-39)
 
