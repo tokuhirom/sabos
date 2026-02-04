@@ -70,6 +70,8 @@ pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
+pub const SYS_DRAW_PIXEL: u64 = 51;  // draw_pixel(x, y, rgb) — 1ピクセル描画
+pub const SYS_DRAW_RECT: u64 = 52;   // draw_rect(x, y, w_h, rgb) — 矩形描画（w/h は packed）
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
@@ -347,6 +349,43 @@ pub fn write_str(s: &str) -> SyscallResult {
 /// 画面をクリアする
 pub fn clear_screen() {
     unsafe { syscall0(SYS_CLEAR_SCREEN); }
+}
+
+// =================================================================
+// 描画（GUI 基盤）
+// =================================================================
+
+/// 1 ピクセル描画（RGB）
+///
+/// # 引数
+/// - `x`: X 座標
+/// - `y`: Y 座標
+/// - `r,g,b`: 色
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn draw_pixel(x: u32, y: u32, r: u8, g: u8, b: u8) -> SyscallResult {
+    let rgb = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+    unsafe { syscall3(SYS_DRAW_PIXEL, x as u64, y as u64, rgb as u64) as i64 }
+}
+
+/// 矩形塗りつぶし描画（RGB）
+///
+/// # 引数
+/// - `x`: X 座標
+/// - `y`: Y 座標
+/// - `w`: 幅
+/// - `h`: 高さ
+/// - `r,g,b`: 色
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn draw_rect(x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> SyscallResult {
+    let packed_wh = ((w as u64) << 32) | (h as u64);
+    let rgb = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+    unsafe { syscall4(SYS_DRAW_RECT, x as u64, y as u64, packed_wh, rgb as u64) as i64 }
 }
 
 // =================================================================

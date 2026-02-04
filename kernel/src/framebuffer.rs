@@ -53,6 +53,83 @@ pub fn clear_global_screen() {
     });
 }
 
+/// グローバルフレームバッファのサイズを取得する。
+/// GUI のレイアウト計算などで使う。
+pub fn screen_size() -> Option<(usize, usize)> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER
+            .lock()
+            .as_ref()
+            .map(|writer| (writer.width, writer.height))
+    })
+}
+
+/// 描画エラー。
+/// ユーザー空間からの引数ミスを検出するために使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawError {
+    /// フレームバッファが初期化されていない
+    NotInitialized,
+    /// 座標やサイズが画面外
+    OutOfBounds,
+    /// サイズが 0
+    InvalidSize,
+}
+
+/// 1 ピクセルを描画する（グローバル）。
+pub fn draw_pixel_global(x: usize, y: usize, r: u8, g: u8, b: u8) -> Result<(), DrawError> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = WRITER.lock();
+        let Some(writer) = guard.as_mut() else {
+            return Err(DrawError::NotInitialized);
+        };
+
+        if x >= writer.width || y >= writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+
+        writer.put_pixel(x, y, r, g, b);
+        Ok(())
+    })
+}
+
+/// 矩形を塗りつぶして描画する（グローバル）。
+pub fn draw_rect_global(
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), DrawError> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = WRITER.lock();
+        let Some(writer) = guard.as_mut() else {
+            return Err(DrawError::NotInitialized);
+        };
+
+        if w == 0 || h == 0 {
+            return Err(DrawError::InvalidSize);
+        }
+        if x >= writer.width || y >= writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+        let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
+        let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
+        if end_x > writer.width || end_y > writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+
+        for yy in y..end_y {
+            for xx in x..end_x {
+                writer.put_pixel(xx, yy, r, g, b);
+            }
+        }
+        Ok(())
+    })
+}
+
 /// kprint!/kprintln! マクロの内部実装。
 /// フレームバッファとシリアルの両方に出力する。
 /// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。

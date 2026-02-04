@@ -88,6 +88,8 @@ pub const SYS_NET_GET_MAC: u64 = 47;    // net_get_mac(buf_ptr, len) — MAC ア
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
+pub const SYS_DRAW_PIXEL: u64 = 51;  // draw_pixel(x, y, rgb) — 1ピクセル描画
+pub const SYS_DRAW_RECT: u64 = 52;   // draw_rect(x, y, w_h, rgb) — 矩形描画（w/h は packed）
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
@@ -278,6 +280,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
         // システム制御
+        SYS_DRAW_PIXEL => sys_draw_pixel(arg1, arg2, arg3),
+        SYS_DRAW_RECT => sys_draw_rect(arg1, arg2, arg3, arg4),
         SYS_HALT => sys_halt(),
         SYS_EXIT => {
             // exit()
@@ -359,6 +363,64 @@ fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 fn sys_clear_screen() -> Result<u64, SyscallError> {
     crate::framebuffer::clear_global_screen();
     Ok(0)
+}
+
+/// SYS_DRAW_PIXEL: 1 ピクセルを描画する
+///
+/// 引数:
+///   arg1 — x 座標
+///   arg2 — y 座標
+///   arg3 — RGB packed (0xRRGGBB)
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_draw_pixel(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let x = usize::try_from(arg1).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let rgb = arg3 as u32;
+    let r = ((rgb >> 16) & 0xFF) as u8;
+    let g = ((rgb >> 8) & 0xFF) as u8;
+    let b = (rgb & 0xFF) as u8;
+
+    match crate::framebuffer::draw_pixel_global(x, y, r, g, b) {
+        Ok(()) => Ok(0),
+        Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_DRAW_RECT: 矩形を描画する
+///
+/// 引数:
+///   arg1 — x 座標
+///   arg2 — y 座標
+///   arg3 — width/height packed（上位 32bit = w, 下位 32bit = h）
+///   arg4 — RGB packed (0xRRGGBB)
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_draw_rect(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let x = usize::try_from(arg1).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let w = (arg3 >> 32) as u32;
+    let h = (arg3 & 0xFFFF_FFFF) as u32;
+    let w = usize::try_from(w).map_err(|_| SyscallError::InvalidArgument)?;
+    let h = usize::try_from(h).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let rgb = arg4 as u32;
+    let r = ((rgb >> 16) & 0xFF) as u8;
+    let g = ((rgb >> 8) & 0xFF) as u8;
+    let b = (rgb & 0xFF) as u8;
+
+    match crate::framebuffer::draw_rect_global(x, y, w, h, r, g, b) {
+        Ok(()) => Ok(0),
+        Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
 }
 
 // =================================================================

@@ -61,6 +61,11 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 ## システム制御 (50-59)
 
 - `50` `SYS_HALT() -> never returns`
+- `51` `SYS_DRAW_PIXEL(x, y, rgb) -> 0`
+  - `rgb`: 0xRRGGBB
+- `52` `SYS_DRAW_RECT(x, y, w_h, rgb) -> 0`
+  - `w_h`: 上位 32bit = width, 下位 32bit = height
+  - `rgb`: 0xRRGGBB
 
 ## 終了 (60)
 
