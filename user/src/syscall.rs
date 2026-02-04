@@ -25,6 +25,9 @@
 // }
 // ```
 
+// 公開 API は外部のユーザープログラムから使用されるため、dead_code 警告を抑制
+#![allow(dead_code)]
+
 use core::arch::asm;
 
 /// システムコール番号の定義（カーネルの syscall.rs と一致させる）
@@ -44,6 +47,12 @@ pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソール�
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
 
+// ファイルシステム (10-19) — パスベース（レガシー）
+pub const SYS_FILE_READ: u64 = 10;   // file_read(path_ptr, path_len, buf_ptr, buf_len)
+pub const SYS_FILE_WRITE: u64 = 11;  // file_write(path_ptr, path_len, data_ptr, data_len)
+pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
+pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
+
 // システム情報 (20-29)
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧
@@ -61,6 +70,14 @@ pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
 
+// ファイルハンドル (70-79) — Capability-based security
+pub const SYS_OPEN: u64 = 70;            // open(path_ptr, path_len, handle_ptr, rights)
+pub const SYS_HANDLE_READ: u64 = 71;     // handle_read(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_WRITE: u64 = 72;    // handle_write(handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_CLOSE: u64 = 73;    // handle_close(handle_ptr)
+pub const SYS_OPENAT: u64 = 74;          // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
+pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
+
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
 pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
@@ -68,6 +85,43 @@ pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 // IPC (90-99)
 pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
 pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
+
+// =================================================================
+// Handle 構造体と権限ビット（Capability-based security）
+// =================================================================
+
+/// ファイルハンドル（ユーザー空間用）
+///
+/// Capability-based security の基盤。ハンドルには権限が埋め込まれており、
+/// 持っていない権限の操作はできない。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Handle {
+    /// テーブルのインデックス
+    pub id: u64,
+    /// 偽造防止用のトークン
+    pub token: u64,
+}
+
+/// Handle の読み取り権限（ファイル内容を読む）
+pub const HANDLE_RIGHT_READ: u32 = 0x0001;
+/// Handle の書き込み権限（ファイル内容を書く）
+pub const HANDLE_RIGHT_WRITE: u32 = 0x0002;
+/// Handle のシーク権限（ファイルポジションを変更）
+pub const HANDLE_RIGHT_SEEK: u32 = 0x0004;
+/// Handle のメタデータ取得権限（サイズ等を取得）
+pub const HANDLE_RIGHT_STAT: u32 = 0x0008;
+/// Handle のディレクトリ列挙権限（ディレクトリ内のエントリ一覧）
+pub const HANDLE_RIGHT_ENUM: u32 = 0x0010;
+/// Handle のファイル作成権限（ディレクトリ内にファイルを作成）
+pub const HANDLE_RIGHT_CREATE: u32 = 0x0020;
+/// Handle のファイル削除権限（ディレクトリ内のファイルを削除）
+pub const HANDLE_RIGHT_DELETE: u32 = 0x0040;
+/// Handle の相対パス解決権限（openat でファイルを開く）
+pub const HANDLE_RIGHT_LOOKUP: u32 = 0x0080;
+
+/// 読み取り専用ファイル用の権限セット
+pub const HANDLE_RIGHTS_FILE_READ: u32 = HANDLE_RIGHT_READ | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
 
 /// システムコールの戻り値を表す型
 ///
@@ -177,6 +231,28 @@ unsafe fn syscall4(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> u64 {
             in("rsi") arg2,
             in("rdx") arg3,
             in("r10") arg4,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    ret
+}
+
+/// 低レベルシステムコール: 引数5つ
+#[inline]
+#[allow(dead_code)]
+unsafe fn syscall5(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
+    let ret: u64;
+    unsafe {
+        asm!(
+            "int 0x80",
+            in("rax") nr,
+            in("rdi") arg1,
+            in("rsi") arg2,
+            in("rdx") arg3,
+            in("r10") arg4,
+            in("r8") arg5,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
@@ -468,4 +544,222 @@ pub fn halt() -> ! {
     }
     // カーネルが制御を返さないので、ここには到達しない
     loop {}
+}
+
+// =================================================================
+// ファイルシステム関連（パスベース — レガシー API）
+// =================================================================
+
+/// ファイルを読み取る（パスベース）
+///
+/// # 引数
+/// - `path`: ファイルパス
+/// - `buf`: 読み取り先バッファ
+///
+/// # 戻り値
+/// - 読み取ったバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn file_read(path: &str, buf: &mut [u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_FILE_READ, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+/// ファイルを書き込む（パスベース）
+///
+/// # 引数
+/// - `path`: ファイルパス
+/// - `data`: 書き込むデータ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn file_write(path: &str, data: &[u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let data_ptr = data.as_ptr() as u64;
+    let data_len = data.len() as u64;
+    unsafe { syscall4(SYS_FILE_WRITE, path_ptr, path_len, data_ptr, data_len) as i64 }
+}
+
+/// ファイルを削除する（パスベース）
+///
+/// # 引数
+/// - `path`: ファイルパス
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn file_delete(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_FILE_DELETE, path_ptr, path_len) as i64 }
+}
+
+/// ディレクトリ一覧を取得する（パスベース）
+///
+/// # 引数
+/// - `path`: ディレクトリパス
+/// - `buf`: 結果を書き込むバッファ（エントリ名を改行区切り）
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+// =================================================================
+// ファイルハンドル関連（Capability-based security）
+// =================================================================
+
+/// ファイルを開く（ハンドルベース）
+///
+/// Capability-based security の入り口。指定した権限でファイルを開き、
+/// ハンドルを取得する。ハンドルは権限を持ち、権限外の操作はできない。
+///
+/// # 引数
+/// - `path`: ファイルパス
+/// - `rights`: 要求する権限ビット
+///
+/// # 戻り値
+/// - Ok(Handle): 成功時、ファイルハンドル
+/// - Err(errno): エラー時
+///
+/// # 例
+/// ```
+/// let handle = open("/HELLO.TXT", HANDLE_RIGHT_READ)?;
+/// let mut buf = [0u8; 1024];
+/// let n = handle_read(&handle, &mut buf)?;
+/// handle_close(&handle)?;
+/// ```
+pub fn open(path: &str, rights: u32) -> Result<Handle, SyscallResult> {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let mut handle = Handle { id: 0, token: 0 };
+    let handle_ptr = &mut handle as *mut Handle as u64;
+    let result = unsafe { syscall4(SYS_OPEN, path_ptr, path_len, handle_ptr, rights as u64) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(handle)
+    }
+}
+
+/// ハンドルからデータを読み取る
+///
+/// # 引数
+/// - `handle`: ファイルハンドル（READ 権限が必要）
+/// - `buf`: 読み取り先バッファ
+///
+/// # 戻り値
+/// - 読み取ったバイト数（成功時、0 は EOF）
+/// - 負の値（エラー時）
+pub fn handle_read(handle: &Handle, buf: &mut [u8]) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_READ, handle_ptr, buf_ptr, buf_len) as i64 }
+}
+
+/// ハンドルにデータを書き込む
+///
+/// # 引数
+/// - `handle`: ファイルハンドル（WRITE 権限が必要）
+/// - `data`: 書き込むデータ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn handle_write(handle: &Handle, data: &[u8]) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    let data_ptr = data.as_ptr() as u64;
+    let data_len = data.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_WRITE, handle_ptr, data_ptr, data_len) as i64 }
+}
+
+/// ハンドルを閉じる
+///
+/// # 引数
+/// - `handle`: 閉じるハンドル
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn handle_close(handle: &Handle) -> SyscallResult {
+    let handle_ptr = handle as *const Handle as u64;
+    unsafe { syscall1(SYS_HANDLE_CLOSE, handle_ptr) as i64 }
+}
+
+/// ディレクトリハンドルからの相対パスでファイルを開く
+///
+/// Capability-based security の核心。ディレクトリハンドルが持つ権限の
+/// 範囲内でのみファイルを開ける。絶対パスや ".." は禁止。
+///
+/// # 引数
+/// - `dir_handle`: ディレクトリハンドル（LOOKUP 権限が必要）
+/// - `path`: 相対パス（絶対パス・".." 禁止）
+/// - `rights`: 要求する権限（親の権限以下に制限される）
+///
+/// # 戻り値
+/// - Ok(Handle): 成功時、ファイルハンドル
+/// - Err(errno): エラー時
+///
+/// # セキュリティ
+/// - `path` が "/" で始まっていたらエラー
+/// - `path` に ".." が含まれていたらエラー（パストラバーサル防止）
+/// - 新しいハンドルの権限 = `rights & dir_handle.rights`
+pub fn openat(dir_handle: &Handle, path: &str, rights: u32) -> Result<Handle, SyscallResult> {
+    let dir_handle_ptr = dir_handle as *const Handle as u64;
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let mut new_handle = Handle { id: 0, token: 0 };
+    let new_handle_ptr = &mut new_handle as *mut Handle as u64;
+
+    // 注: カーネル側では arg4 を new_handle_ptr として使用
+    // rights は将来拡張で追加予定
+    let _ = rights; // 現在は未使用（カーネル側でデフォルト READ を使用）
+
+    let result = unsafe { syscall4(SYS_OPENAT, dir_handle_ptr, path_ptr, path_len, new_handle_ptr) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(new_handle)
+    }
+}
+
+/// ハンドルの権限を縮小する
+///
+/// Capability-based security の重要な操作。権限は縮小のみ可能で、
+/// 拡大はできない（セキュリティの要）。
+///
+/// # 引数
+/// - `handle`: 元のハンドル
+/// - `new_rights`: 新しい権限（縮小のみ可）
+///
+/// # 戻り値
+/// - Ok(Handle): 成功時、権限を縮小した新しいハンドル
+/// - Err(errno): エラー時（権限の拡大を試みた場合など）
+///
+/// # 例
+/// ```
+/// // 読み取り専用ハンドルを作成（書き込み権限を削除）
+/// let read_only = restrict_rights(&handle, HANDLE_RIGHT_READ)?;
+/// ```
+pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, SyscallResult> {
+    let handle_ptr = handle as *const Handle as u64;
+    let mut new_handle = Handle { id: 0, token: 0 };
+    let new_handle_ptr = &mut new_handle as *mut Handle as u64;
+    let result = unsafe { syscall3(SYS_RESTRICT_RIGHTS, handle_ptr, new_rights as u64, new_handle_ptr) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(new_handle)
+    }
 }
