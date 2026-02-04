@@ -1365,10 +1365,11 @@ impl Shell {
     }
 
     /// メモリアロケータのテスト
-    /// Box でヒープ確保→解放が正常に動作するかを確認
+    /// Box/Vec に加えて、断片化しやすいパターンで再利用できるかを確認
     fn test_memory_allocator(&self) -> bool {
         use alloc::boxed::Box;
         use alloc::vec;
+        use alloc::vec::Vec;
 
         // Box のアロケーション
         let boxed = Box::new(12345u64);
@@ -1387,6 +1388,40 @@ impl Shell {
         let big = vec![0u8; 4096];
         if big.len() != 4096 {
             return false;
+        }
+
+        // 断片化しやすい確保/解放のパターンを作り、再利用できるか確認する。
+        // サイズの異なる Vec を大量に確保し、間引いて解放→再確保する。
+        let mut blocks: Vec<Vec<u8>> = Vec::new();
+        for i in 0..256 {
+            let size = 64 + (i % 8) * 128; // 64,192,320... の繰り返し
+            blocks.push(vec![0xAAu8; size]);
+        }
+
+        // 交互に解放して断片化を作る
+        for i in (0..blocks.len()).step_by(2) {
+            blocks[i].clear();
+            blocks[i].shrink_to_fit();
+        }
+
+        // 再確保（別サイズ）で再利用できるかを確認
+        for i in (0..blocks.len()).step_by(2) {
+            let size = 512 + (i % 4) * 256;
+            blocks[i] = vec![0x55u8; size];
+        }
+
+        // 中身の整合性チェック
+        for (i, b) in blocks.iter().enumerate() {
+            if b.is_empty() {
+                return false;
+            }
+            if i % 2 == 0 {
+                if b[0] != 0x55 {
+                    return false;
+                }
+            } else if b[0] != 0xAA {
+                return false;
+            }
         }
 
         // drop されてメモリが解放されることを期待（明示的なチェックは難しいので省略）
