@@ -67,6 +67,7 @@ pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — �
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧取得
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報取得
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
+pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報取得
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -249,6 +250,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
         SYS_GET_NET_INFO => sys_get_net_info(arg1, arg2),
         SYS_PCI_CONFIG_READ => sys_pci_config_read(arg1, arg2, arg3, arg4),
+        SYS_GET_FB_INFO => sys_get_fb_info(arg1, arg2),
         // プロセス管理
         SYS_EXEC => sys_exec(arg1, arg2),
         SYS_SPAWN => sys_spawn(arg1, arg2),
@@ -363,6 +365,39 @@ fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 fn sys_clear_screen() -> Result<u64, SyscallError> {
     crate::framebuffer::clear_global_screen();
     Ok(0)
+}
+
+/// SYS_GET_FB_INFO: フレームバッファ情報を取得する
+///
+/// 引数:
+///   arg1 — 書き込み先バッファのポインタ（ユーザー空間）
+///   arg2 — バッファ長
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+fn sys_get_fb_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_len = arg2 as usize;
+    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let Some(info) = crate::framebuffer::screen_info() else {
+        return Err(SyscallError::Other);
+    };
+
+    let info_size = core::mem::size_of::<crate::framebuffer::FramebufferInfoSmall>();
+    if buf_len < info_size {
+        return Err(SyscallError::BufferOverflow);
+    }
+
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &info as *const _ as *const u8,
+            info_size,
+        )
+    };
+    buf[..info_size].copy_from_slice(bytes);
+    Ok(info_size as u64)
 }
 
 /// SYS_DRAW_PIXEL: 1 ピクセルを描画する

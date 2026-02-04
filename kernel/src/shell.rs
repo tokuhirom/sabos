@@ -1214,7 +1214,16 @@ impl Shell {
             failed += 1;
         }
 
-        // 6. ハンドル open/read のテスト
+        // 6. フレームバッファ情報のテスト
+        if self.test_framebuffer_info() {
+            Self::print_pass("framebuffer_info");
+            passed += 1;
+        } else {
+            Self::print_fail("framebuffer_info");
+            failed += 1;
+        }
+
+        // 7. ハンドル open/read のテスト
         if self.test_handle_open_read() {
             Self::print_pass("handle_open");
             passed += 1;
@@ -1223,7 +1232,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 7. スケジューラのテスト
+        // 8. スケジューラのテスト
         if self.test_scheduler() {
             Self::print_pass("scheduler");
             passed += 1;
@@ -1232,7 +1241,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 8. ブロックデバイス syscalls のテスト
+        // 9. ブロックデバイス syscalls のテスト
         if self.test_block_syscall() {
             Self::print_pass("block_syscall");
             passed += 1;
@@ -1241,7 +1250,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 9. IPC のテスト
+        // 10. IPC のテスト
         if self.test_ipc() {
             Self::print_pass("ipc");
             passed += 1;
@@ -1250,7 +1259,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 10. 型安全 IPC のテスト
+        // 11. 型安全 IPC のテスト
         if self.test_ipc_typed() {
             Self::print_pass("ipc_typed");
             passed += 1;
@@ -1259,7 +1268,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 11. virtio-blk のテスト
+        // 12. virtio-blk のテスト
         if self.test_virtio_blk() {
             Self::print_pass("virtio_blk");
             passed += 1;
@@ -1268,7 +1277,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 12. FAT16 のテスト
+        // 13. FAT16 のテスト
         if self.test_fat16() {
             Self::print_pass("fat16");
             passed += 1;
@@ -1277,7 +1286,7 @@ impl Shell {
             failed += 1;
         }
 
-        // 13. ネットワーク (DNS) のテスト
+        // 14. ネットワーク (DNS) のテスト
         if self.netd_is_running() {
             Self::print_pass("network_dns");
             kprintln!("  (kernel DNS skipped: netd is active)");
@@ -1292,7 +1301,7 @@ impl Shell {
             }
         }
 
-        // 14. ユーザー空間 netd の DNS テスト
+        // 15. ユーザー空間 netd の DNS テスト
         if self.test_network_netd_dns() {
             Self::print_pass("network_netd_dns");
             passed += 1;
@@ -1499,6 +1508,23 @@ impl Shell {
         }
 
         true
+    }
+
+    /// フレームバッファ情報のテスト
+    fn test_framebuffer_info(&self) -> bool {
+        let Some(info) = crate::framebuffer::screen_info() else {
+            return false;
+        };
+        if info.width == 0 || info.height == 0 {
+            return false;
+        }
+        if info.stride < info.width {
+            return false;
+        }
+        if info.bytes_per_pixel != 4 {
+            return false;
+        }
+        info.pixel_format != 0
     }
 
     /// ハンドル open/read のテスト

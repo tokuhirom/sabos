@@ -60,6 +60,7 @@ pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — �
 pub const SYS_GET_TASK_LIST: u64 = 21;  // get_task_list(buf_ptr, buf_len) — タスク一覧
 pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — ネットワーク情報
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
+pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -528,6 +529,28 @@ pub fn get_net_info(buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall2(SYS_GET_NET_INFO, buf_ptr, buf_len) as i64 }
+}
+
+// =================================================================
+// フレームバッファ情報
+// =================================================================
+
+/// フレームバッファ情報（ユーザー空間向け）
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfo {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixel_format: u32,
+    pub bytes_per_pixel: u32,
+}
+
+/// フレームバッファ情報を取得
+pub fn get_fb_info(info: &mut FramebufferInfo) -> SyscallResult {
+    let ptr = info as *mut FramebufferInfo as u64;
+    let len = core::mem::size_of::<FramebufferInfo>() as u64;
+    unsafe { syscall2(SYS_GET_FB_INFO, ptr, len) as i64 }
 }
 
 /// PCI Configuration Space を読み取る

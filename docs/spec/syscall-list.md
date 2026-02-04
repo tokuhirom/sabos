@@ -31,6 +31,7 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `21` `SYS_GET_TASK_LIST(buf_ptr, buf_len) -> n`
 - `22` `SYS_GET_NET_INFO(buf_ptr, buf_len) -> n`
 - `23` `SYS_PCI_CONFIG_READ(bus, device, function, offset, size) -> value`
+- `24` `SYS_GET_FB_INFO(buf_ptr, buf_len) -> n`
 
 ## プロセス管理 (30-39)
 

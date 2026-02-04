@@ -64,6 +64,40 @@ pub fn screen_size() -> Option<(usize, usize)> {
     })
 }
 
+/// ユーザー空間に渡すためのフレームバッファ情報。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfoSmall {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixel_format: u32,
+    pub bytes_per_pixel: u32,
+}
+
+/// グローバルフレームバッファ情報を取得する。
+pub fn screen_info() -> Option<FramebufferInfoSmall> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        WRITER.lock().as_ref().map(|writer| FramebufferInfoSmall {
+            width: writer.width as u32,
+            height: writer.height as u32,
+            stride: writer.stride as u32,
+            pixel_format: pixel_format_to_u32(writer.pixel_format),
+            bytes_per_pixel: 4,
+        })
+    })
+}
+
+/// PixelFormat をユーザー空間向けの数値に変換する。
+fn pixel_format_to_u32(format: PixelFormat) -> u32 {
+    match format {
+        PixelFormat::Rgb => 1,
+        PixelFormat::Bgr => 2,
+        PixelFormat::Bitmask => 3,
+        PixelFormat::BltOnly => 4,
+    }
+}
+
 /// 描画エラー。
 /// ユーザー空間からの引数ミスを検出するために使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
