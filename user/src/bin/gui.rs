@@ -1,0 +1,251 @@
+// gui.rs — GUI サービス（user space）
+//
+// IPC で描画要求を受け取り、バックバッファに描画してから
+// draw_blit でフレームバッファへ転送する。
+
+#![no_std]
+#![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
+
+#[path = "../allocator_gui.rs"]
+mod allocator;
+#[path = "../syscall.rs"]
+mod syscall;
+
+use alloc::vec::Vec;
+use core::panic::PanicInfo;
+
+const OPCODE_CLEAR: u32 = 1;
+const OPCODE_RECT: u32 = 2;
+const OPCODE_LINE: u32 = 3;
+const OPCODE_PRESENT: u32 = 4;
+
+const IPC_BUF_SIZE: usize = 2048;
+
+struct GuiState {
+    width: u32,
+    height: u32,
+    buf: Vec<u8>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    gui_loop();
+}
+
+fn gui_loop() -> ! {
+    let mut state = match init_state() {
+        Ok(s) => s,
+        Err(_) => loop {
+            syscall::sleep(1000);
+        },
+    };
+
+    let mut buf = [0u8; IPC_BUF_SIZE];
+    let mut sender: u64 = 0;
+
+    loop {
+        let n = syscall::ipc_recv(&mut sender, &mut buf, 0);
+        if n < 0 {
+            continue;
+        }
+        let n = n as usize;
+        if n < 8 {
+            continue;
+        }
+
+        let opcode = read_u32(&buf, 0).unwrap_or(0);
+        let len = read_u32(&buf, 4).unwrap_or(0) as usize;
+        if 8 + len > n {
+            continue;
+        }
+        let payload = &buf[8..8 + len];
+
+        let mut status: i32 = 0;
+        match opcode {
+            OPCODE_CLEAR => {
+                if payload.len() == 3 {
+                    clear(&mut state, payload[0], payload[1], payload[2]);
+                } else {
+                    status = -10;
+                }
+            }
+            OPCODE_RECT => {
+                if payload.len() == 19 {
+                    let x = read_u32(payload, 0).unwrap_or(0);
+                    let y = read_u32(payload, 4).unwrap_or(0);
+                    let w = read_u32(payload, 8).unwrap_or(0);
+                    let h = read_u32(payload, 12).unwrap_or(0);
+                    let r = payload[16];
+                    let g = payload[17];
+                    let b = payload[18];
+                    if draw_rect(&mut state, x, y, w, h, r, g, b).is_err() {
+                        status = -10;
+                    }
+                } else {
+                    status = -10;
+                }
+            }
+            OPCODE_LINE => {
+                if payload.len() == 19 {
+                    let x0 = read_u32(payload, 0).unwrap_or(0);
+                    let y0 = read_u32(payload, 4).unwrap_or(0);
+                    let x1 = read_u32(payload, 8).unwrap_or(0);
+                    let y1 = read_u32(payload, 12).unwrap_or(0);
+                    let r = payload[16];
+                    let g = payload[17];
+                    let b = payload[18];
+                    if draw_line(&mut state, x0, y0, x1, y1, r, g, b).is_err() {
+                        status = -10;
+                    }
+                } else {
+                    status = -10;
+                }
+            }
+            OPCODE_PRESENT => {
+                if present(&state).is_err() {
+                    status = -99;
+                }
+            }
+            _ => {
+                status = -10;
+            }
+        }
+
+        let mut resp = [0u8; IPC_BUF_SIZE];
+        resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+        resp[4..8].copy_from_slice(&status.to_le_bytes());
+        resp[8..12].copy_from_slice(&0u32.to_le_bytes());
+        let _ = syscall::ipc_send(sender, &resp[..12]);
+    }
+}
+
+fn init_state() -> Result<GuiState, &'static str> {
+    let mut info = syscall::FramebufferInfo {
+        width: 0,
+        height: 0,
+        stride: 0,
+        pixel_format: 0,
+        bytes_per_pixel: 0,
+    };
+    if syscall::get_fb_info(&mut info) < 0 {
+        return Err("get_fb_info failed");
+    }
+
+    let width = info.width;
+    let height = info.height;
+    let pixel_count = width as usize * height as usize;
+    let mut buf = Vec::with_capacity(pixel_count * 4);
+    buf.resize(pixel_count * 4, 0);
+
+    Ok(GuiState { width, height, buf })
+}
+
+fn clear(state: &mut GuiState, r: u8, g: u8, b: u8) {
+    let mut i = 0;
+    while i + 3 < state.buf.len() {
+        state.buf[i] = r;
+        state.buf[i + 1] = g;
+        state.buf[i + 2] = b;
+        state.buf[i + 3] = 0;
+        i += 4;
+    }
+}
+
+fn draw_rect(state: &mut GuiState, x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> Result<(), ()> {
+    if w == 0 || h == 0 {
+        return Err(());
+    }
+    if x >= state.width || y >= state.height {
+        return Err(());
+    }
+    let end_x = x.checked_add(w).ok_or(())?;
+    let end_y = y.checked_add(h).ok_or(())?;
+    if end_x > state.width || end_y > state.height {
+        return Err(());
+    }
+
+    for yy in y..end_y {
+        for xx in x..end_x {
+            set_pixel(state, xx, yy, r, g, b)?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_line(state: &mut GuiState, x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g: u8, b: u8) -> Result<(), ()> {
+    if x0 >= state.width || y0 >= state.height || x1 >= state.width || y1 >= state.height {
+        return Err(());
+    }
+
+    let mut x0 = x0 as i32;
+    let mut y0 = y0 as i32;
+    let x1 = x1 as i32;
+    let y1 = y1 as i32;
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 {
+            set_pixel(state, x0 as u32, y0 as u32, r, g, b)?;
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = err * 2;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+
+    Ok(())
+}
+
+fn set_pixel(state: &mut GuiState, x: u32, y: u32, r: u8, g: u8, b: u8) -> Result<(), ()> {
+    if x >= state.width || y >= state.height {
+        return Err(());
+    }
+    let idx = (y as usize * state.width as usize + x as usize) * 4;
+    if idx + 3 >= state.buf.len() {
+        return Err(());
+    }
+    state.buf[idx] = r;
+    state.buf[idx + 1] = g;
+    state.buf[idx + 2] = b;
+    state.buf[idx + 3] = 0;
+    Ok(())
+}
+
+fn present(state: &GuiState) -> Result<(), ()> {
+    if syscall::draw_blit(0, 0, state.width, state.height, &state.buf) < 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
+    if offset + 4 > buf.len() {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        buf[offset],
+        buf[offset + 1],
+        buf[offset + 2],
+        buf[offset + 3],
+    ]))
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    syscall::exit();
+}

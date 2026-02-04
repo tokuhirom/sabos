@@ -35,6 +35,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
+use x86_64::registers::control::Cr3;
 
 /// システムコール番号の定義
 ///
@@ -130,6 +131,8 @@ pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, 
 global_asm!(
     ".global syscall_handler_asm",
     "syscall_handler_asm:",
+    // 割り込みを無効化（カーネル内の再入を防ぐ）
+    "cli",
 
     // --- 汎用レジスタの保存 ---
     // int 0x80 で CPU が自動保存するのは SS/RSP/RFLAGS/CS/RIP のみ。
@@ -177,6 +180,8 @@ global_asm!(
 
     // syscall_dispatch を呼び出す
     "call syscall_dispatch",
+    // syscall 内で割り込みを有効化しても、復帰前に無効化しておく
+    "cli",
 
     // スタックの調整を元に戻す
     "add rsp, 40",
@@ -1390,9 +1395,19 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
 
-    // ELF プロセスを作成
-    let (process, entry_point, user_stack_top) =
-        crate::usermode::create_elf_process(&elf_data).map_err(|_| SyscallError::Other)?;
+    // ELF プロセスを作成（カーネルのページテーブルで実行）
+    let (current_cr3, current_flags) = Cr3::read();
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+    let (process, entry_point, user_stack_top) = match crate::usermode::create_elf_process(&elf_data) {
+        Ok(result) => result,
+        Err(_) => {
+            unsafe { Cr3::write(current_cr3, current_flags); }
+            return Err(SyscallError::Other);
+        }
+    };
+    unsafe { Cr3::write(current_cr3, current_flags); }
 
     // Ring 3 で同期実行（完了するまでブロック）
     crate::usermode::run_elf_process(&process, entry_point, user_stack_top);
@@ -1421,7 +1436,6 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-
     // ファイル名を大文字に変換（FAT16 は大文字のみ）
     let path_upper: String = path.chars()
         .map(|c| c.to_ascii_uppercase())
@@ -1437,10 +1451,19 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
 
-    // スケジューラにユーザープロセスとして登録
-    let task_id = crate::scheduler::spawn_user(process_name, &elf_data)
-        .map_err(|_| SyscallError::Other)?;
-
+    // スケジューラにユーザープロセスとして登録（カーネルのページテーブルで実行）
+    let (current_cr3, current_flags) = Cr3::read();
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+    let task_id = match crate::scheduler::spawn_user(process_name, &elf_data) {
+        Ok(id) => id,
+        Err(_) => {
+            unsafe { Cr3::write(current_cr3, current_flags); }
+            return Err(SyscallError::Other);
+        }
+    };
+    unsafe { Cr3::write(current_cr3, current_flags); }
     Ok(task_id)
 }
 

@@ -44,11 +44,18 @@ unsafe impl Sync for Service {}
 
 /// 管理するサービスの一覧
 /// - netd: ネットワークサービス（再起動有効）
+/// - gui: GUI サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
-static SERVICES: [Service; 2] = [
+static SERVICES: [Service; 3] = [
     Service {
         name: "netd",
         path: "/NETD.ELF",
+        restart: true,
+        task_id: AtomicU64::new(0),
+    },
+    Service {
+        name: "gui",
+        path: "/GUI.ELF",
         restart: true,
         task_id: AtomicU64::new(0),
     },
@@ -84,6 +91,14 @@ fn start_services() {
         syscall::write_str("[init] Starting ");
         syscall::write_str(service.name);
         syscall::write_str("...\n");
+
+        if service.name == "gui" {
+            syscall::write_str("[init] gui path ptr=");
+            write_number(service.path.as_ptr() as u64);
+            syscall::write_str(" len=");
+            write_number(service.path.len() as u64);
+            syscall::write_str("\n");
+        }
 
         let result = syscall::spawn(service.path);
         if result < 0 {

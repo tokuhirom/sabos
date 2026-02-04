@@ -50,6 +50,7 @@ use fat16::Fat16;
 
 /// netd のタスクID（起動できた場合のみ設定）
 static mut NETD_TASK_ID: u64 = 0;
+static mut GUI_TASK_ID: u64 = 0;
 
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
@@ -81,6 +82,7 @@ fn run() -> ! {
     // init が netd を起動するので、ここでは netd の PID を取得するだけ
     // 将来的には init から netd の PID を受け取る仕組みにする
     find_netd();
+    find_gui();
 
     // カレントディレクトリはユーザー空間で管理する
     let cwd_handle = match open_root_dir() {
@@ -133,6 +135,14 @@ fn find_netd() {
     let netd_id = resolve_task_id_by_name("NETD.ELF").unwrap_or(0);
     unsafe {
         NETD_TASK_ID = netd_id;
+    }
+}
+
+/// gui の PID を探す
+fn find_gui() {
+    let gui_id = resolve_task_id_by_name("GUI.ELF").unwrap_or(0);
+    unsafe {
+        GUI_TASK_ID = gui_id;
     }
 }
 
@@ -213,6 +223,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "gui" => cmd_gui(args),
         "rect" => cmd_rect(args),
         "selftest" => cmd_selftest(),
         "halt" => cmd_halt(),
@@ -372,6 +383,7 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
@@ -1432,6 +1444,87 @@ fn cmd_http(args: &str) {
     let _ = netd_tcp_close();
 }
 
+/// gui コマンド: GUI サービスに描画要求を送る
+///
+/// 例:
+///   gui demo
+///   gui rect 10 10 80 40 255 0 0
+fn cmd_gui(args: &str) {
+    let (sub, rest) = split_command(args);
+    match sub {
+        "demo" => {
+            let _ = gui_request(GUI_OPCODE_CLEAR, &[0, 0, 32]);
+            let payload_rect = build_rect_payload(50, 40, 200, 120, 0, 200, 0);
+            let _ = gui_request(GUI_OPCODE_RECT, &payload_rect);
+            let payload_line = build_line_payload(10, 10, 300, 200, 255, 255, 0);
+            let _ = gui_request(GUI_OPCODE_LINE, &payload_line);
+            let _ = gui_request(GUI_OPCODE_PRESENT, &[]);
+        }
+        "rect" => {
+            let mut parts = rest.split_whitespace();
+            let Some(x) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(y) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(w) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(h) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(r) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(g) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(b) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            if r > 255 || g > 255 || b > 255 {
+                syscall::write_str("Error: r g b must be 0-255\n");
+                return;
+            }
+            let payload_rect = build_rect_payload(x, y, w, h, r as u8, g as u8, b as u8);
+            if gui_request(GUI_OPCODE_RECT, &payload_rect).is_err() {
+                syscall::write_str("Error: gui rect failed\n");
+                return;
+            }
+            let _ = gui_request(GUI_OPCODE_PRESENT, &[]);
+        }
+        _ => {
+            print_gui_usage();
+        }
+    }
+}
+
+fn print_gui_usage() {
+    syscall::write_str("Usage:\n");
+    syscall::write_str("  gui demo\n");
+    syscall::write_str("  gui rect x y w h r g b\n");
+}
+
+fn parse_u32_arg(s: Option<&str>) -> Option<u32> {
+    let s = s?;
+    let v = parse_u64(s)?;
+    if v > u32::MAX as u64 {
+        return None;
+    }
+    Some(v as u32)
+}
+
+fn build_rect_payload(x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> [u8; 19] {
+    let mut payload = [0u8; 19];
+    payload[0..4].copy_from_slice(&x.to_le_bytes());
+    payload[4..8].copy_from_slice(&y.to_le_bytes());
+    payload[8..12].copy_from_slice(&w.to_le_bytes());
+    payload[12..16].copy_from_slice(&h.to_le_bytes());
+    payload[16] = r;
+    payload[17] = g;
+    payload[18] = b;
+    payload
+}
+
+fn build_line_payload(x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g: u8, b: u8) -> [u8; 19] {
+    let mut payload = [0u8; 19];
+    payload[0..4].copy_from_slice(&x0.to_le_bytes());
+    payload[4..8].copy_from_slice(&y0.to_le_bytes());
+    payload[8..12].copy_from_slice(&x1.to_le_bytes());
+    payload[12..16].copy_from_slice(&y1.to_le_bytes());
+    payload[16] = r;
+    payload[17] = g;
+    payload[18] = b;
+    payload
+}
+
 /// rect コマンド: 矩形塗りつぶし描画（GUI デモ）
 ///
 /// 使用例:
@@ -1520,6 +1613,11 @@ const OPCODE_TCP_CLOSE: u32 = 5;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
+
+const GUI_OPCODE_CLEAR: u32 = 1;
+const GUI_OPCODE_RECT: u32 = 2;
+const GUI_OPCODE_LINE: u32 = 3;
+const GUI_OPCODE_PRESENT: u32 = 4;
 
 fn netd_dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> Result<(), ()> {
     let payload = domain.as_bytes();
@@ -1632,6 +1730,53 @@ fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32
     }
 
     Ok((status, len))
+}
+
+fn gui_request(opcode: u32, payload: &[u8]) -> Result<i32, ()> {
+    let mut req = [0u8; 2048];
+    if IPC_REQ_HEADER + payload.len() > req.len() {
+        return Err(());
+    }
+    req[0..4].copy_from_slice(&opcode.to_le_bytes());
+    req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    req[8..8 + payload.len()].copy_from_slice(payload);
+
+    let mut gui_id = unsafe { GUI_TASK_ID };
+    if gui_id == 0 {
+        find_gui();
+        gui_id = unsafe { GUI_TASK_ID };
+        if gui_id == 0 {
+            return Err(());
+        }
+    }
+
+    if syscall::ipc_send(gui_id, &req[..8 + payload.len()]) < 0 {
+        find_gui();
+        gui_id = unsafe { GUI_TASK_ID };
+        if gui_id == 0 {
+            return Err(());
+        }
+        if syscall::ipc_send(gui_id, &req[..8 + payload.len()]) < 0 {
+            return Err(());
+        }
+    }
+
+    let mut resp = [0u8; 128];
+    let mut sender = 0u64;
+    let n = syscall::ipc_recv(&mut sender, &mut resp, 5000);
+    if n < 0 {
+        return Err(());
+    }
+    let n = n as usize;
+    if n < IPC_RESP_HEADER {
+        return Err(());
+    }
+    let resp_opcode = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+    if resp_opcode != opcode {
+        return Err(());
+    }
+    let status = i32::from_le_bytes([resp[4], resp[5], resp[6], resp[7]]);
+    Ok(status)
 }
 
 /// タスク一覧から指定名のタスク ID を探す

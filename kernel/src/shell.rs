@@ -1310,6 +1310,15 @@ impl Shell {
             failed += 1;
         }
 
+        // 16. GUI IPC のテスト
+        if self.test_gui_ipc() {
+            Self::print_pass("gui_ipc");
+            passed += 1;
+        } else {
+            Self::print_fail("gui_ipc");
+            failed += 1;
+        }
+
         // サマリー出力
         let total = passed + failed;
         if failed == 0 {
@@ -1765,6 +1774,42 @@ impl Shell {
         }
         let ip = [msg.data[12], msg.data[13], msg.data[14], msg.data[15]];
         ip != [0, 0, 0, 0]
+    }
+
+    /// GUI IPC のテスト
+    fn test_gui_ipc(&self) -> bool {
+        let gui_id = match crate::scheduler::find_task_id_by_name("GUI.ELF") {
+            Some(id) => id,
+            None => return false,
+        };
+
+        // CLEAR (opcode=1) を送る
+        let opcode: u32 = 1;
+        let payload = [0u8, 0u8, 32u8];
+        let mut req = [0u8; 2048];
+        let header_len = 8;
+        req[0..4].copy_from_slice(&opcode.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        req[8..8 + payload.len()].copy_from_slice(&payload);
+
+        let sender = crate::scheduler::current_task_id();
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload.len()].to_vec()).is_err() {
+            return false;
+        }
+
+        let msg = match crate::ipc::recv(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msg.data.len() < 12 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        status == 0
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。

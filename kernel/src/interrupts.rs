@@ -234,6 +234,11 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::kprintln!("Page fault in user mode!");
         crate::kprintln!("  Accessed address: {:?}", Cr2::read());
         crate::kprintln!("  Error code: {:?}", error_code);
+        crate::scheduler::with_current_task(|task| {
+            crate::kprintln!("  Task: {} ({})", task.id, task.name);
+        });
+        crate::kprintln!("  RIP: {:?}", stack_frame.instruction_pointer);
+        crate::kprintln!("  RSP: {:?}", stack_frame.stack_pointer);
         crate::kprintln!("  Terminating user program...");
         // exit_usermode() で SAVED_RSP/SAVED_RBP を復元し、
         // run_in_usermode() の呼び出し元に戻る。

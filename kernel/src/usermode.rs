@@ -448,7 +448,7 @@ pub fn user_illegal_access() {
 
 /// ELF ユーザースタックの仮想アドレス（0x800000 = 8MiB）。
 /// ELF コードセクション（0x400000〜）とぶつからない位置に配置する。
-const ELF_USER_STACK_VADDR: u64 = 0x800000;
+const ELF_USER_STACK_VADDR: u64 = 0x2000000;
 
 /// ELF ユーザースタックのサイズ（16KiB = 4ページ）。
 const ELF_USER_STACK_SIZE: usize = 4096 * 4;
@@ -553,7 +553,7 @@ pub fn create_elf_process(
     }
 
     // 4. ユーザースタック用のフレームを確保してマッピング
-    //    スタックは 0x800000 (8MiB) に 16KiB 分確保する。
+    //    スタックは 0x2000000 (32MiB) に 16KiB 分確保する。
     //    スタックは高アドレスから低アドレスに向かって伸びるので、
     //    スタックトップは ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE。
     let stack_frames = crate::paging::map_user_pages_in_process(

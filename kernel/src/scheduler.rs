@@ -667,6 +667,13 @@ pub fn current_task_id() -> u64 {
     sched.tasks[sched.current].id
 }
 
+/// 現在のタスクを参照して処理する（デバッグ用）
+pub fn with_current_task<F: FnOnce(&Task)>(f: F) {
+    let sched = SCHEDULER.lock();
+    let task = &sched.tasks[sched.current];
+    f(task);
+}
+
 /// 指定したタスクIDが存在するか確認する
 pub fn task_exists(task_id: u64) -> bool {
     let sched = SCHEDULER.lock();
