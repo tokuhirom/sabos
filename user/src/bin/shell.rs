@@ -39,6 +39,10 @@ extern crate alloc;
 mod allocator;
 #[path = "../fat16.rs"]
 mod fat16;
+#[path = "../gui_client.rs"]
+mod gui_client;
+#[path = "../json.rs"]
+mod json;
 #[path = "../syscall.rs"]
 mod syscall;
 
@@ -50,8 +54,6 @@ use fat16::Fat16;
 
 /// netd のタスクID（起動できた場合のみ設定）
 static mut NETD_TASK_ID: u64 = 0;
-static mut GUI_TASK_ID: u64 = 0;
-
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
 
@@ -82,7 +84,6 @@ fn run() -> ! {
     // init が netd を起動するので、ここでは netd の PID を取得するだけ
     // 将来的には init から netd の PID を受け取る仕組みにする
     find_netd();
-    find_gui();
 
     // カレントディレクトリはユーザー空間で管理する
     let cwd_handle = match open_root_dir() {
@@ -138,13 +139,6 @@ fn find_netd() {
     }
 }
 
-/// gui の PID を探す
-fn find_gui() {
-    let gui_id = resolve_task_id_by_name("GUI.ELF").unwrap_or(0);
-    unsafe {
-        GUI_TASK_ID = gui_id;
-    }
-}
 
 /// 改行まで1行を読み取る
 ///
@@ -749,10 +743,10 @@ fn cmd_mem() {
     // 結果をパースして表示（JSON）
     let len = result as usize;
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
-        let total = json_find_u64(s, "total_frames");
-        let allocated = json_find_u64(s, "allocated_frames");
-        let free = json_find_u64(s, "free_frames");
-        let free_kib = json_find_u64(s, "free_kib");
+        let total = json::json_find_u64(s, "total_frames");
+        let allocated = json::json_find_u64(s, "allocated_frames");
+        let free = json::json_find_u64(s, "free_frames");
+        let free_kib = json::json_find_u64(s, "free_kib");
 
         if let Some(v) = total {
             syscall::write_str("  Total frames:     ");
@@ -796,7 +790,7 @@ fn cmd_ps() {
         syscall::write_str("  ID  STATE       TYPE    NAME\n");
         syscall::write_str("  --  ----------  ------  ----------\n");
 
-        let Some((tasks_start, tasks_end)) = json_find_array_bounds(s, "tasks") else {
+        let Some((tasks_start, tasks_end)) = json::json_find_array_bounds(s, "tasks") else {
             return;
         };
 
@@ -811,7 +805,7 @@ fn cmd_ps() {
                 break;
             }
 
-            let Some(obj_end) = find_matching_brace(s, i) else {
+            let Some(obj_end) = json::find_matching_brace(s, i) else {
                 break;
             };
             if obj_end > tasks_end {
@@ -819,10 +813,10 @@ fn cmd_ps() {
             }
 
             let obj = &s[i + 1..obj_end];
-            let id = json_find_u64(obj, "id");
-            let state = json_find_str(obj, "state");
-            let ty = json_find_str(obj, "type");
-            let name = json_find_str(obj, "name");
+            let id = json::json_find_u64(obj, "id");
+            let state = json::json_find_str(obj, "state");
+            let ty = json::json_find_str(obj, "type");
+            let name = json::json_find_str(obj, "name");
 
             if let (Some(id), Some(state), Some(ty), Some(name)) = (id, state, ty, name) {
                 syscall::write_str("  ");
@@ -1125,153 +1119,6 @@ fn write_padded(s: &str, width: usize) {
     }
 }
 
-// =================================================================
-// JSON パーサ（最小実装）
-// =================================================================
-
-/// JSON のキーに対応する値の開始位置を返す
-fn json_find_key_value_start(s: &str, key: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let key_bytes = key.as_bytes();
-    let mut i = 0;
-    while i + key_bytes.len() + 2 <= bytes.len() {
-        if bytes[i] == b'"'
-            && bytes[i + 1..i + 1 + key_bytes.len()] == *key_bytes
-            && bytes[i + 1 + key_bytes.len()] == b'"'
-        {
-            let mut j = i + 1 + key_bytes.len() + 1;
-            // 空白をスキップ
-            while j < bytes.len() && is_json_space(bytes[j]) {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b':' {
-                j += 1;
-                while j < bytes.len() && is_json_space(bytes[j]) {
-                    j += 1;
-                }
-                return Some(j);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// JSON から数値を取り出す
-fn json_find_u64(s: &str, key: &str) -> Option<u64> {
-    let start = json_find_key_value_start(s, key)?;
-    let tail = &s[start..];
-    parse_u64_prefix(tail)
-}
-
-/// JSON から文字列を取り出す（エスケープは展開しない）
-fn json_find_str<'a>(s: &'a str, key: &str) -> Option<&'a str> {
-    let start = json_find_key_value_start(s, key)?;
-    let bytes = s.as_bytes();
-    if bytes.get(start) != Some(&b'"') {
-        return None;
-    }
-    let mut i = start + 1;
-    let mut escape = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if escape {
-            escape = false;
-            i += 1;
-            continue;
-        }
-        if b == b'\\' {
-            escape = true;
-            i += 1;
-            continue;
-        }
-        if b == b'"' {
-            return Some(&s[start + 1..i]);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// JSON 配列の範囲を取得する
-fn json_find_array_bounds(s: &str, key: &str) -> Option<(usize, usize)> {
-    let start = json_find_key_value_start(s, key)?;
-    let bytes = s.as_bytes();
-    if bytes.get(start) != Some(&b'[') {
-        return None;
-    }
-    let end = find_matching_delim(s, start, b'[', b']')?;
-    Some((start + 1, end))
-}
-
-/// { ... } の対応する } を探す
-fn find_matching_brace(s: &str, start: usize) -> Option<usize> {
-    find_matching_delim(s, start, b'{', b'}')
-}
-
-/// 対応する閉じ括弧を探す（最小実装）
-fn find_matching_delim(s: &str, start: usize, open: u8, close: u8) -> Option<usize> {
-    let bytes = s.as_bytes();
-    if bytes.get(start) != Some(&open) {
-        return None;
-    }
-    let mut depth = 1usize;
-    let mut i = start + 1;
-    let mut in_string = false;
-    let mut escape = false;
-
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_string {
-            if escape {
-                escape = false;
-            } else if b == b'\\' {
-                escape = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if b == b'"' {
-            in_string = true;
-            i += 1;
-            continue;
-        }
-        if b == open {
-            depth += 1;
-        } else if b == close {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// JSON の空白判定
-fn is_json_space(b: u8) -> bool {
-    b == b' ' || b == b'\n' || b == b'\r' || b == b'\t'
-}
-
-/// 文字列先頭の数値を u64 にパース
-fn parse_u64_prefix(s: &str) -> Option<u64> {
-    let mut result: u64 = 0;
-    let mut found = false;
-    for b in s.bytes() {
-        if b < b'0' || b > b'9' {
-            break;
-        }
-        found = true;
-        result = result.checked_mul(10)?;
-        result = result.checked_add((b - b'0') as u64)?;
-    }
-    if found { Some(result) } else { None }
-}
-
 /// 16 進数の 1 桁を出力
 fn write_hex_digit(v: u8) {
     let c = if v < 10 { b'0' + v } else { b'a' + (v - 10) };
@@ -1451,14 +1298,13 @@ fn cmd_http(args: &str) {
 ///   gui rect 10 10 80 40 255 0 0
 fn cmd_gui(args: &str) {
     let (sub, rest) = split_command(args);
+    let mut gui = gui_client::GuiClient::new();
     match sub {
         "demo" => {
-            let _ = gui_request(GUI_OPCODE_CLEAR, &[0, 0, 32]);
-            let payload_rect = build_rect_payload(50, 40, 200, 120, 0, 200, 0);
-            let _ = gui_request(GUI_OPCODE_RECT, &payload_rect);
-            let payload_line = build_line_payload(10, 10, 300, 200, 255, 255, 0);
-            let _ = gui_request(GUI_OPCODE_LINE, &payload_line);
-            let _ = gui_request(GUI_OPCODE_PRESENT, &[]);
+            let _ = gui.clear(0, 0, 32);
+            let _ = gui.rect(50, 40, 200, 120, 0, 200, 0);
+            let _ = gui.line(10, 10, 300, 200, 255, 255, 0);
+            let _ = gui.present();
         }
         "rect" => {
             let mut parts = rest.split_whitespace();
@@ -1473,12 +1319,11 @@ fn cmd_gui(args: &str) {
                 syscall::write_str("Error: r g b must be 0-255\n");
                 return;
             }
-            let payload_rect = build_rect_payload(x, y, w, h, r as u8, g as u8, b as u8);
-            if gui_request(GUI_OPCODE_RECT, &payload_rect).is_err() {
+            if gui.rect(x, y, w, h, r as u8, g as u8, b as u8).is_err() {
                 syscall::write_str("Error: gui rect failed\n");
                 return;
             }
-            let _ = gui_request(GUI_OPCODE_PRESENT, &[]);
+            let _ = gui.present();
         }
         _ => {
             print_gui_usage();
@@ -1499,30 +1344,6 @@ fn parse_u32_arg(s: Option<&str>) -> Option<u32> {
         return None;
     }
     Some(v as u32)
-}
-
-fn build_rect_payload(x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> [u8; 19] {
-    let mut payload = [0u8; 19];
-    payload[0..4].copy_from_slice(&x.to_le_bytes());
-    payload[4..8].copy_from_slice(&y.to_le_bytes());
-    payload[8..12].copy_from_slice(&w.to_le_bytes());
-    payload[12..16].copy_from_slice(&h.to_le_bytes());
-    payload[16] = r;
-    payload[17] = g;
-    payload[18] = b;
-    payload
-}
-
-fn build_line_payload(x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g: u8, b: u8) -> [u8; 19] {
-    let mut payload = [0u8; 19];
-    payload[0..4].copy_from_slice(&x0.to_le_bytes());
-    payload[4..8].copy_from_slice(&y0.to_le_bytes());
-    payload[8..12].copy_from_slice(&x1.to_le_bytes());
-    payload[12..16].copy_from_slice(&y1.to_le_bytes());
-    payload[16] = r;
-    payload[17] = g;
-    payload[18] = b;
-    payload
 }
 
 /// rect コマンド: 矩形塗りつぶし描画（GUI デモ）
@@ -1613,11 +1434,6 @@ const OPCODE_TCP_CLOSE: u32 = 5;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
-
-const GUI_OPCODE_CLEAR: u32 = 1;
-const GUI_OPCODE_RECT: u32 = 2;
-const GUI_OPCODE_LINE: u32 = 3;
-const GUI_OPCODE_PRESENT: u32 = 4;
 
 fn netd_dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> Result<(), ()> {
     let payload = domain.as_bytes();
@@ -1732,53 +1548,6 @@ fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32
     Ok((status, len))
 }
 
-fn gui_request(opcode: u32, payload: &[u8]) -> Result<i32, ()> {
-    let mut req = [0u8; 2048];
-    if IPC_REQ_HEADER + payload.len() > req.len() {
-        return Err(());
-    }
-    req[0..4].copy_from_slice(&opcode.to_le_bytes());
-    req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    req[8..8 + payload.len()].copy_from_slice(payload);
-
-    let mut gui_id = unsafe { GUI_TASK_ID };
-    if gui_id == 0 {
-        find_gui();
-        gui_id = unsafe { GUI_TASK_ID };
-        if gui_id == 0 {
-            return Err(());
-        }
-    }
-
-    if syscall::ipc_send(gui_id, &req[..8 + payload.len()]) < 0 {
-        find_gui();
-        gui_id = unsafe { GUI_TASK_ID };
-        if gui_id == 0 {
-            return Err(());
-        }
-        if syscall::ipc_send(gui_id, &req[..8 + payload.len()]) < 0 {
-            return Err(());
-        }
-    }
-
-    let mut resp = [0u8; 128];
-    let mut sender = 0u64;
-    let n = syscall::ipc_recv(&mut sender, &mut resp, 5000);
-    if n < 0 {
-        return Err(());
-    }
-    let n = n as usize;
-    if n < IPC_RESP_HEADER {
-        return Err(());
-    }
-    let resp_opcode = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
-    if resp_opcode != opcode {
-        return Err(());
-    }
-    let status = i32::from_le_bytes([resp[4], resp[5], resp[6], resp[7]]);
-    Ok(status)
-}
-
 /// タスク一覧から指定名のタスク ID を探す
 fn resolve_task_id_by_name(name: &str) -> Option<u64> {
     let mut buf = [0u8; FILE_BUFFER_SIZE];
@@ -1791,7 +1560,7 @@ fn resolve_task_id_by_name(name: &str) -> Option<u64> {
         return None;
     };
 
-    let (tasks_start, tasks_end) = json_find_array_bounds(s, "tasks")?;
+    let (tasks_start, tasks_end) = json::json_find_array_bounds(s, "tasks")?;
     let mut i = tasks_start;
     let bytes = s.as_bytes();
     while i < tasks_end {
@@ -1802,14 +1571,14 @@ fn resolve_task_id_by_name(name: &str) -> Option<u64> {
             break;
         }
 
-        let obj_end = find_matching_brace(s, i)?;
+        let obj_end = json::find_matching_brace(s, i)?;
         if obj_end > tasks_end {
             break;
         }
 
         let obj = &s[i + 1..obj_end];
-        let id = json_find_u64(obj, "id");
-        let task_name = json_find_str(obj, "name");
+        let id = json::json_find_u64(obj, "id");
+        let task_name = json::json_find_str(obj, "name");
         if let (Some(id), Some(task_name)) = (id, task_name) {
             if task_name == name {
                 return Some(id);
