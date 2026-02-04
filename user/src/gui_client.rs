@@ -14,6 +14,7 @@ const OPCODE_CLEAR: u32 = 1;
 const OPCODE_RECT: u32 = 2;
 const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
+const OPCODE_CIRCLE: u32 = 5;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
@@ -55,6 +56,24 @@ impl GuiClient {
     /// バックバッファを表示
     pub fn present(&mut self) -> Result<(), ()> {
         let status = self.request(OPCODE_PRESENT, &[])?;
+        if status < 0 { Err(()) } else { Ok(()) }
+    }
+
+    /// 円（outline/filled）を描画
+    ///
+    /// filled = true なら塗りつぶし。
+    pub fn circle(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        r: u32,
+        red: u8,
+        green: u8,
+        blue: u8,
+        filled: bool,
+    ) -> Result<(), ()> {
+        let payload = build_circle_payload(cx, cy, r, red, green, blue, filled);
+        let status = self.request(OPCODE_CIRCLE, &payload)?;
         if status < 0 { Err(()) } else { Ok(()) }
     }
 
@@ -130,6 +149,27 @@ fn build_line_payload(x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g: u8, b: u8) -
     payload[16] = r;
     payload[17] = g;
     payload[18] = b;
+    payload
+}
+
+fn build_circle_payload(
+    cx: u32,
+    cy: u32,
+    r: u32,
+    red: u8,
+    green: u8,
+    blue: u8,
+    filled: bool,
+) -> [u8; 17] {
+    let mut payload = [0u8; 17];
+    payload[0..4].copy_from_slice(&cx.to_le_bytes());
+    payload[4..8].copy_from_slice(&cy.to_le_bytes());
+    payload[8..12].copy_from_slice(&r.to_le_bytes());
+    payload[12] = red;
+    payload[13] = green;
+    payload[14] = blue;
+    payload[15] = if filled { 1 } else { 0 };
+    payload[16] = 0;
     payload
 }
 

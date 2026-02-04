@@ -1296,6 +1296,8 @@ fn cmd_http(args: &str) {
 /// 例:
 ///   gui demo
 ///   gui rect 10 10 80 40 255 0 0
+///   gui circle 120 120 40 255 255 0
+///   gui fillcircle 160 160 30 0 180 255
 fn cmd_gui(args: &str) {
     let (sub, rest) = split_command(args);
     let mut gui = gui_client::GuiClient::new();
@@ -1325,6 +1327,25 @@ fn cmd_gui(args: &str) {
             }
             let _ = gui.present();
         }
+        "circle" | "fillcircle" => {
+            let mut parts = rest.split_whitespace();
+            let Some(cx) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(cy) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(rad) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(r) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(g) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(b) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            if r > 255 || g > 255 || b > 255 {
+                syscall::write_str("Error: r g b must be 0-255\n");
+                return;
+            }
+            let filled = sub == "fillcircle";
+            if gui.circle(cx, cy, rad, r as u8, g as u8, b as u8, filled).is_err() {
+                syscall::write_str("Error: gui circle failed\n");
+                return;
+            }
+            let _ = gui.present();
+        }
         _ => {
             print_gui_usage();
         }
@@ -1335,6 +1356,8 @@ fn print_gui_usage() {
     syscall::write_str("Usage:\n");
     syscall::write_str("  gui demo\n");
     syscall::write_str("  gui rect x y w h r g b\n");
+    syscall::write_str("  gui circle cx cy r red green blue\n");
+    syscall::write_str("  gui fillcircle cx cy r red green blue\n");
 }
 
 fn parse_u32_arg(s: Option<&str>) -> Option<u32> {

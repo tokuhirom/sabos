@@ -21,6 +21,7 @@ const OPCODE_CLEAR: u32 = 1;
 const OPCODE_RECT: u32 = 2;
 const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
+const OPCODE_CIRCLE: u32 = 5;
 
 const IPC_BUF_SIZE: usize = 2048;
 
@@ -107,6 +108,23 @@ fn gui_loop() -> ! {
             OPCODE_PRESENT => {
                 if present(&state).is_err() {
                     status = -99;
+                }
+            }
+            OPCODE_CIRCLE => {
+                if payload.len() == 17 {
+                    let cx = read_u32(payload, 0).unwrap_or(0);
+                    let cy = read_u32(payload, 4).unwrap_or(0);
+                    let r = read_u32(payload, 8).unwrap_or(0);
+                    let red = payload[12];
+                    let green = payload[13];
+                    let blue = payload[14];
+                    let filled = payload[15] != 0;
+                    let _ = payload[16]; // 予約（将来のアルファなど）
+                    if draw_circle(&mut state, cx, cy, r, red, green, blue, filled).is_err() {
+                        status = -10;
+                    }
+                } else {
+                    status = -10;
                 }
             }
             _ => {
@@ -223,6 +241,93 @@ fn set_pixel(state: &mut GuiState, x: u32, y: u32, r: u8, g: u8, b: u8) -> Resul
     state.buf[idx + 1] = g;
     state.buf[idx + 2] = b;
     state.buf[idx + 3] = 0;
+    Ok(())
+}
+
+fn draw_circle(
+    state: &mut GuiState,
+    cx: u32,
+    cy: u32,
+    r: u32,
+    red: u8,
+    green: u8,
+    blue: u8,
+    filled: bool,
+) -> Result<(), ()> {
+    if r == 0 {
+        return Err(());
+    }
+    if cx >= state.width || cy >= state.height {
+        return Err(());
+    }
+    if cx + r >= state.width || cy + r >= state.height {
+        return Err(());
+    }
+    if r > cx || r > cy {
+        return Err(());
+    }
+
+    let mut x = r as i32;
+    let mut y = 0i32;
+    let mut err = 1 - x;
+    let cx = cx as i32;
+    let cy = cy as i32;
+
+    while x >= y {
+        if filled {
+            // 水平スパンで塗りつぶし
+            draw_hline(state, cx - x, cx + x, cy + y, red, green, blue)?;
+            draw_hline(state, cx - x, cx + x, cy - y, red, green, blue)?;
+            draw_hline(state, cx - y, cx + y, cy + x, red, green, blue)?;
+            draw_hline(state, cx - y, cx + y, cy - x, red, green, blue)?;
+        } else {
+            // 輪郭のみ
+            set_pixel(state, (cx + x) as u32, (cy + y) as u32, red, green, blue)?;
+            set_pixel(state, (cx - x) as u32, (cy + y) as u32, red, green, blue)?;
+            set_pixel(state, (cx + x) as u32, (cy - y) as u32, red, green, blue)?;
+            set_pixel(state, (cx - x) as u32, (cy - y) as u32, red, green, blue)?;
+            set_pixel(state, (cx + y) as u32, (cy + x) as u32, red, green, blue)?;
+            set_pixel(state, (cx - y) as u32, (cy + x) as u32, red, green, blue)?;
+            set_pixel(state, (cx + y) as u32, (cy - x) as u32, red, green, blue)?;
+            set_pixel(state, (cx - y) as u32, (cy - x) as u32, red, green, blue)?;
+        }
+
+        y += 1;
+        if err < 0 {
+            err += 2 * y + 1;
+        } else {
+            x -= 1;
+            err += 2 * (y - x) + 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn draw_hline(
+    state: &mut GuiState,
+    x0: i32,
+    x1: i32,
+    y: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), ()> {
+    if y < 0 || y >= state.height as i32 {
+        return Err(());
+    }
+    let mut x0 = x0;
+    let mut x1 = x1;
+    if x0 > x1 {
+        core::mem::swap(&mut x0, &mut x1);
+    }
+    if x0 < 0 || x1 >= state.width as i32 {
+        return Err(());
+    }
+    let y = y as u32;
+    for x in x0..=x1 {
+        set_pixel(state, x as u32, y, r, g, b)?;
+    }
     Ok(())
 }
 

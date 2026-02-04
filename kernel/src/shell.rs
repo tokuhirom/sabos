@@ -1860,16 +1860,16 @@ impl Shell {
         };
 
         // CLEAR (opcode=1) を送る
-        let opcode: u32 = 1;
-        let payload = [0u8, 0u8, 32u8];
+        let opcode_clear: u32 = 1;
+        let payload_clear = [0u8, 0u8, 32u8];
         let mut req = [0u8; 2048];
         let header_len = 8;
-        req[0..4].copy_from_slice(&opcode.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        req[8..8 + payload.len()].copy_from_slice(&payload);
+        req[0..4].copy_from_slice(&opcode_clear.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_clear.len() as u32).to_le_bytes());
+        req[8..8 + payload_clear.len()].copy_from_slice(&payload_clear);
 
         let sender = crate::scheduler::current_task_id();
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload.len()].to_vec()).is_err() {
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_clear.len()].to_vec()).is_err() {
             return false;
         }
 
@@ -1881,7 +1881,45 @@ impl Shell {
             return false;
         }
         let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
-        if resp_opcode != opcode {
+        if resp_opcode != opcode_clear {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+
+        // CIRCLE (opcode=5) を送る
+        let opcode_circle: u32 = 5;
+        let mut payload_circle = [0u8; 17];
+        let cx = 120u32.to_le_bytes();
+        let cy = 120u32.to_le_bytes();
+        let r = 30u32.to_le_bytes();
+        payload_circle[0..4].copy_from_slice(&cx);
+        payload_circle[4..8].copy_from_slice(&cy);
+        payload_circle[8..12].copy_from_slice(&r);
+        payload_circle[12] = 255;
+        payload_circle[13] = 255;
+        payload_circle[14] = 0;
+        payload_circle[15] = 0; // outline
+        payload_circle[16] = 0;
+        req[0..4].copy_from_slice(&opcode_circle.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_circle.len() as u32).to_le_bytes());
+        req[8..8 + payload_circle.len()].copy_from_slice(&payload_circle);
+
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_circle.len()].to_vec()).is_err() {
+            return false;
+        }
+
+        let msg = match crate::ipc::recv(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msg.data.len() < 12 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode_circle {
             return false;
         }
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
