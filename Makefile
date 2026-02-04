@@ -10,6 +10,7 @@ NETD_ELF = user/target/x86_64-unknown-none/debug/netd
 INIT_ELF = user/target/x86_64-unknown-none/debug/init
 SHELL_ELF = user/target/x86_64-unknown-none/debug/shell
 GUI_ELF = user/target/x86_64-unknown-none/debug/gui
+CALC_ELF = user/target/x86_64-unknown-none/debug/calc
 ESP_DIR = esp/EFI/BOOT
 
 # OVMF ファームウェアの検出（Ubuntu: /usr/share/OVMF/）
@@ -59,7 +60,7 @@ $(ESP_DIR):
 # FAT16 ディスクイメージを作成する。
 # 32MB のイメージを dd で作り、mkfs.fat -F 16 で FAT16 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF を書き込む。
+# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF を書き込む。
 # USER_ELF (旧シェル) は HELLO.ELF としてテスト用に残す。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32
@@ -71,6 +72,7 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -i $(DISK_IMG) $(SHELL_ELF) ::SHELL.ELF
 	mcopy -i $(DISK_IMG) $(GUI_ELF) ::GUI.ELF
+	mcopy -i $(DISK_IMG) $(CALC_ELF) ::CALC.ELF
 	@echo "Disk image created: $(DISK_IMG)"
 
 run: build $(ESP_DIR) $(DISK_IMG)
