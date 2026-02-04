@@ -91,6 +91,9 @@ pub const SYS_NET_GET_MAC: u64 = 47;    // net_get_mac(buf_ptr, len) — MAC ア
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 pub const SYS_DRAW_PIXEL: u64 = 51;  // draw_pixel(x, y, rgb) — 1ピクセル描画
 pub const SYS_DRAW_RECT: u64 = 52;   // draw_rect(x, y, w_h, rgb) — 矩形描画（w/h は packed）
+pub const SYS_DRAW_LINE: u64 = 53;   // draw_line(xy0, xy1, rgb) — 直線描画（x,y は packed）
+pub const SYS_DRAW_BLIT: u64 = 54;   // draw_blit(x, y, w_h, buf_ptr) — 画像描画
+pub const SYS_DRAW_TEXT: u64 = 55;   // draw_text(xy, fg_bg, buf_ptr, len) — 文字列描画
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — ユーザープログラムを終了してカーネルに戻る
@@ -284,6 +287,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         // システム制御
         SYS_DRAW_PIXEL => sys_draw_pixel(arg1, arg2, arg3),
         SYS_DRAW_RECT => sys_draw_rect(arg1, arg2, arg3, arg4),
+        SYS_DRAW_LINE => sys_draw_line(arg1, arg2, arg3),
+        SYS_DRAW_BLIT => sys_draw_blit(arg1, arg2, arg3, arg4),
+        SYS_DRAW_TEXT => sys_draw_text(arg1, arg2, arg3, arg4),
         SYS_HALT => sys_halt(),
         SYS_EXIT => {
             // exit()
@@ -452,6 +458,100 @@ fn sys_draw_rect(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysc
     let b = (rgb & 0xFF) as u8;
 
     match crate::framebuffer::draw_rect_global(x, y, w, h, r, g, b) {
+        Ok(()) => Ok(0),
+        Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_DRAW_LINE: 直線を描画する
+///
+/// 引数:
+///   arg1 — x0/y0 packed（上位 32bit = x0, 下位 32bit = y0）
+///   arg2 — x1/y1 packed（上位 32bit = x1, 下位 32bit = y1）
+///   arg3 — RGB packed (0xRRGGBB)
+fn sys_draw_line(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let x0 = (arg1 >> 32) as u32;
+    let y0 = (arg1 & 0xFFFF_FFFF) as u32;
+    let x1 = (arg2 >> 32) as u32;
+    let y1 = (arg2 & 0xFFFF_FFFF) as u32;
+
+    let x0 = usize::try_from(x0).map_err(|_| SyscallError::InvalidArgument)?;
+    let y0 = usize::try_from(y0).map_err(|_| SyscallError::InvalidArgument)?;
+    let x1 = usize::try_from(x1).map_err(|_| SyscallError::InvalidArgument)?;
+    let y1 = usize::try_from(y1).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let rgb = arg3 as u32;
+    let r = ((rgb >> 16) & 0xFF) as u8;
+    let g = ((rgb >> 8) & 0xFF) as u8;
+    let b = (rgb & 0xFF) as u8;
+
+    match crate::framebuffer::draw_line_global(x0, y0, x1, y1, r, g, b) {
+        Ok(()) => Ok(0),
+        Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_DRAW_BLIT: 画像（RGBX）を描画する
+///
+/// 引数:
+///   arg1 — x 座標
+///   arg2 — y 座標
+///   arg3 — width/height packed（上位 32bit = w, 下位 32bit = h）
+///   arg4 — バッファポインタ（ユーザー空間）
+fn sys_draw_blit(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let x = usize::try_from(arg1).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let w = (arg3 >> 32) as u32;
+    let h = (arg3 & 0xFFFF_FFFF) as u32;
+    let w = usize::try_from(w).map_err(|_| SyscallError::InvalidArgument)?;
+    let h = usize::try_from(h).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let pixel_count = w.checked_mul(h).ok_or(SyscallError::InvalidArgument)?;
+    let byte_len = pixel_count.checked_mul(4).ok_or(SyscallError::InvalidArgument)?;
+    let buf_slice = UserSlice::<u8>::from_raw(arg4, byte_len)?;
+    let buf = buf_slice.as_slice();
+
+    match crate::framebuffer::draw_blit_global(x, y, w, h, buf) {
+        Ok(()) => Ok(0),
+        Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_DRAW_TEXT: 文字列を描画する
+///
+/// 引数:
+///   arg1 — x/y packed（上位 32bit = x, 下位 32bit = y）
+///   arg2 — fg/bg packed（上位 32bit = fg, 下位 32bit = bg）
+///   arg3 — 文字列ポインタ（ユーザー空間）
+///   arg4 — 文字列長
+fn sys_draw_text(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let x = (arg1 >> 32) as u32;
+    let y = (arg1 & 0xFFFF_FFFF) as u32;
+    let x = usize::try_from(x).map_err(|_| SyscallError::InvalidArgument)?;
+    let y = usize::try_from(y).map_err(|_| SyscallError::InvalidArgument)?;
+
+    let fg = (arg2 >> 32) as u32;
+    let bg = (arg2 & 0xFFFF_FFFF) as u32;
+    let fg = (
+        ((fg >> 16) & 0xFF) as u8,
+        ((fg >> 8) & 0xFF) as u8,
+        (fg & 0xFF) as u8,
+    );
+    let bg = (
+        ((bg >> 16) & 0xFF) as u8,
+        ((bg >> 8) & 0xFF) as u8,
+        (bg & 0xFF) as u8,
+    );
+
+    let len = arg4 as usize;
+    let text_slice = UserSlice::<u8>::from_raw(arg3, len)?;
+    let text = text_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    match crate::framebuffer::draw_text_global(x, y, fg, bg, text) {
         Ok(()) => Ok(0),
         Err(crate::framebuffer::DrawError::NotInitialized) => Err(SyscallError::Other),
         Err(_) => Err(SyscallError::InvalidArgument),

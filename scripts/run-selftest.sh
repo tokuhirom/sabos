@@ -19,6 +19,7 @@ cd "$SCRIPT_DIR/.."
 # 一時ファイル
 LOG_FILE="/tmp/sabos-selftest-$$.log"
 MONITOR_PORT=55582
+KEY_DELAY=0.4
 
 # クリーンアップ関数
 cleanup() {
@@ -96,7 +97,7 @@ echo "Sending user shell mkdir command..."
 # mkdir TESTDIR
 for c in m k d i r spc t e s t d i r ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.25
+    sleep "$KEY_DELAY"
 done
 
 echo "Waiting for mkdir output..."
@@ -118,7 +119,7 @@ echo "Sending user shell rmdir command..."
 # rmdir TESTDIR
 for c in r m d i r spc t e s t d i r ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.25
+    sleep "$KEY_DELAY"
 done
 
 echo "Waiting for rmdir output..."
@@ -140,7 +141,7 @@ echo "Sending user shell ls command..."
 # user シェルで ls を実行
 for c in l s ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.25
+    sleep "$KEY_DELAY"
 done
 
 # ls の結果を待つ（最大 10 秒）
@@ -171,7 +172,7 @@ echo "Sending selftest command..."
 # user シェルで selftest を実行
 for c in s e l f t e s t ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-    sleep 0.25
+    sleep "$KEY_DELAY"
 done
 
 # テスト結果を待つ（最大 30 秒）

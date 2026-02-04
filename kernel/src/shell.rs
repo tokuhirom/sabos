@@ -1498,12 +1498,28 @@ impl Shell {
         if crate::framebuffer::draw_rect_global(0, 0, 1, 1, 0, 255, 0).is_err() {
             return false;
         }
+        if crate::framebuffer::draw_line_global(0, 0, 1, 1, 0, 0, 255).is_err() {
+            return false;
+        }
+        let blit_buf = [255u8, 255u8, 0u8, 0u8];
+        if crate::framebuffer::draw_blit_global(0, 0, 1, 1, &blit_buf).is_err() {
+            return false;
+        }
+        if crate::framebuffer::draw_text_global(0, 0, (255, 255, 255), (0, 0, 0), "GUI").is_err() {
+            return false;
+        }
 
         // 異常系: 画面外
         if crate::framebuffer::draw_pixel_global(width, 0, 0, 0, 255).is_ok() {
             return false;
         }
         if crate::framebuffer::draw_rect_global(0, 0, 0, 1, 0, 0, 255).is_ok() {
+            return false;
+        }
+        if crate::framebuffer::draw_line_global(width, 0, width + 1, 1, 0, 0, 0).is_ok() {
+            return false;
+        }
+        if crate::framebuffer::draw_blit_global(0, 0, 2, 2, &blit_buf).is_ok() {
             return false;
         }
 

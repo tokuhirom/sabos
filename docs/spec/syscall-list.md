@@ -67,6 +67,15 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `52` `SYS_DRAW_RECT(x, y, w_h, rgb) -> 0`
   - `w_h`: 上位 32bit = width, 下位 32bit = height
   - `rgb`: 0xRRGGBB
+- `53` `SYS_DRAW_LINE(xy0, xy1, rgb) -> 0`
+  - `xy0`: 上位 32bit = x0, 下位 32bit = y0
+  - `xy1`: 上位 32bit = x1, 下位 32bit = y1
+  - `rgb`: 0xRRGGBB
+- `54` `SYS_DRAW_BLIT(x, y, w_h, buf_ptr) -> 0`
+  - `buf_ptr`: RGBX (4 bytes/pixel)
+- `55` `SYS_DRAW_TEXT(xy, fg_bg, buf_ptr, len) -> 0`
+  - `xy`: 上位 32bit = x, 下位 32bit = y
+  - `fg_bg`: 上位 32bit = fg, 下位 32bit = bg（各 0xRRGGBB）
 
 ## 終了 (60)
 

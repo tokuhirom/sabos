@@ -164,6 +164,145 @@ pub fn draw_rect_global(
     })
 }
 
+/// 直線を描画する（グローバル）。
+pub fn draw_line_global(
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), DrawError> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = WRITER.lock();
+        let Some(writer) = guard.as_mut() else {
+            return Err(DrawError::NotInitialized);
+        };
+
+        if x0 >= writer.width || y0 >= writer.height || x1 >= writer.width || y1 >= writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+
+        // Bresenham
+        let mut x0 = x0 as i32;
+        let mut y0 = y0 as i32;
+        let x1 = x1 as i32;
+        let y1 = y1 as i32;
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+
+        loop {
+            if x0 >= 0 && y0 >= 0 {
+                writer.put_pixel(x0 as usize, y0 as usize, r, g, b);
+            }
+            if x0 == x1 && y0 == y1 {
+                break;
+            }
+            let e2 = err * 2;
+            if e2 >= dy {
+                err += dy;
+                x0 += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y0 += sy;
+            }
+        }
+
+        Ok(())
+    })
+}
+
+/// バッファの内容を矩形として描画する（グローバル）。
+///
+/// buf は RGBX（4 bytes/pixel）を想定。alpha は無視する。
+pub fn draw_blit_global(
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    buf: &[u8],
+) -> Result<(), DrawError> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = WRITER.lock();
+        let Some(writer) = guard.as_mut() else {
+            return Err(DrawError::NotInitialized);
+        };
+
+        if w == 0 || h == 0 {
+            return Err(DrawError::InvalidSize);
+        }
+        if x >= writer.width || y >= writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+        let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
+        let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
+        if end_x > writer.width || end_y > writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+
+        let pixel_count = w.checked_mul(h).ok_or(DrawError::OutOfBounds)?;
+        let byte_len = pixel_count.checked_mul(4).ok_or(DrawError::OutOfBounds)?;
+        if buf.len() < byte_len {
+            return Err(DrawError::InvalidSize);
+        }
+
+        let mut idx = 0;
+        for yy in y..end_y {
+            for xx in x..end_x {
+                let r = buf[idx];
+                let g = buf[idx + 1];
+                let b = buf[idx + 2];
+                writer.put_pixel(xx, yy, r, g, b);
+                idx += 4;
+            }
+        }
+
+        Ok(())
+    })
+}
+
+/// 指定位置に文字列を描画する（グローバル）。
+pub fn draw_text_global(
+    x: usize,
+    y: usize,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    text: &str,
+) -> Result<(), DrawError> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let mut guard = WRITER.lock();
+        let Some(writer) = guard.as_mut() else {
+            return Err(DrawError::NotInitialized);
+        };
+
+        if x >= writer.width || y >= writer.height {
+            return Err(DrawError::OutOfBounds);
+        }
+
+        let old_fg = writer.fg_color;
+        let old_bg = writer.bg_color;
+        let old_x = writer.cursor_x;
+        let old_y = writer.cursor_y;
+
+        writer.set_colors(fg, bg);
+        writer.cursor_x = x;
+        writer.cursor_y = y;
+
+        let _ = writer.write_str(text);
+
+        writer.set_colors(old_fg, old_bg);
+        writer.cursor_x = old_x;
+        writer.cursor_y = old_y;
+
+        Ok(())
+    })
+}
+
 /// kprint!/kprintln! マクロの内部実装。
 /// フレームバッファとシリアルの両方に出力する。
 /// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。

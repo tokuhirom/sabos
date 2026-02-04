@@ -73,6 +73,9 @@ pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
 pub const SYS_DRAW_PIXEL: u64 = 51;  // draw_pixel(x, y, rgb) — 1ピクセル描画
 pub const SYS_DRAW_RECT: u64 = 52;   // draw_rect(x, y, w_h, rgb) — 矩形描画（w/h は packed）
+pub const SYS_DRAW_LINE: u64 = 53;   // draw_line(xy0, xy1, rgb) — 直線描画（x,y は packed）
+pub const SYS_DRAW_BLIT: u64 = 54;   // draw_blit(x, y, w_h, buf_ptr) — 画像描画
+pub const SYS_DRAW_TEXT: u64 = 55;   // draw_text(xy, fg_bg, buf_ptr, len) — 文字列描画
 
 // 終了 (60)
 pub const SYS_EXIT: u64 = 60;        // exit() — プログラム終了
@@ -387,6 +390,32 @@ pub fn draw_rect(x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> Syscall
     let packed_wh = ((w as u64) << 32) | (h as u64);
     let rgb = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     unsafe { syscall4(SYS_DRAW_RECT, x as u64, y as u64, packed_wh, rgb as u64) as i64 }
+}
+
+/// 直線描画（RGB）
+pub fn draw_line(x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g: u8, b: u8) -> SyscallResult {
+    let packed0 = ((x0 as u64) << 32) | (y0 as u64);
+    let packed1 = ((x1 as u64) << 32) | (y1 as u64);
+    let rgb = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+    unsafe { syscall3(SYS_DRAW_LINE, packed0, packed1, rgb as u64) as i64 }
+}
+
+/// 画像描画（RGBX）
+pub fn draw_blit(x: u32, y: u32, w: u32, h: u32, buf: &[u8]) -> SyscallResult {
+    let packed_wh = ((w as u64) << 32) | (h as u64);
+    let ptr = buf.as_ptr() as u64;
+    unsafe { syscall4(SYS_DRAW_BLIT, x as u64, y as u64, packed_wh, ptr) as i64 }
+}
+
+/// 文字列描画（RGB）
+pub fn draw_text(x: u32, y: u32, fg: (u8, u8, u8), bg: (u8, u8, u8), text: &str) -> SyscallResult {
+    let packed_xy = ((x as u64) << 32) | (y as u64);
+    let fg_rgb = ((fg.0 as u32) << 16) | ((fg.1 as u32) << 8) | (fg.2 as u32);
+    let bg_rgb = ((bg.0 as u32) << 16) | ((bg.1 as u32) << 8) | (bg.2 as u32);
+    let packed_fg_bg = ((fg_rgb as u64) << 32) | (bg_rgb as u64);
+    let ptr = text.as_ptr() as u64;
+    let len = text.len() as u64;
+    unsafe { syscall4(SYS_DRAW_TEXT, packed_xy, packed_fg_bg, ptr, len) as i64 }
 }
 
 // =================================================================
