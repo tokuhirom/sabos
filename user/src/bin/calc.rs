@@ -31,13 +31,14 @@ const BUTTON_BG: (u8, u8, u8) = (40, 48, 72);
 const BUTTON_BORDER: (u8, u8, u8) = (80, 100, 160);
 const BUTTON_TEXT: (u8, u8, u8) = (230, 240, 255);
 const TITLE_TEXT: (u8, u8, u8) = (255, 220, 120);
+const TITLE_BAR_BG: (u8, u8, u8) = (36, 44, 72);
 const INFO_TEXT: (u8, u8, u8) = (180, 200, 220);
 const DISPLAY_TEXT: (u8, u8, u8) = (220, 240, 255);
 const QUIT_TEXT: (u8, u8, u8) = (255, 160, 160);
 
 const PAD: u32 = 12;
 const GAP: u32 = 8;
-const TITLE_H: u32 = 18;
+const TITLE_BAR_H: u32 = 24;
 const DISPLAY_H: u32 = 40;
 const BTN_W: u32 = 70;
 const BTN_H: u32 = 50;
@@ -76,6 +77,18 @@ struct Layout {
     quit_y: u32,
     quit_w: u32,
     quit_h: u32,
+    title_bar_x: u32,
+    title_bar_y: u32,
+    title_bar_w: u32,
+    title_bar_h: u32,
+}
+
+struct WindowState {
+    x: u32,
+    y: u32,
+    dragging: bool,
+    drag_dx: i32,
+    drag_dy: i32,
 }
 
 #[unsafe(no_mangle)]
@@ -85,7 +98,16 @@ pub extern "C" fn _start() -> ! {
 
 fn calc_main() -> ! {
     let mut gui = gui_client::GuiClient::new();
-    let layout = build_layout();
+    let (screen_w, screen_h) = screen_size();
+    let panel_size = panel_size();
+    let mut window = WindowState {
+        x: center_pos(screen_w, panel_size.0),
+        y: center_pos(screen_h, panel_size.1),
+        dragging: false,
+        drag_dx: 0,
+        drag_dy: 0,
+    };
+    let mut layout = build_layout(window.x, window.y);
 
     let mut state = CalcState {
         left: 0,
@@ -111,14 +133,39 @@ fn calc_main() -> ! {
                 last_seq = mouse.seq;
                 last_buttons = mouse.buttons;
 
-                // 左クリックの立ち上がりだけ処理する
+                // 左クリックの立ち上がりでドラッグ開始 or ボタン押下
                 if left_now && !left_prev {
-                    if let Some(action) = hit_test(&layout, mouse.x, mouse.y) {
+                    if hit_title_bar(&layout, mouse.x, mouse.y) {
+                        window.dragging = true;
+                        window.drag_dx = mouse.x - window.x as i32;
+                        window.drag_dy = mouse.y - window.y as i32;
+                    } else if let Some(action) = hit_test(&layout, mouse.x, mouse.y) {
                         if apply_action(&mut state, action) {
                             update_display(&mut gui, &layout, &state);
                             let _ = gui.present();
                         }
                     }
+                }
+
+                // 左ボタンを離したらドラッグ終了
+                if !left_now && left_prev {
+                    window.dragging = false;
+                }
+            }
+
+            // ドラッグ中はウィンドウ位置を更新して再描画
+            if window.dragging {
+                let mut new_x = mouse.x - window.drag_dx;
+                let mut new_y = mouse.y - window.drag_dy;
+                new_x = new_x.clamp(0, screen_w as i32 - panel_size.0 as i32);
+                new_y = new_y.clamp(0, screen_h as i32 - panel_size.1 as i32);
+                let new_x = new_x as u32;
+                let new_y = new_y as u32;
+                if new_x != window.x || new_y != window.y {
+                    window.x = new_x;
+                    window.y = new_y;
+                    layout = build_layout(window.x, window.y);
+                    draw_ui(&mut gui, &layout, &state);
                 }
             }
         }
@@ -127,7 +174,13 @@ fn calc_main() -> ! {
     }
 }
 
-fn build_layout() -> Layout {
+fn panel_size() -> (u32, u32) {
+    let panel_w = PAD * 2 + (BTN_W * 4) + (GAP * 3);
+    let panel_h = PAD * 2 + TITLE_BAR_H + GAP + DISPLAY_H + GAP + (BTN_H * 4) + (GAP * 3) + 20;
+    (panel_w, panel_h)
+}
+
+fn screen_size() -> (u32, u32) {
     let mut info = syscall::FramebufferInfo {
         width: 0,
         height: 0,
@@ -136,29 +189,32 @@ fn build_layout() -> Layout {
         bytes_per_pixel: 0,
     };
     let _ = syscall::get_fb_info(&mut info);
+    (info.width, info.height)
+}
 
-    let panel_w = PAD * 2 + (BTN_W * 4) + (GAP * 3);
-    let panel_h = PAD * 2 + TITLE_H + GAP + DISPLAY_H + GAP + (BTN_H * 4) + (GAP * 3) + 20;
-
-    let x = if info.width > panel_w {
-        (info.width - panel_w) / 2
+fn center_pos(total: u32, size: u32) -> u32 {
+    if total > size {
+        (total - size) / 2
     } else {
         0
-    };
-    let y = if info.height > panel_h {
-        (info.height - panel_h) / 2
-    } else {
-        0
-    };
+    }
+}
+
+fn build_layout(x: u32, y: u32) -> Layout {
+    let (panel_w, panel_h) = panel_size();
 
     let display_x = x + PAD;
-    let display_y = y + PAD + TITLE_H + GAP;
+    let display_y = y + PAD + TITLE_BAR_H + GAP;
     let display_w = panel_w - PAD * 2;
     let display_h = DISPLAY_H;
     let button_x = x + PAD;
     let button_y = display_y + display_h + GAP;
     let quit_x = x + panel_w - PAD - QUIT_W;
     let quit_y = y + PAD - 2;
+    let title_bar_x = x + 2;
+    let title_bar_y = y + 2;
+    let title_bar_w = panel_w - 4;
+    let title_bar_h = TITLE_BAR_H;
 
     Layout {
         x,
@@ -175,6 +231,10 @@ fn build_layout() -> Layout {
         quit_y,
         quit_w: QUIT_W,
         quit_h: QUIT_H,
+        title_bar_x,
+        title_bar_y,
+        title_bar_w,
+        title_bar_h,
     }
 }
 
@@ -185,10 +245,30 @@ fn draw_ui(gui: &mut gui_client::GuiClient, layout: &Layout, state: &CalcState) 
     let _ = gui.rect(layout.x, layout.y, layout.panel_w, layout.panel_h, PANEL_BORDER.0, PANEL_BORDER.1, PANEL_BORDER.2);
     let _ = gui.rect(layout.x + 2, layout.y + 2, layout.panel_w - 4, layout.panel_h - 4, PANEL_BG.0, PANEL_BG.1, PANEL_BG.2);
 
+    // タイトルバー
+    let _ = gui.rect(
+        layout.title_bar_x,
+        layout.title_bar_y,
+        layout.title_bar_w,
+        layout.title_bar_h,
+        PANEL_BORDER.0,
+        PANEL_BORDER.1,
+        PANEL_BORDER.2,
+    );
+    let _ = gui.rect(
+        layout.title_bar_x + 1,
+        layout.title_bar_y + 1,
+        layout.title_bar_w - 2,
+        layout.title_bar_h - 2,
+        TITLE_BAR_BG.0,
+        TITLE_BAR_BG.1,
+        TITLE_BAR_BG.2,
+    );
+
     // タイトル
     let title_x = layout.x + PAD;
-    let title_y = layout.y + PAD;
-    let _ = gui.text(title_x, title_y, TITLE_TEXT, PANEL_BG, "SABOS CALC");
+    let title_y = layout.y + PAD + 2;
+    let _ = gui.text(title_x, title_y, TITLE_TEXT, TITLE_BAR_BG, "SABOS CALC");
     draw_quit_button(gui, layout);
 
     // ディスプレイ
@@ -336,6 +416,18 @@ fn hit_test(layout: &Layout, x: i32, y: i32) -> Option<CalcAction> {
         }
     }
     None
+}
+
+fn hit_title_bar(layout: &Layout, x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 {
+        return false;
+    }
+    let x = x as u32;
+    let y = y as u32;
+    x >= layout.title_bar_x
+        && x < layout.title_bar_x + layout.title_bar_w
+        && y >= layout.title_bar_y
+        && y < layout.title_bar_y + layout.title_bar_h
 }
 
 fn push_digit(state: &mut CalcState, ch: char) {
