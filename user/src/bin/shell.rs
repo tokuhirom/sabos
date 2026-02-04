@@ -213,6 +213,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "rect" => cmd_rect(args),
         "selftest" => cmd_selftest(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
@@ -371,6 +372,7 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
@@ -1428,6 +1430,82 @@ fn cmd_http(args: &str) {
 
     // 接続を閉じる
     let _ = netd_tcp_close();
+}
+
+/// rect コマンド: 矩形塗りつぶし描画（GUI デモ）
+///
+/// 使用例:
+///   rect 10 10 80 40 255 0 0
+fn cmd_rect(args: &str) {
+    let mut parts = args.split_whitespace();
+
+    let parse_u32 = |s: Option<&str>| -> Result<u32, ()> {
+        let s = s.ok_or(())?;
+        let v = parse_u64(s).ok_or(())?;
+        if v > u32::MAX as u64 {
+            return Err(());
+        }
+        Ok(v as u32)
+    };
+
+    let x = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let y = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let w = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let h = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let r = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let g = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+    let b = match parse_u32(parts.next()) {
+        Ok(v) => v,
+        Err(_) => {
+            syscall::write_str("Usage: rect x y w h r g b\n");
+            return;
+        }
+    };
+
+    if r > 255 || g > 255 || b > 255 {
+        syscall::write_str("Error: r g b must be 0-255\n");
+        return;
+    }
+
+    if syscall::draw_rect(x, y, w, h, r as u8, g as u8, b as u8) < 0 {
+        syscall::write_str("Error: draw_rect failed\n");
+    }
 }
 
 // =================================================================
