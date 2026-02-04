@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR/.."
 # 一時ファイル
 LOG_FILE="/tmp/sabos-selftest-$$.log"
 MONITOR_PORT=55582
-KEY_DELAY=0.4
+KEY_DELAY=0.8
 
 # クリーンアップ関数
 cleanup() {
@@ -94,6 +94,9 @@ done
 
 echo "Sending user shell mkdir command..."
 
+# キー入力前に少し待つ（プロンプト安定化）
+sleep 0.5
+
 # mkdir TESTDIR
 for c in m k d i r spc t e s t d i r ret; do
     echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
@@ -115,6 +118,9 @@ if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
 fi
 
 echo "Sending user shell rmdir command..."
+
+# キー入力前に少し待つ（プロンプト安定化）
+sleep 0.5
 
 # rmdir TESTDIR
 for c in r m d i r spc t e s t d i r ret; do

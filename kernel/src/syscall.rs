@@ -239,6 +239,17 @@ extern "C" fn syscall_dispatch(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u
     }
 }
 
+/// syscall 引数のユーザー空間バッファを検証して取得する（共通ヘルパー）
+fn user_slice_from_args(arg_ptr: u64, arg_len: u64) -> Result<UserSlice<u8>, SyscallError> {
+    let len = usize::try_from(arg_len).map_err(|_| SyscallError::InvalidArgument)?;
+    UserSlice::<u8>::from_raw(arg_ptr, len)
+}
+
+/// syscall 引数のユーザー空間ポインタを検証して取得する（共通ヘルパー）
+fn user_ptr_from_arg<T>(arg: u64) -> Result<UserPtr<T>, SyscallError> {
+    UserPtr::<T>::from_raw(arg)
+}
+
 /// システムコールの内部ディスパッチ関数
 ///
 /// Result 型を返すことで、エラーハンドリングを型安全に行う。
@@ -324,7 +335,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
 /// 少なくとも1バイト読み取れるまでブロックする。
 /// その後、利用可能なデータがあれば最大 len バイトまで読み取って返す。
 fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let len = arg2 as usize;
+    let len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
 
     // 長さ 0 の場合は何もしない
     if len == 0 {
@@ -332,7 +343,7 @@ fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     }
 
     // UserSlice で型安全にユーザー空間のバッファを取得
-    let user_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+    let user_slice = user_slice_from_args(arg1, arg2)?;
 
     // 可変スライスとしてアクセス（書き込み用）
     let buf = user_slice.as_mut_slice();
@@ -354,11 +365,11 @@ fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///
 /// UserSlice を使って型安全にユーザー空間のバッファを検証してからアクセスする。
 fn sys_write(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let len = arg2 as usize;
+    let len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
 
     // UserSlice で型安全にユーザー空間のバッファを取得
     // アドレス範囲、アラインメント、オーバーフローを検証
-    let user_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+    let user_slice = user_slice_from_args(arg1, arg2)?;
 
     // UTF-8 として解釈してカーネルコンソールに出力
     // as_str_lossy() は不正な UTF-8 を "<invalid utf-8>" に置換
@@ -388,8 +399,8 @@ fn sys_clear_screen() -> Result<u64, SyscallError> {
 ///   書き込んだバイト数（成功時）
 ///   負の値（エラー時）
 fn sys_get_fb_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
 
     let Some(info) = crate::framebuffer::screen_info() else {
@@ -552,8 +563,7 @@ fn sys_draw_text(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysc
         (bg & 0xFF) as u8,
     );
 
-    let len = arg4 as usize;
-    let text_slice = UserSlice::<u8>::from_raw(arg3, len)?;
+    let text_slice = user_slice_from_args(arg3, arg4)?;
     let text = text_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     match crate::framebuffer::draw_text_global(x, y, fg, bg, text) {
@@ -596,15 +606,14 @@ fn sys_selftest() -> Result<u64, SyscallError> {
 fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     use crate::handle::{Handle, HANDLE_RIGHT_WRITE};
 
-    let path_len = arg2 as usize;
     let rights = arg4 as u32;
 
     // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // Handle の書き込み先
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg3)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg3)?;
 
     if (rights & HANDLE_RIGHT_WRITE) != 0 {
         if path.starts_with("/proc") {
@@ -631,11 +640,10 @@ fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallEr
 fn sys_handle_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
     use crate::handle::Handle;
 
-    let buf_len = arg3 as usize;
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let handle = handle_ptr.read();
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
     let n = crate::handle::read(&handle, buf)?;
@@ -655,11 +663,10 @@ fn sys_handle_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError>
 fn sys_handle_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
     use crate::handle::Handle;
 
-    let buf_len = arg3 as usize;
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let handle = handle_ptr.read();
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_slice();
 
     let n = crate::handle::write(&handle, buf)?;
@@ -677,7 +684,7 @@ fn sys_handle_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError
 fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
     use crate::handle::Handle;
 
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let handle = handle_ptr.read();
 
     crate::handle::close(&handle)?;
@@ -708,22 +715,20 @@ fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
 fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_LOOKUP};
 
-    let path_len = arg3 as usize;
-
     // 注: 現在の実装では arg4 全体を new_handle_ptr として扱う。
     // rights は open_path_to_handle() 内で種別に応じてデフォルトを設定する。
     let new_handle_ptr_raw = arg4;
 
     // ディレクトリハンドルを取得
-    let dir_handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let dir_handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let dir_handle = dir_handle_ptr.read();
 
     // 相対パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg2, path_len)?;
+    let path_slice = user_slice_from_args(arg2, arg3)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // 新しいハンドルの書き込み先
-    let new_handle_ptr = UserPtr::<Handle>::from_raw(new_handle_ptr_raw)?;
+    let new_handle_ptr = user_ptr_from_arg::<Handle>(new_handle_ptr_raw)?;
 
     // ディレクトリハンドルの権限チェック（LOOKUP 権限が必要）
     crate::handle::check_rights(&dir_handle, HANDLE_RIGHT_LOOKUP)?;
@@ -776,11 +781,10 @@ fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Syscall
 fn sys_handle_enum(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
     use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_ENUM};
 
-    let buf_len = arg3 as usize;
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let handle = handle_ptr.read();
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
     crate::handle::check_rights(&handle, HANDLE_RIGHT_ENUM)?;
@@ -816,11 +820,11 @@ fn sys_restrict_rights(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallEr
     let new_rights = arg2 as u32;
 
     // 元のハンドルを取得
-    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
     let handle = handle_ptr.read();
 
     // 新しいハンドルの書き込み先
-    let new_handle_ptr = UserPtr::<Handle>::from_raw(arg3)?;
+    let new_handle_ptr = user_ptr_from_arg::<Handle>(arg3)?;
 
     // 権限を縮小した新しいハンドルを作成
     let new_handle = crate::handle::restrict_rights(&handle, new_rights)?;
@@ -840,12 +844,12 @@ fn sys_restrict_rights(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallEr
 ///   読み取ったバイト数（成功時）
 ///   負の値（エラー時）
 pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let len = arg3 as usize;
+    let len = usize::try_from(arg3).map_err(|_| SyscallError::InvalidArgument)?;
     if len != 512 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
     let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
@@ -870,12 +874,12 @@ pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sys
 ///   書き込んだバイト数（成功時）
 ///   負の値（エラー時）
 pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let len = arg3 as usize;
+    let len = usize::try_from(arg3).map_err(|_| SyscallError::InvalidArgument)?;
     if len != 512 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_slice();
 
     let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
@@ -898,8 +902,7 @@ pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sy
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_ipc_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let len = arg3 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, len)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_slice();
 
     let sender = crate::scheduler::current_task_id();
@@ -919,9 +922,8 @@ fn sys_ipc_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
 ///   読み取ったバイト数（成功時）
 ///   負の値（エラー時）
 fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg3 as usize;
-    let sender_ptr = UserPtr::<u64>::from_raw(arg1)?;
-    let buf_slice = UserSlice::<u8>::from_raw(arg2, buf_len)?;
+    let sender_ptr = user_ptr_from_arg::<u64>(arg1)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
     let task_id = crate::scheduler::current_task_id();
@@ -944,10 +946,8 @@ fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-
     // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // /proc 配下は読み取り専用
@@ -977,15 +977,12 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 /// 出力形式:
 ///   ファイル名を改行区切りで出力。ディレクトリには末尾に "/" を付ける。
 fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-    let buf_len = arg4 as usize;
-
     // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // バッファを取得
-    let buf_slice = UserSlice::<u8>::from_raw(arg3, buf_len)?;
+    let buf_slice = user_slice_from_args(arg3, arg4)?;
     let buf = buf_slice.as_mut_slice();
 
     let written = list_dir_to_buffer(path, buf)?;
@@ -1223,8 +1220,7 @@ fn write_task_list(buf: &mut [u8]) -> usize {
 ///   free_frames=XXXX
 ///   free_kib=XXXX
 fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
     Ok(write_mem_info(buf) as u64)
 }
@@ -1244,8 +1240,7 @@ fn sys_get_mem_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///   1,Running,kernel,shell
 ///   2,Ready,user,HELLO.ELF
 fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
     Ok(write_task_list(buf) as u64)
 }
@@ -1268,8 +1263,7 @@ fn sys_get_task_list(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     use core::fmt::Write;
 
-    let buf_len = arg2 as usize;
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
 
     // ネットワーク情報を取得
@@ -1380,10 +1374,8 @@ fn sys_pci_config_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64
 /// 指定した ELF ファイルを読み込んで同期実行する。
 /// プログラムが終了するまでこのシステムコールはブロックする。
 fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-
     // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // ファイル名を大文字に変換（FAT16 は大文字のみ）
@@ -1431,10 +1423,8 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 /// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
 /// 即座に戻り、プロセスはスケジューラで管理される。
 fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let path_len = arg2 as usize;
-
     // パスを取得
-    let path_slice = UserSlice::<u8>::from_raw(arg1, path_len)?;
+    let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
     // ファイル名を大文字に変換（FAT16 は大文字のみ）
     let path_upper: String = path.chars()
@@ -1554,10 +1544,8 @@ fn sys_getpid() -> Result<u64, SyscallError> {
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_dns_lookup(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let domain_len = arg2 as usize;
-
     // ドメイン名を取得
-    let domain_slice = UserSlice::<u8>::from_raw(arg1, domain_len)?;
+    let domain_slice = user_slice_from_args(arg1, arg2)?;
     let domain = domain_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // IP バッファを取得（4 バイト）
@@ -1609,16 +1597,14 @@ fn sys_tcp_connect(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///   送信したバイト数（成功時）
 ///   負の値（エラー時）
 fn sys_tcp_send(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let data_len = arg2 as usize;
-
     // データを取得
-    let data_slice = UserSlice::<u8>::from_raw(arg1, data_len)?;
+    let data_slice = user_slice_from_args(arg1, arg2)?;
     let data = data_slice.as_slice();
 
     // TCP 送信
     crate::net::tcp_send(data).map_err(|_| SyscallError::Other)?;
 
-    Ok(data_len as u64)
+    Ok(data.len() as u64)
 }
 
 /// SYS_TCP_RECV: TCP 受信
@@ -1633,11 +1619,11 @@ fn sys_tcp_send(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///   0（タイムアウト時）
 ///   負の値（エラー時）
 fn sys_tcp_recv(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
+    let buf_len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
     let timeout_ms = arg3;
 
     // バッファを取得
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
 
     // TCP 受信
@@ -1673,12 +1659,12 @@ fn sys_tcp_close() -> Result<u64, SyscallError> {
 ///   送信したバイト数（成功時）
 ///   負の値（エラー時）
 fn sys_net_send_frame(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let len = arg2 as usize;
+    let len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
     if len == 0 || len > 1514 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_slice();
 
     let mut drv = crate::virtio_net::VIRTIO_NET.lock();
@@ -1700,14 +1686,14 @@ fn sys_net_send_frame(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///   0（タイムアウト時）
 ///   負の値（エラー時）
 fn sys_net_recv_frame(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
+    let buf_len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
     let timeout_ms = arg3;
 
     if buf_len == 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
 
     x86_64::instructions::interrupts::enable();
@@ -1746,12 +1732,12 @@ fn sys_net_recv_frame(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErr
 ///   6（成功時）
 ///   負の値（エラー時）
 fn sys_net_get_mac(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let buf_len = arg2 as usize;
+    let buf_len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
     if buf_len < 6 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let buf_slice = UserSlice::<u8>::from_raw(arg1, buf_len)?;
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
     let buf = buf_slice.as_mut_slice();
 
     let drv = crate::virtio_net::VIRTIO_NET.lock();
