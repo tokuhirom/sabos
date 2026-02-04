@@ -16,6 +16,7 @@ mod ipc;
 mod memory;
 mod paging;
 mod panic;
+mod procfs;
 mod scheduler;
 mod serial;
 mod pci;
@@ -24,6 +25,7 @@ mod syscall;
 mod net;
 mod user_ptr;
 mod usermode;
+mod vfs;
 mod virtio_blk;
 mod virtio_net;
 

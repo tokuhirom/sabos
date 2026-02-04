@@ -52,6 +52,10 @@ pub enum SyscallError {
     UnknownSyscall,
     /// 未対応
     NotSupported,
+    /// 権限不足（Capability-based security）
+    PermissionDenied,
+    /// パストラバーサル試行（".." を含むパス）
+    PathTraversal,
     /// その他のエラー
     Other,
 }
@@ -59,23 +63,47 @@ pub enum SyscallError {
 impl SyscallError {
     /// エラーコードに変換（負の値として返す）
     /// ユーザー空間に返すときに使用
+    ///
+    /// SABOS 独自のエラーコード体系:
+    /// - POSIX 互換は目指さない（CLAUDE.md の設計原則）
+    /// - 1 から始まる連番で、意味が明確にわかる体系
     pub fn to_errno(self) -> u64 {
-        // Linux 風のエラーコード（負の値）
-        // ただし u64 として返すので、符号拡張された形になる
+        // SABOS 独自エラーコード（負の値）
+        // 1 から始まる連番で、カテゴリごとに分類
+        //
+        // 1-9: ポインタ・メモリ関連
+        // 10-19: 引数・データ形式関連
+        // 20-29: ファイル・ハンドル関連
+        // 30-39: 権限・セキュリティ関連
+        // 40-49: システム関連
+        // 99: その他
         let code: i64 = match self {
+            // ポインタ・メモリ関連 (1-9)
             SyscallError::NullPointer => -1,
-            SyscallError::InvalidAddress => -14,      // EFAULT
-            SyscallError::MisalignedPointer => -22,   // EINVAL
-            SyscallError::InvalidArgument => -22,     // EINVAL
-            SyscallError::ReadOnly => -1001,          // SABOS: ReadOnly
-            SyscallError::BufferOverflow => -14,      // EFAULT
-            SyscallError::InvalidUtf8 => -22,         // EINVAL
-            SyscallError::FileNotFound => -2,         // ENOENT
-            SyscallError::InvalidHandle => -1002,     // SABOS: InvalidHandle
-            SyscallError::Timeout => -1004,           // SABOS: Timeout
-            SyscallError::UnknownSyscall => -38,      // ENOSYS
-            SyscallError::NotSupported => -1003,      // SABOS: NotSupported
-            SyscallError::Other => -1,                // EPERM
+            SyscallError::InvalidAddress => -2,
+            SyscallError::MisalignedPointer => -3,
+            SyscallError::BufferOverflow => -4,
+
+            // 引数・データ形式関連 (10-19)
+            SyscallError::InvalidArgument => -10,
+            SyscallError::InvalidUtf8 => -11,
+
+            // ファイル・ハンドル関連 (20-29)
+            SyscallError::FileNotFound => -20,
+            SyscallError::InvalidHandle => -21,
+            SyscallError::ReadOnly => -22,
+
+            // 権限・セキュリティ関連 (30-39)
+            SyscallError::PermissionDenied => -30,
+            SyscallError::PathTraversal => -31,
+
+            // システム関連 (40-49)
+            SyscallError::UnknownSyscall => -40,
+            SyscallError::NotSupported => -41,
+            SyscallError::Timeout => -42,
+
+            // その他
+            SyscallError::Other => -99,
         };
         code as u64
     }

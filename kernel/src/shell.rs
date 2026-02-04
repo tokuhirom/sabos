@@ -1404,7 +1404,7 @@ impl Shell {
         let mut buf = [0u8; 512];
 
         // /proc の一覧
-        let list_len = match crate::syscall::procfs_list_dir("/proc", &mut buf) {
+        let list_len = match crate::procfs::procfs_list_dir("/proc", &mut buf) {
             Ok(n) => n,
             Err(_) => return false,
         };
@@ -1420,7 +1420,7 @@ impl Shell {
         }
 
         // /proc/meminfo
-        let mem_len = match crate::syscall::procfs_read("/proc/meminfo", &mut buf) {
+        let mem_len = match crate::procfs::procfs_read("/proc/meminfo", &mut buf) {
             Ok(n) => n,
             Err(_) => return false,
         };
@@ -1433,7 +1433,7 @@ impl Shell {
         }
 
         // /proc/tasks
-        let task_len = match crate::syscall::procfs_read("/proc/tasks", &mut buf) {
+        let task_len = match crate::procfs::procfs_read("/proc/tasks", &mut buf) {
             Ok(n) => n,
             Err(_) => return false,
         };

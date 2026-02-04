@@ -30,6 +30,7 @@
 // - SyscallError で明確なエラー型: 生の数値ではなく型付きエラーを使用
 
 use core::arch::global_asm;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -89,6 +90,8 @@ pub const SYS_OPEN: u64 = 70;         // open(path_ptr, path_len, handle_ptr, ri
 pub const SYS_HANDLE_READ: u64 = 71;  // handle_read(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_WRITE: u64 = 72; // handle_write(handle_ptr, buf_ptr, len)
 pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
+pub const SYS_OPENAT: u64 = 74;       // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
+pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
 
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
@@ -252,6 +255,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_HANDLE_READ => sys_handle_read(arg1, arg2, arg3),
         SYS_HANDLE_WRITE => sys_handle_write(arg1, arg2, arg3),
         SYS_HANDLE_CLOSE => sys_handle_close(arg1),
+        SYS_OPENAT => sys_openat(arg1, arg2, arg3, arg4),
+        SYS_RESTRICT_RIGHTS => sys_restrict_rights(arg1, arg2, arg3),
         // ブロックデバイス
         SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
         SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
@@ -371,7 +376,7 @@ fn sys_file_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysc
 
     // /proc 配下は procfs で処理
     if path.starts_with("/proc") {
-        let written = procfs_read(path, buf)?;
+        let written = crate::procfs::procfs_read(path, buf)?;
         return Ok(written as u64);
     }
 
@@ -528,6 +533,124 @@ fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
     let handle = handle_ptr.read();
 
     crate::handle::close(&handle)?;
+    Ok(0)
+}
+
+/// SYS_OPENAT: ディレクトリハンドルからの相対パスでファイルを開く
+///
+/// Capability-based security の核心となるシステムコール。
+/// ディレクトリハンドルが持つ権限の範囲内でのみファイルを開ける。
+///
+/// 引数:
+///   arg1 — ディレクトリハンドルへのポインタ（ユーザー空間）
+///   arg2 — 相対パスのポインタ（ユーザー空間、絶対パス禁止）
+///   arg3 — パスの長さ
+///   arg4 — 下位32ビット: 新しいハンドルの書き込み先ポインタ
+///          上位32ビット: 要求する権限（親の権限以下に制限される）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+///
+/// セキュリティ:
+///   - dir_handle が LOOKUP 権限を持つか確認
+///   - path が "/" で始まっていたらエラー（絶対パス禁止）
+///   - path に ".." が含まれていたらエラー（パストラバーサル防止）
+///   - 新しいハンドルの権限 = requested_rights & dir_handle.rights
+fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_LOOKUP, HANDLE_RIGHT_READ};
+
+    let path_len = arg3 as usize;
+
+    // arg4 を分解: 下位32ビットが new_handle_ptr、上位32ビットが rights
+    // 注: 現在の実装では arg4 全体を new_handle_ptr として扱い、
+    // rights は READ のみをデフォルトとする（将来拡張時に変更）
+    let new_handle_ptr_raw = arg4;
+    let requested_rights = HANDLE_RIGHT_READ; // 将来は arg5 から取得
+
+    // ディレクトリハンドルを取得
+    let dir_handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let dir_handle = dir_handle_ptr.read();
+
+    // 相対パスを取得
+    let path_slice = UserSlice::<u8>::from_raw(arg2, path_len)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 新しいハンドルの書き込み先
+    let new_handle_ptr = UserPtr::<Handle>::from_raw(new_handle_ptr_raw)?;
+
+    // ディレクトリハンドルの権限チェック（LOOKUP 権限が必要）
+    crate::handle::check_rights(&dir_handle, HANDLE_RIGHT_LOOKUP)?;
+
+    // ディレクトリハンドルの種類チェック
+    let kind = crate::handle::get_kind(&dir_handle)?;
+    if kind != HandleKind::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // 相対パスの検証（絶対パスと ".." を禁止）
+    crate::vfs::validate_relative_path(path).map_err(|e| {
+        match e {
+            crate::vfs::VfsError::PathTraversal => SyscallError::PathTraversal,
+            crate::vfs::VfsError::InvalidPath => SyscallError::InvalidArgument,
+            _ => SyscallError::Other,
+        }
+    })?;
+
+    // ディレクトリのパスを取得
+    let dir_path = crate::handle::get_path(&dir_handle)?;
+
+    // フルパスを構築
+    let full_path = if dir_path.is_empty() || dir_path == "/" {
+        format!("/{}", path)
+    } else {
+        format!("{}/{}", dir_path, path)
+    };
+
+    // ディレクトリハンドルの権限を取得し、要求権限と AND を取る
+    let dir_rights = crate::handle::get_rights(&dir_handle)?;
+    let effective_rights = requested_rights & dir_rights;
+
+    // ファイルを開く
+    let handle = open_path_to_handle(&full_path, effective_rights)?;
+    new_handle_ptr.write(handle);
+
+    Ok(0)
+}
+
+/// SYS_RESTRICT_RIGHTS: ハンドルの権限を縮小する
+///
+/// Capability-based security の重要な操作。
+/// 権限は縮小のみ可能で、拡大はできない。
+///
+/// 引数:
+///   arg1 — 元のハンドルへのポインタ（ユーザー空間）
+///   arg2 — 新しい権限ビット（縮小のみ可）
+///   arg3 — 新しいハンドルの書き込み先ポインタ（ユーザー空間）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+///
+/// セキュリティ:
+///   - new_rights は元のハンドルの rights の部分集合でなければならない
+///   - 権限の拡大を試みた場合は PermissionDenied エラー
+fn sys_restrict_rights(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::Handle;
+
+    let new_rights = arg2 as u32;
+
+    // 元のハンドルを取得
+    let handle_ptr = UserPtr::<Handle>::from_raw(arg1)?;
+    let handle = handle_ptr.read();
+
+    // 新しいハンドルの書き込み先
+    let new_handle_ptr = UserPtr::<Handle>::from_raw(arg3)?;
+
+    // 権限を縮小した新しいハンドルを作成
+    let new_handle = crate::handle::restrict_rights(&handle, new_rights)?;
+    new_handle_ptr.write(new_handle);
+
     Ok(0)
 }
 
@@ -692,7 +815,7 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 
     // /proc 配下は procfs で処理
     if path.starts_with("/proc") {
-        let written = procfs_list_dir(path, buf)?;
+        let written = crate::procfs::procfs_list_dir(path, buf)?;
         return Ok(written as u64);
     }
 
@@ -750,33 +873,21 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 // =================================================================
 
 // =================================================================
-// procfs: 最小限の疑似ファイルシステム
+// procfs 関連のヘルパー関数
 // =================================================================
+//
+// procfs モジュールへのブリッジ。syscall.rs から呼び出しやすいように
+// エラー型の変換などを行う。
 
 /// procfs のルートパス
 const PROC_ROOT: &str = "/proc";
-/// メモリ情報
-const PROC_MEMINFO: &str = "/proc/meminfo";
-/// タスク一覧
-const PROC_TASKS: &str = "/proc/tasks";
-
-/// procfs のファイルを読み取る
-///
-/// 対象ファイルが存在しない場合は FileNotFound を返す。
-pub(crate) fn procfs_read(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
-    match path {
-        PROC_MEMINFO => Ok(write_mem_info(buf)),
-        PROC_TASKS => Ok(write_task_list(buf)),
-        _ => Err(SyscallError::FileNotFound),
-    }
-}
 
 /// procfs の内容を Vec に読み取る（必要ならバッファを拡張）
 fn procfs_read_to_vec(path: &str) -> Result<Vec<u8>, SyscallError> {
     let mut size = 256usize;
     loop {
         let mut buf = vec![0u8; size];
-        let written = procfs_read(path, &mut buf)?;
+        let written = crate::procfs::procfs_read(path, &mut buf)?;
         if written < size {
             buf.truncate(written);
             return Ok(buf);
@@ -805,33 +916,7 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
     Ok(crate::handle::create_handle(data, rights))
 }
 
-/// procfs のディレクトリ一覧を取得する
-///
-/// /proc のみ対応。それ以外は FileNotFound。
-pub(crate) fn procfs_list_dir(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
-    if path != PROC_ROOT && path != "/proc/" {
-        return Err(SyscallError::FileNotFound);
-    }
-
-    let mut offset = 0;
-    let entries: [&[u8]; 2] = [b"meminfo", b"tasks"];
-
-    for name in entries {
-        let needed = name.len() + 1;
-        if offset + needed > buf.len() {
-            break;
-        }
-
-        buf[offset..offset + name.len()].copy_from_slice(name);
-        offset += name.len();
-        buf[offset] = b'\n';
-        offset += 1;
-    }
-
-    Ok(offset)
-}
-
-/// メモリ情報をテキスト形式で書き込む
+/// メモリ情報をテキスト形式で書き込む（SYS_GET_MEM_INFO 用）
 fn write_mem_info(buf: &mut [u8]) -> usize {
     use crate::memory::FRAME_ALLOCATOR;
     use core::fmt::Write;
@@ -857,7 +942,7 @@ fn write_mem_info(buf: &mut [u8]) -> usize {
     writer.written()
 }
 
-/// タスク一覧をテキスト形式で書き込む
+/// タスク一覧をテキスト形式で書き込む（SYS_GET_TASK_LIST 用）
 fn write_task_list(buf: &mut [u8]) -> usize {
     use crate::scheduler::{self, TaskState};
     use core::fmt::Write;

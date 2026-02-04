@@ -3,19 +3,35 @@
 // SABOS の設計方針に合わせて、FD のような整数ではなく
 // 「不透明 + 偽造困難」な Handle を提供する。
 //
+// ## Capability-based Security
+//
 // Handle は (id, token) の 2 要素で構成され、
 // token が一致しないと無効になる。
 //
-// 今は読み取り専用の最小実装:
-// - open で内容を Vec に読み込んでハンドル化
-// - read は Vec の pos から読み取る
-// - close でテーブルから解放
+// 各 Handle には権限ビット (rights) が付与されており、
+// 操作時に権限チェックを行う。権限は縮小のみ可能で拡大はできない
+// （Capability の原則）。
 //
-// 将来的には:
-// - Handle の権限ビット（READ/WRITE/ENUM/EXEC）を拡張
-// - IPC で Handle を移譲する
-// - ストリーム/デバイスにも対応する
+// ## 権限ビット
+//
+// - HANDLE_RIGHT_READ:   ファイル内容の読み取り
+// - HANDLE_RIGHT_WRITE:  ファイル内容の書き込み
+// - HANDLE_RIGHT_SEEK:   ファイルポジションの変更
+// - HANDLE_RIGHT_STAT:   メタデータの取得
+// - HANDLE_RIGHT_ENUM:   ディレクトリ内のエントリ列挙
+// - HANDLE_RIGHT_CREATE: ディレクトリ内にファイルを作成
+// - HANDLE_RIGHT_DELETE: ディレクトリ内のファイルを削除
+// - HANDLE_RIGHT_LOOKUP: 相対パスでファイルを開く（openat 用）
+//
+// ## ハンドルの種類
+//
+// - File: 通常のファイル（読み取り・書き込み）
+// - Directory: ディレクトリ（列挙・作成・削除・lookup）
 
+// 将来使用する権限ビットと関数の dead_code 警告を抑制
+#![allow(dead_code)]
+
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
@@ -23,12 +39,47 @@ use spin::Mutex;
 
 use crate::user_ptr::SyscallError;
 
-/// Handle の読み取り権限
-pub const HANDLE_RIGHT_READ: u32 = 0x01;
-/// Handle の書き込み権限
-pub const HANDLE_RIGHT_WRITE: u32 = 0x02;
+// =================================================================
+// 権限ビットの定義
+// =================================================================
+
+/// Handle の読み取り権限（ファイル内容を読む）
+pub const HANDLE_RIGHT_READ: u32 = 0x0001;
+/// Handle の書き込み権限（ファイル内容を書く）
+pub const HANDLE_RIGHT_WRITE: u32 = 0x0002;
+/// Handle のシーク権限（ファイルポジションを変更）
+pub const HANDLE_RIGHT_SEEK: u32 = 0x0004;
+/// Handle のメタデータ取得権限（サイズ等を取得）
+pub const HANDLE_RIGHT_STAT: u32 = 0x0008;
+/// Handle のディレクトリ列挙権限（ディレクトリ内のエントリ一覧）
+pub const HANDLE_RIGHT_ENUM: u32 = 0x0010;
+/// Handle のファイル作成権限（ディレクトリ内にファイルを作成）
+pub const HANDLE_RIGHT_CREATE: u32 = 0x0020;
+/// Handle のファイル削除権限（ディレクトリ内のファイルを削除）
+pub const HANDLE_RIGHT_DELETE: u32 = 0x0040;
+/// Handle の相対パス解決権限（openat でファイルを開く）
+pub const HANDLE_RIGHT_LOOKUP: u32 = 0x0080;
+
+/// 読み取り専用ファイル用の権限セット
+pub const HANDLE_RIGHTS_FILE_READ: u32 = HANDLE_RIGHT_READ | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
+
+/// 読み書き可能ファイル用の権限セット
+pub const HANDLE_RIGHTS_FILE_RW: u32 = HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
+
+/// ディレクトリ用の権限セット（フルアクセス）
+pub const HANDLE_RIGHTS_DIRECTORY: u32 = HANDLE_RIGHT_STAT | HANDLE_RIGHT_ENUM | HANDLE_RIGHT_CREATE | HANDLE_RIGHT_DELETE | HANDLE_RIGHT_LOOKUP;
+
+/// ディレクトリ用の権限セット（読み取りのみ）
+pub const HANDLE_RIGHTS_DIRECTORY_READ: u32 = HANDLE_RIGHT_STAT | HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP;
+
+// =================================================================
+// Handle 構造体
+// =================================================================
 
 /// ユーザー空間に渡す不透明なハンドル
+///
+/// ユーザーは id と token のペアを保持し、システムコールで渡す。
+/// カーネル側で token を検証し、一致しない場合は InvalidHandle エラーを返す。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Handle {
@@ -38,19 +89,29 @@ pub struct Handle {
     pub token: u64,
 }
 
-/// ハンドルの中身（カーネル内）
-struct HandleEntry {
-    token: u64,
-    rights: u32,
-    kind: HandleKind,
+/// ハンドルの種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleKind {
+    /// 通常のファイル
+    File,
+    /// ディレクトリ
+    Directory,
 }
 
-/// 今は「メモリ上のファイル」だけ扱う
-enum HandleKind {
-    File {
-        data: Vec<u8>,
-        pos: usize,
-    },
+/// ハンドルの中身（カーネル内）
+struct HandleEntry {
+    /// 偽造防止用のトークン
+    token: u64,
+    /// 権限ビット
+    rights: u32,
+    /// ハンドルの種類
+    kind: HandleKind,
+    /// ファイルシステム上のパス（openat の基準パスとして使用）
+    path: String,
+    /// ファイルデータ（File の場合）
+    data: Vec<u8>,
+    /// 現在のファイルポジション（File の場合）
+    pos: usize,
 }
 
 lazy_static! {
@@ -60,15 +121,69 @@ lazy_static! {
 /// token 生成用のカウンタ
 static HANDLE_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-/// 新しい Handle を作成して返す
+// =================================================================
+// Handle の作成
+// =================================================================
+
+/// 新しいファイル Handle を作成して返す
+///
+/// # 引数
+/// - `data`: ファイルの内容
+/// - `rights`: 権限ビット
+///
+/// # 戻り値
+/// 作成された Handle
 pub fn create_handle(data: Vec<u8>, rights: u32) -> Handle {
+    create_handle_with_path(data, rights, String::new())
+}
+
+/// パス情報付きでファイル Handle を作成する
+///
+/// # 引数
+/// - `data`: ファイルの内容
+/// - `rights`: 権限ビット
+/// - `path`: ファイルのパス
+///
+/// # 戻り値
+/// 作成された Handle
+pub fn create_handle_with_path(data: Vec<u8>, rights: u32, path: String) -> Handle {
     let token = next_token();
     let entry = HandleEntry {
         token,
         rights,
-        kind: HandleKind::File { data, pos: 0 },
+        kind: HandleKind::File,
+        path,
+        data,
+        pos: 0,
     };
 
+    insert_entry(entry, token)
+}
+
+/// ディレクトリ Handle を作成する
+///
+/// # 引数
+/// - `path`: ディレクトリのパス
+/// - `rights`: 権限ビット
+///
+/// # 戻り値
+/// 作成された Handle
+pub fn create_directory_handle(path: String, rights: u32) -> Handle {
+    let token = next_token();
+    let entry = HandleEntry {
+        token,
+        rights,
+        kind: HandleKind::Directory,
+        path,
+        data: Vec::new(),
+        pos: 0,
+    };
+
+    insert_entry(entry, token)
+}
+
+/// HandleEntry をテーブルに挿入する（内部ヘルパー）
+fn insert_entry(entry: HandleEntry, token: u64) -> Handle {
     let mut table = HANDLE_TABLE.lock();
 
     // 空きスロットを再利用
@@ -91,37 +206,75 @@ pub fn create_handle(data: Vec<u8>, rights: u32) -> Handle {
     }
 }
 
+// =================================================================
+// Handle の操作
+// =================================================================
+
 /// Handle から読み取る
+///
+/// # 引数
+/// - `handle`: 読み取り元のハンドル
+/// - `buf`: 読み取り先バッファ
+///
+/// # 戻り値
+/// 読み取ったバイト数
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: READ 権限がない
 pub fn read(handle: &Handle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     let mut table = HANDLE_TABLE.lock();
     let entry = get_entry_mut(&mut table, handle)?;
 
     // 権限チェック
     if (entry.rights & HANDLE_RIGHT_READ) == 0 {
-        return Err(SyscallError::ReadOnly);
+        return Err(SyscallError::PermissionDenied);
     }
 
-    match &mut entry.kind {
-        HandleKind::File { data, pos } => {
-            if *pos >= data.len() {
-                return Ok(0);  // EOF
-            }
-
-            let remaining = data.len() - *pos;
-            let copy_len = core::cmp::min(remaining, buf.len());
-            buf[..copy_len].copy_from_slice(&data[*pos..*pos + copy_len]);
-            *pos += copy_len;
-            Ok(copy_len)
-        }
+    // ファイルのみ読み取り可能
+    if entry.kind != HandleKind::File {
+        return Err(SyscallError::NotSupported);
     }
+
+    if entry.pos >= entry.data.len() {
+        return Ok(0);  // EOF
+    }
+
+    let remaining = entry.data.len() - entry.pos;
+    let copy_len = core::cmp::min(remaining, buf.len());
+    buf[..copy_len].copy_from_slice(&entry.data[entry.pos..entry.pos + copy_len]);
+    entry.pos += copy_len;
+    Ok(copy_len)
 }
 
-/// Handle に書き込む（今は読み取り専用）
+/// Handle に書き込む
+///
+/// # 引数
+/// - `handle`: 書き込み先のハンドル
+/// - `buf`: 書き込むデータ
+///
+/// # 戻り値
+/// 書き込んだバイト数
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: WRITE 権限がない
+/// - `NotSupported`: 現在は未対応
 pub fn write(_handle: &Handle, _buf: &[u8]) -> Result<usize, SyscallError> {
-    Err(SyscallError::ReadOnly)
+    // TODO: 書き込みサポート
+    Err(SyscallError::NotSupported)
 }
 
 /// Handle を閉じる
+///
+/// # 引数
+/// - `handle`: 閉じるハンドル
+///
+/// # 戻り値
+/// 成功時は Ok(())
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
 pub fn close(handle: &Handle) -> Result<(), SyscallError> {
     let mut table = HANDLE_TABLE.lock();
     let _ = get_entry(&table, handle)?;
@@ -130,6 +283,140 @@ pub fn close(handle: &Handle) -> Result<(), SyscallError> {
     table[handle.id as usize] = None;
     Ok(())
 }
+
+// =================================================================
+// Capability-based 権限操作
+// =================================================================
+
+/// ハンドルの権限を縮小する（Capability の原則）
+///
+/// 新しい権限は現在の権限の部分集合でなければならない。
+/// 権限の拡大は許可されない（セキュリティの要）。
+///
+/// # 引数
+/// - `handle`: 元のハンドル
+/// - `new_rights`: 新しい権限（縮小のみ可）
+///
+/// # 戻り値
+/// 権限を縮小した新しいハンドル
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: 権限の拡大を試みた場合
+pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+
+    // 権限の拡大を検出（new_rights に entry.rights にないビットがある）
+    if (new_rights & !entry.rights) != 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // 実際に適用される権限（縮小のみ）
+    let restricted_rights = entry.rights & new_rights;
+
+    // 新しいハンドルを作成（データをクローン）
+    let new_token = next_token();
+    let new_entry = HandleEntry {
+        token: new_token,
+        rights: restricted_rights,
+        kind: entry.kind,
+        path: entry.path.clone(),
+        data: entry.data.clone(),
+        pos: entry.pos,
+    };
+
+    drop(table); // ロックを解放してから insert_entry を呼ぶ
+    Ok(insert_entry(new_entry, new_token))
+}
+
+/// ハンドルの権限を取得する
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+///
+/// # 戻り値
+/// 権限ビット
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+pub fn get_rights(handle: &Handle) -> Result<u32, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+    Ok(entry.rights)
+}
+
+/// ハンドルが指定の権限を持っているか確認する
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+/// - `required_rights`: 必要な権限ビット
+///
+/// # 戻り値
+/// すべての権限を持っていれば Ok(()), なければ Err(PermissionDenied)
+pub fn check_rights(handle: &Handle, required_rights: u32) -> Result<(), SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+
+    if (entry.rights & required_rights) == required_rights {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
+}
+
+/// ハンドルの種類を取得する
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+///
+/// # 戻り値
+/// HandleKind（File または Directory）
+pub fn get_kind(handle: &Handle) -> Result<HandleKind, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+    Ok(entry.kind)
+}
+
+/// ハンドルのパスを取得する
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+///
+/// # 戻り値
+/// ファイルまたはディレクトリのパス
+pub fn get_path(handle: &Handle) -> Result<String, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+    Ok(entry.path.clone())
+}
+
+/// ハンドルのファイルサイズを取得する
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+///
+/// # 戻り値
+/// ファイルサイズ（バイト）
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: STAT 権限がない
+pub fn get_size(handle: &Handle) -> Result<usize, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+
+    // STAT 権限チェック
+    if (entry.rights & HANDLE_RIGHT_STAT) == 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    Ok(entry.data.len())
+}
+
+// =================================================================
+// 内部ヘルパー関数
+// =================================================================
 
 /// Handle の内容を取得（参照）
 fn get_entry<'a>(

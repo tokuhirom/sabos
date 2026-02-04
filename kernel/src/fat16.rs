@@ -32,6 +32,9 @@
 // 各エントリは 32 バイト固定長。ファイル名（8+3 形式）、属性、サイズ、
 // 開始クラスタ番号を保持する。
 
+// VFS trait 実装は将来の統合で使用するため、dead_code 警告を抑制
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::serial_println;
@@ -845,5 +848,307 @@ impl Fat16 {
         }
 
         Err("File not found")
+    }
+
+    /// ディレクトリを作成する（ルートディレクトリのみ対応）
+    pub fn create_directory(&self, dirname: &str) -> Result<(), &'static str> {
+        // ディレクトリ名を大文字に変換
+        let dirname_upper: String = dirname
+            .trim()
+            .trim_start_matches('/')
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        // 同名エントリが存在しないか確認
+        let entries = self.list_root_dir()?;
+        if entries.iter().any(|e| e.name == dirname_upper) {
+            return Err("Directory already exists");
+        }
+
+        // 空のディレクトリ用にクラスタを1つ確保
+        let cluster = self.allocate_clusters(1)?;
+
+        // ディレクトリクラスタを初期化（"." と ".." エントリを作成）
+        let first_sector = self.data_start_sector
+            + ((cluster as u32) - 2) * (self.bpb.sectors_per_cluster as u32);
+
+        for sect_offset in 0..(self.bpb.sectors_per_cluster as u32) {
+            let sector = first_sector + sect_offset;
+            let mut buf = [0u8; SECTOR_SIZE];
+
+            if sect_offset == 0 {
+                // "." エントリ（自分自身を指す）
+                buf[0..8].copy_from_slice(b".       ");
+                buf[8..11].copy_from_slice(b"   ");
+                buf[11] = ATTR_DIRECTORY;
+                let cluster_bytes = cluster.to_le_bytes();
+                buf[26] = cluster_bytes[0];
+                buf[27] = cluster_bytes[1];
+
+                // ".." エントリ（親を指す、ルートなので 0）
+                buf[32..40].copy_from_slice(b"..      ");
+                buf[40..43].copy_from_slice(b"   ");
+                buf[43] = ATTR_DIRECTORY;
+                // first_cluster = 0 はルートディレクトリを意味する
+                buf[58] = 0;
+                buf[59] = 0;
+            }
+
+            self.write_sector(sector, &buf)?;
+        }
+
+        // ルートディレクトリにエントリを追加
+        let entry = DirEntry {
+            name: dirname_upper,
+            attr: ATTR_DIRECTORY,
+            first_cluster: cluster,
+            size: 0,
+        };
+        self.add_root_dir_entry(&entry)?;
+
+        Ok(())
+    }
+
+    /// ディレクトリを削除する（ルートディレクトリ直下、空のディレクトリのみ対応）
+    pub fn delete_directory(&self, dirname: &str) -> Result<(), &'static str> {
+        let dirname_upper: String = dirname
+            .trim()
+            .trim_start_matches('/')
+            .chars()
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+
+        // ディレクトリを検索
+        let entries = self.list_root_dir()?;
+        let dir_entry = entries
+            .iter()
+            .find(|e| e.name == dirname_upper && (e.attr & ATTR_DIRECTORY) != 0)
+            .ok_or("Directory not found")?;
+
+        // ディレクトリが空かチェック
+        let subdir_entries = self.list_subdir(dir_entry.first_cluster)?;
+        // "." と ".." 以外のエントリがあれば削除不可
+        let real_entries: Vec<_> = subdir_entries
+            .iter()
+            .filter(|e| e.name != "." && e.name != "..")
+            .collect();
+        if !real_entries.is_empty() {
+            return Err("Directory not empty");
+        }
+
+        // クラスタチェーンを解放
+        if dir_entry.first_cluster >= 2 {
+            self.free_cluster_chain(dir_entry.first_cluster)?;
+        }
+
+        // ルートディレクトリからエントリを削除
+        self.delete_root_dir_entry(&dirname_upper)?;
+
+        Ok(())
+    }
+
+    /// ルートディレクトリからエントリを削除する（内部用）
+    fn delete_root_dir_entry(&self, name: &str) -> Result<(), &'static str> {
+        let mut buf = [0u8; SECTOR_SIZE];
+
+        for sect_offset in 0..self.root_dir_sectors {
+            let sector = self.root_dir_start_sector + sect_offset;
+            {
+                let mut drv = virtio_blk::VIRTIO_BLK.lock();
+                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                drv.read_sector(sector as u64, &mut buf)?;
+            }
+
+            let entries_per_sector = SECTOR_SIZE / 32;
+            for i in 0..entries_per_sector {
+                let offset = i * 32;
+                let first_byte = buf[offset];
+
+                if first_byte == 0x00 {
+                    return Err("Entry not found");
+                }
+                if first_byte == 0xE5 {
+                    continue;
+                }
+
+                let attr = buf[offset + 11];
+                if attr == ATTR_LFN || attr & ATTR_VOLUME_ID != 0 {
+                    continue;
+                }
+
+                // ファイル名をパース
+                let name_part = core::str::from_utf8(&buf[offset..offset + 8])
+                    .unwrap_or("")
+                    .trim_end();
+                let ext_part = core::str::from_utf8(&buf[offset + 8..offset + 11])
+                    .unwrap_or("")
+                    .trim_end();
+                let entry_name = if ext_part.is_empty() {
+                    String::from(name_part)
+                } else {
+                    let mut s = String::from(name_part);
+                    s.push('.');
+                    s.push_str(ext_part);
+                    s
+                };
+
+                if entry_name == name {
+                    // 削除済みマーク
+                    buf[offset] = 0xE5;
+                    self.write_sector(sector, &buf)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        Err("Entry not found")
+    }
+}
+
+// =================================================================
+// VFS trait の実装
+// =================================================================
+
+use alloc::boxed::Box;
+use crate::vfs::{FileSystem, VfsNode, VfsNodeKind, VfsDirEntry, VfsError};
+
+/// FAT16 ファイルノード（ファイルの内容を保持する）
+///
+/// VfsNode trait を実装し、読み取り操作を提供する。
+/// 現在の実装ではファイル全体をメモリに読み込む。
+pub struct Fat16File {
+    /// ファイルの内容
+    data: Vec<u8>,
+}
+
+impl Fat16File {
+    /// ファイルの内容から Fat16File を作成する
+    pub fn new(data: Vec<u8>) -> Self {
+        Self { data }
+    }
+}
+
+impl VfsNode for Fat16File {
+    fn kind(&self) -> VfsNodeKind {
+        VfsNodeKind::File
+    }
+
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    fn read(&self, offset: usize, buf: &mut [u8]) -> Result<usize, VfsError> {
+        if offset >= self.data.len() {
+            return Ok(0); // EOF
+        }
+
+        let remaining = self.data.len() - offset;
+        let to_copy = core::cmp::min(remaining, buf.len());
+        buf[..to_copy].copy_from_slice(&self.data[offset..offset + to_copy]);
+        Ok(to_copy)
+    }
+
+    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, VfsError> {
+        // 現状は読み取り専用
+        // TODO: 書き込みサポート
+        Err(VfsError::NotSupported)
+    }
+}
+
+impl FileSystem for Fat16 {
+    fn name(&self) -> &str {
+        "fat16"
+    }
+
+    fn open(&self, path: &str) -> Result<Box<dyn VfsNode>, VfsError> {
+        // パスを正規化（先頭の "/" を除去）
+        let path = path.trim().trim_start_matches('/');
+
+        if path.is_empty() {
+            return Err(VfsError::NotAFile);
+        }
+
+        // ファイルを読み取る
+        let data = self.read_file(path).map_err(|e| {
+            match e {
+                "File not found" => VfsError::NotFound,
+                "Cannot read directory" => VfsError::NotAFile,
+                _ => VfsError::IoError,
+            }
+        })?;
+
+        Ok(Box::new(Fat16File::new(data)))
+    }
+
+    fn list_dir(&self, path: &str) -> Result<Vec<VfsDirEntry>, VfsError> {
+        // パスを正規化
+        let path = path.trim();
+
+        // ディレクトリエントリを取得
+        let entries = Fat16::list_dir(self, path).map_err(|e| {
+            match e {
+                "Directory not found" => VfsError::NotFound,
+                "Not a directory" => VfsError::NotADirectory,
+                _ => VfsError::IoError,
+            }
+        })?;
+
+        // VfsDirEntry に変換
+        let vfs_entries = entries
+            .into_iter()
+            .map(|e| VfsDirEntry {
+                name: e.name,
+                kind: if (e.attr & ATTR_DIRECTORY) != 0 {
+                    VfsNodeKind::Directory
+                } else {
+                    VfsNodeKind::File
+                },
+                size: e.size as usize,
+            })
+            .collect();
+
+        Ok(vfs_entries)
+    }
+
+    fn create_file(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
+        Fat16::create_file(self, path, data).map_err(|e| {
+            match e {
+                "File already exists" => VfsError::AlreadyExists,
+                "Root directory is full" => VfsError::NoSpace,
+                "No free clusters available" => VfsError::NoSpace,
+                _ => VfsError::IoError,
+            }
+        })
+    }
+
+    fn delete_file(&self, path: &str) -> Result<(), VfsError> {
+        Fat16::delete_file(self, path).map_err(|e| {
+            match e {
+                "File not found" => VfsError::NotFound,
+                _ => VfsError::IoError,
+            }
+        })
+    }
+
+    fn create_dir(&self, path: &str) -> Result<(), VfsError> {
+        self.create_directory(path).map_err(|e| {
+            match e {
+                "Directory already exists" => VfsError::AlreadyExists,
+                "Root directory is full" => VfsError::NoSpace,
+                "No free clusters available" => VfsError::NoSpace,
+                _ => VfsError::IoError,
+            }
+        })
+    }
+
+    fn delete_dir(&self, path: &str) -> Result<(), VfsError> {
+        self.delete_directory(path).map_err(|e| {
+            match e {
+                "Directory not found" => VfsError::NotFound,
+                "Directory not empty" => VfsError::NotAFile, // 適切なエラーがないので代用
+                _ => VfsError::IoError,
+            }
+        })
     }
 }

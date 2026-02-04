@@ -54,10 +54,50 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 ## ファイルハンドル (70-79)
 
+Capability-based security を実現するためのハンドル操作。
+
+### 権限ビット
+
+| ビット | 名前 | 意味 |
+|--------|------|------|
+| 0x0001 | READ | ファイル内容の読み取り |
+| 0x0002 | WRITE | ファイル内容の書き込み |
+| 0x0004 | SEEK | ファイルポジションの変更 |
+| 0x0008 | STAT | メタデータの取得 |
+| 0x0010 | ENUM | ディレクトリ内のエントリ列挙 |
+| 0x0020 | CREATE | ディレクトリ内にファイルを作成 |
+| 0x0040 | DELETE | ディレクトリ内のファイルを削除 |
+| 0x0080 | LOOKUP | 相対パスでファイルを開く（openat 用） |
+
+### システムコール
+
 - `70` `SYS_OPEN(path_ptr, path_len, handle_ptr, rights) -> 0`
+  - 絶対パスでファイルを開く
+  - `handle_ptr`: Handle 構造体の書き込み先
+  - `rights`: 要求する権限ビット
+
 - `71` `SYS_HANDLE_READ(handle_ptr, buf_ptr, len) -> n`
+  - ハンドルからデータを読み取る
+  - READ 権限が必要
+
 - `72` `SYS_HANDLE_WRITE(handle_ptr, buf_ptr, len) -> n`
+  - ハンドルにデータを書き込む
+  - WRITE 権限が必要（現在は未実装）
+
 - `73` `SYS_HANDLE_CLOSE(handle_ptr) -> 0`
+  - ハンドルを閉じる
+
+- `74` `SYS_OPENAT(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights) -> 0`
+  - ディレクトリハンドルからの相対パスでファイルを開く
+  - **セキュリティ**: Capability-based security の核心
+    - `dir_handle` に LOOKUP 権限が必要
+    - `path` が "/" で始まっていたらエラー（絶対パス禁止）
+    - `path` に ".." が含まれていたらエラー（パストラバーサル防止）
+    - 新しいハンドルの権限 = `requested_rights & dir_handle.rights`
+
+- `75` `SYS_RESTRICT_RIGHTS(handle_ptr, new_rights, new_handle_ptr) -> 0`
+  - ハンドルの権限を縮小して新しいハンドルを作成
+  - **セキュリティ**: 権限は縮小のみ可能、拡大はエラー
 
 ## ブロックデバイス (80-89)
 
@@ -68,3 +108,52 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 - `90` `SYS_IPC_SEND(dest_task_id, buf_ptr, len) -> 0`
 - `91` `SYS_IPC_RECV(sender_ptr, buf_ptr, buf_len, timeout_ms) -> n`
+
+## エラーコード
+
+SABOS 独自のエラーコード体系。POSIX 互換は目指さない。
+
+### ポインタ・メモリ関連 (1-9)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -1 | NULL_POINTER | ポインタが null |
+| -2 | INVALID_ADDRESS | アドレスがユーザー空間の範囲外 |
+| -3 | MISALIGNED_POINTER | アラインメントが不正 |
+| -4 | BUFFER_OVERFLOW | バッファがユーザー空間をオーバーフロー |
+
+### 引数・データ形式関連 (10-19)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -10 | INVALID_ARGUMENT | 不正な引数 |
+| -11 | INVALID_UTF8 | 不正な UTF-8 文字列 |
+
+### ファイル・ハンドル関連 (20-29)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -20 | FILE_NOT_FOUND | ファイルが見つからない |
+| -21 | INVALID_HANDLE | 不正なハンドル |
+| -22 | READ_ONLY | 書き込み禁止 |
+
+### 権限・セキュリティ関連 (30-39)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -30 | PERMISSION_DENIED | 権限不足 |
+| -31 | PATH_TRAVERSAL | パストラバーサル試行（".." を含むパス） |
+
+### システム関連 (40-49)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -40 | UNKNOWN_SYSCALL | 未知のシステムコール |
+| -41 | NOT_SUPPORTED | 未対応の操作 |
+| -42 | TIMEOUT | タイムアウト |
+
+### その他
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -99 | OTHER | その他のエラー |
