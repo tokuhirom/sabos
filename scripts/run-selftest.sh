@@ -112,6 +112,20 @@ for i in {1..10}; do
 done
 
 if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+    echo "Retrying mkdir command..."
+    for c in m k d i r spc t e s t d i r ret; do
+        echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+        sleep "$KEY_DELAY"
+    done
+    for i in {1..10}; do
+        if grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+fi
+
+if ! grep -q "Directory created successfully" "$LOG_FILE" 2>/dev/null; then
     echo -e "${RED}ERROR: mkdir output not found${NC}"
     cat "$LOG_FILE"
     exit 1
@@ -135,6 +149,20 @@ for i in {1..10}; do
     fi
     sleep 1
 done
+
+if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+    echo "Retrying rmdir command..."
+    for c in r m d i r spc t e s t d i r ret; do
+        echo "sendkey $c" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+        sleep "$KEY_DELAY"
+    done
+    for i in {1..10}; do
+        if grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+fi
 
 if ! grep -q "Directory removed successfully" "$LOG_FILE" 2>/dev/null; then
     echo -e "${RED}ERROR: rmdir output not found${NC}"

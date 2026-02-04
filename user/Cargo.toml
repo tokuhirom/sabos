@@ -8,3 +8,6 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[dependencies]
+font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }

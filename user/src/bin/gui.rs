@@ -16,12 +16,14 @@ mod syscall;
 
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
+use font8x8::UnicodeFonts;
 
 const OPCODE_CLEAR: u32 = 1;
 const OPCODE_RECT: u32 = 2;
 const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
+const OPCODE_TEXT: u32 = 6;
 
 const IPC_BUF_SIZE: usize = 2048;
 
@@ -121,6 +123,30 @@ fn gui_loop() -> ! {
                     let filled = payload[15] != 0;
                     let _ = payload[16]; // 予約（将来のアルファなど）
                     if draw_circle(&mut state, cx, cy, r, red, green, blue, filled).is_err() {
+                        status = -10;
+                    }
+                } else {
+                    status = -10;
+                }
+            }
+            OPCODE_TEXT => {
+                if payload.len() >= 18 {
+                    let x = read_u32(payload, 0).unwrap_or(0);
+                    let y = read_u32(payload, 4).unwrap_or(0);
+                    let fg = (payload[8], payload[9], payload[10]);
+                    let bg = (payload[11], payload[12], payload[13]);
+                    let len = read_u32(payload, 14).unwrap_or(0) as usize;
+                    if 18 + len == payload.len() {
+                        let text_bytes = &payload[18..18 + len];
+                        let text = core::str::from_utf8(text_bytes).map_err(|_| ()).ok();
+                        if let Some(text) = text {
+                            if draw_text(&mut state, x, y, fg, bg, text).is_err() {
+                                status = -10;
+                            }
+                        } else {
+                            status = -10;
+                        }
+                    } else {
                         status = -10;
                     }
                 } else {
@@ -327,6 +353,58 @@ fn draw_hline(
     let y = y as u32;
     for x in x0..=x1 {
         set_pixel(state, x as u32, y, r, g, b)?;
+    }
+    Ok(())
+}
+
+fn draw_text(
+    state: &mut GuiState,
+    x: u32,
+    y: u32,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    text: &str,
+) -> Result<(), ()> {
+    if x >= state.width || y >= state.height {
+        return Err(());
+    }
+    let char_count = text.chars().count() as u32;
+    let total_w = char_count.checked_mul(8).ok_or(())?;
+    if x + total_w > state.width || y + 8 > state.height {
+        return Err(());
+    }
+
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        draw_char(state, cursor_x, y, fg, bg, ch)?;
+        cursor_x += 8;
+    }
+    Ok(())
+}
+
+fn draw_char(
+    state: &mut GuiState,
+    x: u32,
+    y: u32,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    ch: char,
+) -> Result<(), ()> {
+    let glyph = font8x8::BASIC_FONTS
+        .get(ch)
+        .unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap());
+
+    for (row, &bits) in glyph.iter().enumerate() {
+        for col in 0..8 {
+            let on = (bits >> col) & 1 == 1;
+            let px = x + col as u32;
+            let py = y + row as u32;
+            if on {
+                set_pixel(state, px, py, fg.0, fg.1, fg.2)?;
+            } else {
+                set_pixel(state, px, py, bg.0, bg.1, bg.2)?;
+            }
+        }
     }
     Ok(())
 }

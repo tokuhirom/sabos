@@ -1298,6 +1298,7 @@ fn cmd_http(args: &str) {
 ///   gui rect 10 10 80 40 255 0 0
 ///   gui circle 120 120 40 255 255 0
 ///   gui fillcircle 160 160 30 0 180 255
+///   gui text 20 20 255 255 255 0 0 0 Hello
 fn cmd_gui(args: &str) {
     let (sub, rest) = split_command(args);
     let mut gui = gui_client::GuiClient::new();
@@ -1346,6 +1347,37 @@ fn cmd_gui(args: &str) {
             }
             let _ = gui.present();
         }
+        "text" => {
+            let mut parts = rest.split_whitespace();
+            let Some(x) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(y) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(fr) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(fg) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(fb) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(br) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(bg) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            let Some(bb) = parse_u32_arg(parts.next()) else { return print_gui_usage(); };
+            if fr > 255 || fg > 255 || fb > 255 || br > 255 || bg > 255 || bb > 255 {
+                syscall::write_str("Error: color must be 0-255\n");
+                return;
+            }
+            let text = parts.collect::<Vec<&str>>().join(" ");
+            if text.is_empty() {
+                syscall::write_str("Error: text is required\n");
+                return;
+            }
+            if gui.text(
+                x,
+                y,
+                (fr as u8, fg as u8, fb as u8),
+                (br as u8, bg as u8, bb as u8),
+                text.as_str(),
+            ).is_err() {
+                syscall::write_str("Error: gui text failed\n");
+                return;
+            }
+            let _ = gui.present();
+        }
         _ => {
             print_gui_usage();
         }
@@ -1358,6 +1390,7 @@ fn print_gui_usage() {
     syscall::write_str("  gui rect x y w h r g b\n");
     syscall::write_str("  gui circle cx cy r red green blue\n");
     syscall::write_str("  gui fillcircle cx cy r red green blue\n");
+    syscall::write_str("  gui text x y fr fg fb br bg bb <text>\n");
 }
 
 fn parse_u32_arg(s: Option<&str>) -> Option<u32> {

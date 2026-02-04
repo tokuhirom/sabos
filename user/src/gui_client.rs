@@ -7,6 +7,7 @@
 
 use crate::json;
 use crate::syscall;
+use alloc::vec::Vec;
 
 const GUI_TASK_NAME: &str = "GUI.ELF";
 
@@ -15,6 +16,7 @@ const OPCODE_RECT: u32 = 2;
 const OPCODE_LINE: u32 = 3;
 const OPCODE_PRESENT: u32 = 4;
 const OPCODE_CIRCLE: u32 = 5;
+const OPCODE_TEXT: u32 = 6;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
@@ -74,6 +76,20 @@ impl GuiClient {
     ) -> Result<(), ()> {
         let payload = build_circle_payload(cx, cy, r, red, green, blue, filled);
         let status = self.request(OPCODE_CIRCLE, &payload)?;
+        if status < 0 { Err(()) } else { Ok(()) }
+    }
+
+    /// 文字列描画
+    pub fn text(
+        &mut self,
+        x: u32,
+        y: u32,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+        text: &str,
+    ) -> Result<(), ()> {
+        let payload = build_text_payload(x, y, fg, bg, text)?;
+        let status = self.request(OPCODE_TEXT, &payload)?;
         if status < 0 { Err(()) } else { Ok(()) }
     }
 
@@ -171,6 +187,29 @@ fn build_circle_payload(
     payload[15] = if filled { 1 } else { 0 };
     payload[16] = 0;
     payload
+}
+
+fn build_text_payload(
+    x: u32,
+    y: u32,
+    fg: (u8, u8, u8),
+    bg: (u8, u8, u8),
+    text: &str,
+) -> Result<Vec<u8>, ()> {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut payload = Vec::with_capacity(18 + len);
+    payload.extend_from_slice(&x.to_le_bytes());
+    payload.extend_from_slice(&y.to_le_bytes());
+    payload.push(fg.0);
+    payload.push(fg.1);
+    payload.push(fg.2);
+    payload.push(bg.0);
+    payload.push(bg.1);
+    payload.push(bg.2);
+    payload.extend_from_slice(&(len as u32).to_le_bytes());
+    payload.extend_from_slice(bytes);
+    Ok(payload)
 }
 
 /// タスク一覧から指定名のタスク ID を探す

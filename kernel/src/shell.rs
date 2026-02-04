@@ -1923,6 +1923,45 @@ impl Shell {
             return false;
         }
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
+        if status != 0 {
+            return false;
+        }
+
+        // TEXT (opcode=6) を送る
+        let opcode_text: u32 = 6;
+        let text = b"HI";
+        let mut payload_text = [0u8; 18 + 2];
+        payload_text[0..4].copy_from_slice(&10u32.to_le_bytes()); // x
+        payload_text[4..8].copy_from_slice(&10u32.to_le_bytes()); // y
+        payload_text[8] = 255;
+        payload_text[9] = 255;
+        payload_text[10] = 255;
+        payload_text[11] = 0;
+        payload_text[12] = 0;
+        payload_text[13] = 0;
+        payload_text[14..18].copy_from_slice(&(text.len() as u32).to_le_bytes());
+        payload_text[18..20].copy_from_slice(text);
+
+        req[0..4].copy_from_slice(&opcode_text.to_le_bytes());
+        req[4..8].copy_from_slice(&(payload_text.len() as u32).to_le_bytes());
+        req[8..8 + payload_text.len()].copy_from_slice(&payload_text);
+
+        if crate::ipc::send(sender, gui_id, req[..header_len + payload_text.len()].to_vec()).is_err() {
+            return false;
+        }
+
+        let msg = match crate::ipc::recv(sender, 5000) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if msg.data.len() < 12 {
+            return false;
+        }
+        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
+        if resp_opcode != opcode_text {
+            return false;
+        }
+        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
         status == 0
     }
 
