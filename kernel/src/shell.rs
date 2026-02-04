@@ -1178,6 +1178,15 @@ impl Shell {
             failed += 1;
         }
 
+        // 1.5. メモリマッピングの整合性テスト
+        if self.test_memory_mapping() {
+            Self::print_pass("memory_mapping");
+            passed += 1;
+        } else {
+            Self::print_fail("memory_mapping");
+            failed += 1;
+        }
+
         // 2. ページングのテスト
         if self.test_paging() {
             Self::print_pass("paging");
@@ -1373,6 +1382,73 @@ impl Shell {
 
         // drop されてメモリが解放されることを期待（明示的なチェックは難しいので省略）
         true
+    }
+
+    /// メモリマッピングの整合性テスト
+    ///
+    /// create_process_page_table() → map_user_pages_in_process() → translate_in_process()
+    /// → フレーム解放 → destroy_process_page_table() の流れが破綻しないことを確認する。
+    fn test_memory_mapping(&self) -> bool {
+        // 1. 事前のフレーム数を記録
+        let before = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.allocated_count()
+        };
+
+        // 2. プロセス用ページテーブルを作成
+        let l4 = paging::create_process_page_table();
+
+        // 3. ユーザー空間に 2 ページ分マッピング
+        let test_vaddr = 0x0300_0000u64; // 48MiB 付近（ユーザー空間）
+        let frames = paging::map_user_pages_in_process(
+            l4,
+            VirtAddr::new(test_vaddr),
+            4096 * 2,
+            &[],
+        );
+        if frames.len() != 2 {
+            paging::destroy_process_page_table(l4);
+            return false;
+        }
+
+        // 4. 仮想→物理の変換が成功することを確認
+        let phys0 = paging::translate_in_process(l4, VirtAddr::new(test_vaddr));
+        let phys1 = paging::translate_in_process(l4, VirtAddr::new(test_vaddr + 4096));
+        if phys0.is_none() || phys1.is_none() {
+            paging::destroy_process_page_table(l4);
+            return false;
+        }
+
+        // 5. 物理フレームに書き込み→読み戻し（アイデンティティマッピング前提）
+        unsafe {
+            let p0 = frames[0].start_address().as_u64() as *mut u8;
+            let p1 = frames[1].start_address().as_u64() as *mut u8;
+            *p0 = 0xAA;
+            *p1 = 0x55;
+            if *p0 != 0xAA || *p1 != 0x55 {
+                paging::destroy_process_page_table(l4);
+                return false;
+            }
+        }
+
+        // 6. ユーザーフレームを手動で解放
+        {
+            let mut fa = FRAME_ALLOCATOR.lock();
+            for f in &frames {
+                unsafe { fa.deallocate_frame(*f); }
+            }
+        }
+
+        // 7. ページテーブルを破棄
+        paging::destroy_process_page_table(l4);
+
+        // 8. フレーム数が元に戻ったことを確認
+        let after = {
+            let fa = FRAME_ALLOCATOR.lock();
+            fa.allocated_count()
+        };
+
+        before == after
     }
 
     /// ページングのテスト
