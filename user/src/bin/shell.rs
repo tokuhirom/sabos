@@ -27,6 +27,7 @@
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
+// - パイプ（|）: echo/cat/sed の簡易パイプライン
 // - selftest: カーネル selftest を実行
 // - halt: システム停止
 
@@ -196,6 +197,14 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
     // コマンドと引数に分割
     let (cmd, args) = split_command(line_str);
 
+    if line_str.contains('|') {
+        if let Err(msg) = execute_pipeline(line_str, state) {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+        }
+        return;
+    }
+
     match cmd {
         "echo" => cmd_echo(args),
         "help" => cmd_help(),
@@ -241,6 +250,99 @@ fn split_command(line: &str) -> (&str, &str) {
         Some(pos) => (&line[..pos], line[pos + 1..].trim_start()),
         None => (line, ""),
     }
+}
+
+/// パイプラインを実行（簡易版）
+///
+/// 対応コマンド: echo / cat / sed
+/// 入出力は UTF-8 テキスト前提で扱う。
+fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in line.split('|') {
+        let p = part.trim();
+        if p.is_empty() {
+            return Err("Error: empty pipeline segment");
+        }
+        parts.push(p);
+    }
+    if parts.len() < 2 {
+        return Err("Error: invalid pipeline");
+    }
+
+    let mut input: Option<String> = None;
+    for (i, part) in parts.iter().enumerate() {
+        let (cmd, args) = split_command(part);
+        let output = match cmd {
+            "echo" => pipeline_echo(args),
+            "cat" => pipeline_cat(args, state, input.as_deref())?,
+            "sed" => pipeline_sed(args, state, input.as_deref())?,
+            _ => return Err("Error: pipeline supports only echo/cat/sed"),
+        };
+
+        if i + 1 == parts.len() {
+            syscall::write_str(&output);
+        } else {
+            input = Some(output);
+        }
+    }
+
+    Ok(())
+}
+
+fn pipeline_echo(args: &str) -> String {
+    let mut out = String::new();
+    out.push_str(args);
+    out.push('\n');
+    out
+}
+
+fn pipeline_cat(args: &str, state: &ShellState, input: Option<&str>) -> Result<String, &'static str> {
+    let target = args.trim();
+    if target.is_empty() {
+        if let Some(text) = input {
+            return Ok(String::from(text));
+        }
+        return Err("Usage: cat <filename>");
+    }
+
+    let handle = open_file_from_args(state, target)?;
+    let data = read_all_handle(&handle).map_err(|_| "Error: Failed to read file")?;
+    let _ = syscall::handle_close(&handle);
+
+    let Ok(text) = core::str::from_utf8(&data) else {
+        return Err("Error: invalid UTF-8 in input");
+    };
+    Ok(String::from(text))
+}
+
+fn pipeline_sed(args: &str, state: &ShellState, input: Option<&str>) -> Result<String, &'static str> {
+    let (suppress, expr, file) = parse_sed_args(args)?;
+    let (from, to, global, print_on_change) = parse_sed_expr(expr)?;
+    if from.is_empty() {
+        return Err("Error: empty search pattern is not supported");
+    }
+
+    let owned = if !file.is_empty() {
+        let handle = open_file_from_args(state, file)?;
+        let data = read_all_handle(&handle).map_err(|_| "Error: Failed to read file")?;
+        let _ = syscall::handle_close(&handle);
+        let Ok(text) = core::str::from_utf8(&data) else {
+            return Err("Error: invalid UTF-8 in input");
+        };
+        Some(String::from(text))
+    } else {
+        None
+    };
+
+    let text = if let Some(ref owned_text) = owned {
+        owned_text.as_str()
+    } else if let Some(text) = input {
+        text
+    } else {
+        return Err("Usage: sed [-n] s/OLD/NEW/[gp] <file>");
+    };
+
+    sed_apply(text, from, to, global, print_on_change, suppress)
 }
 
 /// ルートディレクトリのハンドルを開く
@@ -358,6 +460,7 @@ fn cmd_help() {
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
     syscall::write_str("  sed [-n] s/OLD/NEW/[gp] <file> - Simple sed (literal)\n");
+    syscall::write_str("  pipe (|)          - echo/cat/sed pipeline\n");
     syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
@@ -532,6 +635,61 @@ fn parse_sed_expr(expr: &str) -> Result<(&str, &str, bool, bool), &'static str> 
     Ok((from, to, global, print_on_change))
 }
 
+/// sed の引数をパースする
+///
+/// 形式: [-n] s/OLD/NEW/[gp] <file>
+fn parse_sed_args(args: &str) -> Result<(bool, &str, &str), &'static str> {
+    let mut parts = args.split_whitespace();
+    let mut suppress = false;
+    let first = parts.next().unwrap_or("");
+    let (expr, file) = if first == "-n" {
+        suppress = true;
+        (parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+    } else {
+        (first, parts.next().unwrap_or(""))
+    };
+    if parts.next().is_some() {
+        return Err("Usage: sed [-n] s/OLD/NEW/[gp] <file>");
+    }
+    if expr.is_empty() {
+        return Err("Usage: sed [-n] s/OLD/NEW/[gp] <file>");
+    }
+    Ok((suppress, expr, file))
+}
+
+/// sed の変換を適用する
+fn sed_apply(
+    text: &str,
+    from: &str,
+    to: &str,
+    global: bool,
+    print_on_change: bool,
+    suppress: bool,
+) -> Result<String, &'static str> {
+    let mut out = String::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= text.len() {
+        let at_end = i == text.len();
+        let is_nl = !at_end && text.as_bytes()[i] == b'\n';
+        if at_end || is_nl {
+            let mut line = &text[start..i];
+            if let Some(b'\r') = line.as_bytes().last().copied() {
+                line = &line[..line.len().saturating_sub(1)];
+            }
+            let (line_out, changed) = replace_literal(line, from, to, global);
+            let should_print = if suppress { print_on_change && changed } else { true };
+            if should_print {
+                out.push_str(line_out.as_str());
+                out.push('\n');
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 /// ハンドルから全データを読み取る
 fn read_all_handle(handle: &syscall::Handle) -> Result<Vec<u8>, syscall::SyscallResult> {
     let mut out = Vec::new();
@@ -559,21 +717,15 @@ fn read_all_handle(handle: &syscall::Handle) -> Result<Vec<u8>, syscall::Syscall
 /// - g フラグで全置換、p フラグで置換成功時に出力
 /// - -n を指定すると自動出力を抑制する
 fn cmd_sed(args: &str, state: &ShellState) {
-    let mut parts = args.split_whitespace();
-    let mut suppress = false;
-    let first = parts.next().unwrap_or("");
-    let (expr, file) = if first == "-n" {
-        suppress = true;
-        (parts.next().unwrap_or(""), parts.next().unwrap_or(""))
-    } else {
-        (first, parts.next().unwrap_or(""))
+    let (suppress, expr, file) = match parse_sed_args(args) {
+        Ok(v) => v,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
     };
-    if parts.next().is_some() {
-        syscall::write_str("Usage: sed [-n] s/OLD/NEW/[gp] <file>\n");
-        return;
-    }
-
-    if expr.is_empty() || file.is_empty() {
+    if file.is_empty() {
         syscall::write_str("Usage: sed [-n] s/OLD/NEW/[gp] <file>\n");
         return;
     }
@@ -610,33 +762,19 @@ fn cmd_sed(args: &str, state: &ShellState) {
         }
     };
     let _ = syscall::handle_close(&handle);
-
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i <= data.len() {
-        let at_end = i == data.len();
-        let is_nl = !at_end && data[i] == b'\n';
-        if at_end || is_nl {
-            let mut line = &data[start..i];
-            if let Some(b'\r') = line.last().copied() {
-                line = &line[..line.len().saturating_sub(1)];
-            }
-            let Ok(text) = core::str::from_utf8(line) else {
-                syscall::write_str("Error: invalid UTF-8 in input\n");
-                return;
-            };
-
-            let (out, changed) = replace_literal(text, from, to, global);
-            let should_print = if suppress { print_on_change && changed } else { true };
-            if should_print {
-                syscall::write_str(out.as_str());
-                syscall::write_str("\n");
-            }
-
-            start = i + 1;
+    let Ok(text) = core::str::from_utf8(&data) else {
+        syscall::write_str("Error: invalid UTF-8 in input\n");
+        return;
+    };
+    let out = match sed_apply(text, from, to, global, print_on_change, suppress) {
+        Ok(v) => v,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
         }
-        i += 1;
-    }
+    };
+    syscall::write_str(out.as_str());
 }
 
 /// write コマンド: ファイルを作成/上書き
