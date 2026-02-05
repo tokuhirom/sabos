@@ -29,7 +29,7 @@
 // - halt: システム停止
 
 use crate::syscall;
-use crate::fat16::Fat16;
+use crate::fat32::Fat32;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -283,32 +283,6 @@ fn normalize_path(path: &str) -> String {
     result
 }
 
-/// ルート直下だけを許可する簡易チェック
-fn is_root_only_path(path: &str) -> bool {
-    if path == "/" {
-        return true;
-    }
-    let trimmed = path.trim_start_matches('/');
-    !trimmed.is_empty() && !trimmed.contains('/')
-}
-
-/// ルート直下のファイル名を取り出す
-fn root_entry_name(path: &str) -> Result<&str, &'static str> {
-    if !is_root_only_path(path) {
-        return Err("Error: Only root directory is supported yet");
-    }
-    let trimmed = path.trim_start_matches('/');
-    if trimmed.is_empty() {
-        return Err("Error: Invalid path");
-    }
-    Ok(trimmed)
-}
-
-/// ルート直下のディレクトリ名を取り出す
-fn root_dir_name(path: &str) -> Result<&str, &'static str> {
-    root_entry_name(path)
-}
-
 /// echo コマンド: 引数をそのまま出力
 fn cmd_echo(args: &str) {
     syscall::write_str(args);
@@ -329,8 +303,8 @@ fn cmd_help() {
     syscall::write_str("  cat <file>        - Display file contents\n");
     syscall::write_str("  write <file> <text> - Create/overwrite file\n");
     syscall::write_str("  rm <file>         - Delete file\n");
-    syscall::write_str("  mkdir <dir>       - Create directory (root only)\n");
-    syscall::write_str("  rmdir <dir>       - Remove empty directory (root only)\n");
+    syscall::write_str("  mkdir <dir>       - Create directory\n");
+    syscall::write_str("  rmdir <dir>       - Remove empty directory\n");
     syscall::write_str("  cd <dir>          - Change current directory\n");
     syscall::write_str("  pwd               - Print current directory\n");
     syscall::write_str("  pushd <dir>       - Push directory and change to it\n");
@@ -366,10 +340,10 @@ fn cmd_exit() {
 
 /// df コマンド: ファイルシステム使用量を表示
 fn cmd_df() {
-    let fs = match Fat16::new() {
+    let fs = match Fat32::new() {
         Ok(v) => v,
         Err(err) => {
-            syscall::write_str("Error: Failed to init FAT16: ");
+            syscall::write_str("Error: Failed to init FAT32: ");
             syscall::write_str(err);
             syscall::write_str("\n");
             return;
@@ -391,7 +365,7 @@ fn cmd_df() {
     let free_bytes = free_clusters as u64 * cluster_bytes;
     let used_bytes = total_bytes.saturating_sub(free_bytes);
 
-    syscall::write_str("{\"fs\":\"fat16\",\"total_bytes\":");
+    syscall::write_str("{\"fs\":\"fat32\",\"total_bytes\":");
     write_number(total_bytes);
     syscall::write_str(",\"used_bytes\":");
     write_number(used_bytes);
@@ -489,24 +463,16 @@ fn cmd_write(args: &str, state: &ShellState) {
     }
 
     let abs_path = resolve_path(&state.cwd_text, filename);
-    let name = match root_entry_name(&abs_path) {
-        Ok(n) => n,
-        Err(msg) => {
-            syscall::write_str(msg);
-            syscall::write_str("\n");
-            return;
-        }
-    };
 
-    let fs = match Fat16::new() {
+    let fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
+            syscall::write_str("Error: FAT32 not available\n");
             return;
         }
     };
 
-    if fs.create_file(name, data.as_bytes()).is_err() {
+    if fs.create_file(&abs_path, data.as_bytes()).is_err() {
         syscall::write_str("Error: Failed to write file\n");
         return;
     }
@@ -522,24 +488,16 @@ fn cmd_rm(args: &str, state: &ShellState) {
     }
 
     let abs_path = resolve_path(&state.cwd_text, args);
-    let name = match root_entry_name(&abs_path) {
-        Ok(n) => n,
-        Err(msg) => {
-            syscall::write_str(msg);
-            syscall::write_str("\n");
-            return;
-        }
-    };
 
-    let fs = match Fat16::new() {
+    let fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
+            syscall::write_str("Error: FAT32 not available\n");
             return;
         }
     };
 
-    if fs.delete_file(name).is_err() {
+    if fs.delete_file(&abs_path).is_err() {
         syscall::write_str("Error: Failed to delete file\n");
         return;
     }
@@ -556,24 +514,16 @@ fn cmd_mkdir(args: &str, state: &ShellState) {
     }
 
     let abs_path = resolve_path(&state.cwd_text, name);
-    let entry_name = match root_dir_name(&abs_path) {
-        Ok(n) => n,
-        Err(msg) => {
-            syscall::write_str(msg);
-            syscall::write_str("\n");
-            return;
-        }
-    };
 
-    let fs = match Fat16::new() {
+    let fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
+            syscall::write_str("Error: FAT32 not available\n");
             return;
         }
     };
 
-    if fs.create_dir(entry_name).is_err() {
+    if fs.create_dir(&abs_path).is_err() {
         syscall::write_str("Error: Failed to create directory\n");
         return;
     }
@@ -590,24 +540,16 @@ fn cmd_rmdir(args: &str, state: &ShellState) {
     }
 
     let abs_path = resolve_path(&state.cwd_text, name);
-    let entry_name = match root_dir_name(&abs_path) {
-        Ok(n) => n,
-        Err(msg) => {
-            syscall::write_str(msg);
-            syscall::write_str("\n");
-            return;
-        }
-    };
 
-    let fs = match Fat16::new() {
+    let fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
-            syscall::write_str("Error: FAT16 not available\n");
+            syscall::write_str("Error: FAT32 not available\n");
             return;
         }
     };
 
-    if fs.remove_dir(entry_name).is_err() {
+    if fs.remove_dir(&abs_path).is_err() {
         syscall::write_str("Error: Failed to remove directory\n");
         return;
     }

@@ -133,10 +133,20 @@ dependencies = [
  "linked_list_allocator",
  "pc-keyboard",
  "pic8259",
+ "sabos-blockdev",
+ "sabos-fat-core",
  "spin",
  "uefi",
  "x86_64",
 ]
+
+[[package]]
+name = "sabos-blockdev"
+version = "0.1.0"
+
+[[package]]
+name = "sabos-fat-core"
+version = "0.1.0"
 
 [[package]]
 name = "scopeguard"

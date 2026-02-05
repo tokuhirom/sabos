@@ -8,7 +8,7 @@ extern crate alloc;
 mod allocator;
 mod console;
 mod elf;
-mod fat16;
+mod fat32;
 mod framebuffer;
 mod gdt;
 mod handle;
@@ -325,8 +325,8 @@ fn main() -> Status {
     kprintln!("Loading init from disk...");
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
-    // FAT16 から INIT.ELF を読み込む
-    match fat16::Fat16::new() {
+    // FAT32 から INIT.ELF を読み込む
+    match fat32::Fat32::new() {
         Ok(fs) => {
             match fs.read_file("/INIT.ELF") {
                 Ok(elf_data) => {
@@ -356,7 +356,7 @@ fn main() -> Status {
         }
         Err(e) => {
             framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-            kprintln!("Failed to initialize FAT16: {:?}", e);
+            kprintln!("Failed to initialize FAT32: {:?}", e);
             framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
         }
     }

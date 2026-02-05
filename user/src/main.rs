@@ -19,7 +19,7 @@
 extern crate alloc;
 
 mod allocator;
-mod fat16;
+mod fat32;
 mod shell;
 mod syscall;
 

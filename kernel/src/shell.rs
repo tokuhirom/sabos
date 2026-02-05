@@ -138,7 +138,7 @@ impl Shell {
         kprintln!("  lspci           - List PCI devices");
         kprintln!("  blkread [sect]  - Read a sector from virtio-blk disk");
         kprintln!("  blkwrite <sect> - Write test pattern to a sector (DANGEROUS!)");
-        kprintln!("  ls [path]       - List files on FAT16 disk (e.g., ls /SUBDIR)");
+        kprintln!("  ls [path]       - List files on FAT32 disk (e.g., ls /SUBDIR)");
         kprintln!("  cat <path>      - Display file contents (e.g., cat /SUBDIR/FILE.TXT)");
         kprintln!("  write <name> <text> - Create a file with text content");
         kprintln!("  rm <name>       - Delete a file");
@@ -526,10 +526,10 @@ impl Shell {
             }
         };
 
-        // セクタ 0〜163 は FAT16 のメタデータ領域なので警告
+        // 先頭セクタはファイルシステムのメタデータ領域なので警告
         if sector < 164 {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
-            kprintln!("WARNING: Sector {} is in FAT16 metadata area!", sector);
+            kprintln!("WARNING: Sector {} is in filesystem metadata area!", sector);
             kprintln!("  This may corrupt the file system.");
             framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
         }
@@ -582,37 +582,31 @@ impl Shell {
         }
     }
 
-    /// ls コマンド: FAT16 ディスクのディレクトリにあるファイル一覧を表示する。
+    /// ls コマンド: FAT32 ディスクのディレクトリにあるファイル一覧を表示する。
     ///
     /// 引数なし: ルートディレクトリを表示
     /// 引数あり: 指定パスのディレクトリを表示（例: ls /SUBDIR）
     fn cmd_ls(&self, args: &str) {
         let path = args.trim();
 
-        let fs = match crate::fat16::Fat16::new() {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
         };
 
-        // パスが指定されていれば大文字に変換（FAT16 は大文字のみ）
-        let path_upper: alloc::string::String = if path.is_empty() {
-            String::from("/")
-        } else {
-            path.chars().map(|c| c.to_ascii_uppercase()).collect()
-        };
-
-        match fs.list_dir(&path_upper) {
+        let path = if path.is_empty() { "/" } else { path };
+        match fs.list_dir(path) {
             Ok(entries) => {
                 // ディレクトリパスを表示
-                if path_upper == "/" {
+                if path == "/" {
                     kprintln!("Directory: /");
                 } else {
-                    kprintln!("Directory: {}", path_upper);
+                    kprintln!("Directory: {}", path);
                 }
                 kprintln!("  Name          Size     Attr");
                 kprintln!("  ------------- -------- ----");
@@ -645,32 +639,25 @@ impl Shell {
         }
     }
 
-    /// cat コマンド: FAT16 ディスクのファイル内容を表示する。
-    /// ファイル名は大文字の 8.3 形式で指定（例: cat HELLO.TXT）
+    /// cat コマンド: FAT32 ディスクのファイル内容を表示する。
     fn cmd_cat(&self, args: &str) {
         let filename = args.trim();
         if filename.is_empty() {
             kprintln!("Usage: cat <FILENAME>");
-            kprintln!("  File names are in 8.3 format (e.g., HELLO.TXT)");
             return;
         }
 
-        // ファイル名を大文字に変換（FAT16 は大文字のみ）
-        let filename_upper: alloc::string::String = filename.chars()
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-
-        let fs = match crate::fat16::Fat16::new() {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
         };
 
-        match fs.read_file(&filename_upper) {
+        match fs.read_file(filename) {
             Ok(data) => {
                 // テキストファイルとして表示を試みる
                 match core::str::from_utf8(&data) {
@@ -691,7 +678,7 @@ impl Shell {
         }
     }
 
-    /// write コマンド: FAT16 ディスクに新しいファイルを作成する。
+    /// write コマンド: FAT32 ディスクに新しいファイルを作成する。
     ///
     /// 使い方: write <FILENAME> <TEXT>
     /// 例: write TEST.TXT Hello World
@@ -714,17 +701,11 @@ impl Shell {
         let filename = parts[0];
         let text = parts[1];
 
-        // ファイル名を大文字に変換
-        let filename_upper: alloc::string::String = filename
-            .chars()
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-
-        let fs = match crate::fat16::Fat16::new() {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
@@ -734,10 +715,10 @@ impl Shell {
         let mut content = text.as_bytes().to_vec();
         content.push(b'\n');
 
-        match fs.create_file(&filename_upper, &content) {
+        match fs.create_file(filename, &content) {
             Ok(()) => {
                 framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-                kprintln!("File '{}' created ({} bytes)", filename_upper, content.len());
+                kprintln!("File '{}' created ({} bytes)", filename, content.len());
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
             Err(e) => {
@@ -748,7 +729,7 @@ impl Shell {
         }
     }
 
-    /// rm コマンド: FAT16 ディスクのファイルを削除する。
+    /// rm コマンド: FAT32 ディスクのファイルを削除する。
     fn cmd_rm(&self, args: &str) {
         let filename = args.trim();
         if filename.is_empty() {
@@ -756,26 +737,20 @@ impl Shell {
             return;
         }
 
-        // ファイル名を大文字に変換
-        let filename_upper: alloc::string::String = filename
-            .chars()
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-
-        let fs = match crate::fat16::Fat16::new() {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
         };
 
-        match fs.delete_file(&filename_upper) {
+        match fs.delete_file(filename) {
             Ok(()) => {
                 framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-                kprintln!("File '{}' deleted", filename_upper);
+                kprintln!("File '{}' deleted", filename);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
             Err(e) => {
@@ -786,12 +761,10 @@ impl Shell {
         }
     }
 
-    /// run コマンド: FAT16 ディスクから ELF バイナリを読み込んでユーザーモードで実行する。
-    ///
-    /// ファイル名は大文字の 8.3 形式で指定（例: run HELLO.ELF）
+    /// run コマンド: FAT32 ディスクから ELF バイナリを読み込んでユーザーモードで実行する。
     ///
     /// 手順:
-    ///   1. FAT16 からファイルを読み込む
+    ///   1. FAT32 からファイルを読み込む
     ///   2. ELF パース → LOAD セグメント情報を取得
     ///   3. プロセス作成 → ページテーブル + フレーム確保 + データロード
     ///   4. Ring 3 で実行
@@ -804,24 +777,19 @@ impl Shell {
             return;
         }
 
-        // ファイル名を大文字に変換（FAT16 は大文字のみ）
-        let filename_upper: alloc::string::String = filename.chars()
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-
-        // FAT16 からファイルを読み込む
-        kprintln!("Loading {} from disk...", filename_upper);
-        let fs = match crate::fat16::Fat16::new() {
+        // FAT32 からファイルを読み込む
+        kprintln!("Loading {} from disk...", filename);
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
         };
 
-        let elf_data = match fs.read_file(&filename_upper) {
+        let elf_data = match fs.read_file(filename) {
             Ok(data) => data,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -883,7 +851,7 @@ impl Shell {
         kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
     }
 
-    /// spawn コマンド: FAT16 ディスクから ELF バイナリを読み込んで、
+    /// spawn コマンド: FAT32 ディスクから ELF バイナリを読み込んで、
     /// バックグラウンドでユーザープロセスとして実行する。
     ///
     /// run コマンドと異なり、プロセスはブロックせずに即座に戻る。
@@ -899,24 +867,19 @@ impl Shell {
             return;
         }
 
-        // ファイル名を大文字に変換（FAT16 は大文字のみ）
-        let filename_upper: alloc::string::String = filename.chars()
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-
-        // FAT16 からファイルを読み込む
-        kprintln!("Loading {} from disk...", filename_upper);
-        let fs = match crate::fat16::Fat16::new() {
+        // FAT32 からファイルを読み込む
+        kprintln!("Loading {} from disk...", filename);
+        let fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT16 error: {}", e);
+                kprintln!("FAT32 error: {}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
         };
 
-        let elf_data = match fs.read_file(&filename_upper) {
+        let elf_data = match fs.read_file(filename) {
             Ok(data) => data,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -928,10 +891,10 @@ impl Shell {
         kprintln!("  Loaded {} bytes", elf_data.len());
 
         // プロセス名を作成（パスからファイル名部分を抽出）
-        let process_name = filename_upper
+        let process_name = filename
             .rsplit('/')
             .next()
-            .unwrap_or(&filename_upper);
+            .unwrap_or(filename);
 
         // ユーザープロセスとして spawn
         match scheduler::spawn_user(process_name, &elf_data) {
@@ -1235,11 +1198,11 @@ impl Shell {
             // 12. virtio-blk のテスト
             run_test("virtio_blk", this.test_virtio_blk());
 
-            // 13. FAT16 のテスト
-            run_test("fat16", this.test_fat16());
+            // 13. FAT32 のテスト
+            run_test("fat32", this.test_fat32());
 
-            // 13.5. FAT16 空き容量のテスト
-            run_test("fat16_space", this.test_fat16_space());
+            // 13.5. FAT32 空き容量のテスト
+            run_test("fat32_space", this.test_fat32_space());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1671,7 +1634,7 @@ impl Shell {
         };
         let _ = crate::handle::close(&handle);
 
-        hello.starts_with(b"Hello from FAT16!")
+        hello.starts_with(b"Hello from FAT32!")
     }
 
     /// ブロックデバイス syscalls のテスト
@@ -1744,14 +1707,13 @@ impl Shell {
     }
 
     /// virtio-blk のテスト
-    /// セクタ 0 を読み取り、FAT16 のブートシグネチャ (0x55AA) を確認
+    /// セクタ 0 を読み取り、ブートシグネチャ (0x55AA) を確認
     fn test_virtio_blk(&self) -> bool {
         let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
         if let Some(ref mut d) = *drv {
             let mut buf = [0u8; 512];
             match d.read_sector(0, &mut buf) {
                 Ok(()) => {
-                    // FAT16 のブートセクタ末尾は 0x55AA
                     buf[510] == 0x55 && buf[511] == 0xAA
                 }
                 Err(_) => false,
@@ -1761,26 +1723,26 @@ impl Shell {
         }
     }
 
-    /// FAT16 のテスト
-    /// HELLO.TXT ファイルを読み取り、内容が "Hello from FAT16!" で始まるか確認
-    fn test_fat16(&self) -> bool {
-        let fs = match crate::fat16::Fat16::new() {
+    /// FAT32 のテスト
+    /// HELLO.TXT ファイルを読み取り、内容が "Hello from FAT32!" で始まるか確認
+    fn test_fat32(&self) -> bool {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(f) => f,
             Err(_) => return false,
         };
         match fs.read_file("HELLO.TXT") {
             Ok(data) => {
-                let expected = b"Hello from FAT16!";
+                let expected = b"Hello from FAT32!";
                 data.len() >= expected.len() && &data[..expected.len()] == expected
             }
             Err(_) => false,
         }
     }
 
-    /// FAT16 の空き容量テスト
+    /// FAT32 の空き容量テスト
     /// 総クラスタ数と空きクラスタ数の整合性を確認する。
-    fn test_fat16_space(&self) -> bool {
-        let fs = match crate::fat16::Fat16::new() {
+    fn test_fat32_space(&self) -> bool {
+        let fs = match crate::fat32::Fat32::new() {
             Ok(f) => f,
             Err(_) => return false,
         };

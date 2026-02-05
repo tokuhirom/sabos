@@ -9,8 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
 
 [[package]]
+name = "sabos-blockdev"
+version = "0.1.0"
+
+[[package]]
+name = "sabos-fat-core"
+version = "0.1.0"
+
+[[package]]
 name = "sabos-user"
 version = "0.1.0"
 dependencies = [
  "font8x8",
+ "sabos-blockdev",
+ "sabos-fat-core",
 ]

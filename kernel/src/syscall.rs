@@ -995,9 +995,9 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
         return Err(SyscallError::ReadOnly);
     }
 
-    // FAT16 からファイルを削除
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    fat16.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    // FAT32 からファイルを削除
+    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    fat32.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     Ok(0)
 }
@@ -1037,9 +1037,9 @@ fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError>
         return Ok(written);
     }
 
-    // FAT16 からディレクトリ一覧を取得
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    let entries = fat16.list_dir(path).map_err(|_| SyscallError::FileNotFound)?;
+    // FAT32 からディレクトリ一覧を取得
+    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let entries = fat32.list_dir(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // エントリ名を改行区切りでバッファに書き込む
     // ATTR_DIRECTORY = 0x10
@@ -1155,9 +1155,9 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
         return Ok(create_directory_handle(String::from("/"), dir_rights));
     }
 
-    // FAT16 からエントリを取得して種別判定
-    let fat16 = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    let entry = fat16.find_entry(path).map_err(|_| SyscallError::FileNotFound)?;
+    // FAT32 からエントリを取得して種別判定
+    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let entry = fat32.find_entry(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // ATTR_DIRECTORY = 0x10
     const ATTR_DIRECTORY: u8 = 0x10;
@@ -1178,7 +1178,7 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
         return Err(SyscallError::NotSupported);
     }
 
-    let data = fat16.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    let data = fat32.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
     Ok(create_handle(data, file_rights))
 }
 
@@ -1418,14 +1418,9 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
-    // ファイル名を大文字に変換（FAT16 は大文字のみ）
-    let path_upper: String = path.chars()
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-
-    // FAT16 からファイルを読み込む
-    let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
+    // FAT32 からファイルを読み込む
+    let fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // ELF プロセスを作成（カーネルのページテーブルで実行）
     let (current_cr3, current_flags) = Cr3::read();
@@ -1466,27 +1461,22 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-    // ファイル名を大文字に変換（FAT16 は大文字のみ）
-    let path_upper: String = path.chars()
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-
     // プロセス名を作成（パスからファイル名部分を抽出）
-    let process_name = path_upper
-        .rsplit('/')
-        .next()
-        .unwrap_or(&path_upper);
+    // ユーザー空間の文字列を参照し続けないように、ここでコピーしておく。
+    let process_name = String::from(
+        path.rsplit('/').next().unwrap_or(path)
+    );
 
-    // FAT16 からファイルを読み込む
-    let fs = crate::fat16::Fat16::new().map_err(|_| SyscallError::Other)?;
-    let elf_data = fs.read_file(&path_upper).map_err(|_| SyscallError::FileNotFound)?;
+    // FAT32 からファイルを読み込む
+    let fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // スケジューラにユーザープロセスとして登録（カーネルのページテーブルで実行）
     let (current_cr3, current_flags) = Cr3::read();
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let task_id = match crate::scheduler::spawn_user(process_name, &elf_data) {
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data) {
         Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }

@@ -60,15 +60,15 @@ build-user:
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
 
-# FAT16 ディスクイメージを作成する。
-# 32MB のイメージを dd で作り、mkfs.fat -F 16 で FAT16 フォーマットする。
+# FAT32 ディスクイメージを作成する。
+# 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
 # INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TELNETD.ELF, TSH.ELF を書き込む。
 # USER_ELF (旧シェル) は HELLO.ELF としてテスト用に残す。
 disk-img: build-user
-	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32
-	mkfs.fat -F 16 $(DISK_IMG)
-	echo "Hello from FAT16!" > /tmp/hello.txt
+	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
+	mkfs.fat -F 32 $(DISK_IMG)
+	echo "Hello from FAT32!" > /tmp/hello.txt
 	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
 	mcopy -i $(DISK_IMG) $(USER_ELF) ::HELLO.ELF
 	mcopy -i $(DISK_IMG) $(NETD_ELF) ::NETD.ELF
