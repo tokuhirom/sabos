@@ -1206,6 +1206,9 @@ impl Shell {
 
             // 13.5. FAT32 空き容量のテスト
             run_test("fat32_space", this.test_fat32_space());
+
+            // 13.6. コンソールエディタ (ED.ELF) の存在確認
+            run_test("console_editor_elf", this.test_console_editor_elf());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1781,6 +1784,23 @@ impl Shell {
             Err(_) => return false,
         };
         let data = match fs.read_file("TETRIS.ELF") {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        if data.len() < 4 {
+            return false;
+        }
+        data[0] == 0x7F && data[1] == b'E' && data[2] == b'L' && data[3] == b'F'
+    }
+
+    /// コンソールエディタ (ED.ELF) の存在確認
+    /// ELF ヘッダのマジックを検証して、ファイルが読めることを確認する。
+    fn test_console_editor_elf(&self) -> bool {
+        let mut fs = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let data = match fs.read_file("ED.ELF") {
             Ok(d) => d,
             Err(_) => return false,
         };
