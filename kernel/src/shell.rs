@@ -1192,6 +1192,9 @@ impl Shell {
 
             // 11. 型安全 IPC のテスト
             run_test("ipc_typed", this.test_ipc_typed());
+
+            // 11.5. 文字列置換ユーティリティのテスト
+            run_test("textutil_replace", this.test_textutil_replace());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1688,6 +1691,16 @@ impl Shell {
         };
 
         msg.sender == task_id && msg.data == data
+    }
+
+    /// 文字列置換ユーティリティのテスト
+    fn test_textutil_replace(&self) -> bool {
+        let (out, changed) = sabos_textutil::replace_literal("a a a", "a", "b", true);
+        if !changed || out != "b b b" {
+            return false;
+        }
+        let (out, changed) = sabos_textutil::replace_literal("hello", "ll", "LL", false);
+        changed && out == "heLLo"
     }
 
     /// Handle から EOF まで読み取る

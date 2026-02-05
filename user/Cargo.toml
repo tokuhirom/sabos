@@ -13,3 +13,4 @@ panic = "abort"
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
 sabos-blockdev = { path = "../libs/blockdev" }
 sabos-fat-core = { path = "../libs/fat-core" }
+sabos-textutil = { path = "../libs/textutil" }

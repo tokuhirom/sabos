@@ -26,6 +26,7 @@
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
+// - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
 // - selftest: カーネル selftest を実行
 // - halt: システム停止
 
@@ -45,6 +46,8 @@ mod gui_client;
 mod json;
 #[path = "../syscall.rs"]
 mod syscall;
+
+use sabos_textutil::replace_literal;
 
 use alloc::format;
 use alloc::string::String;
@@ -218,6 +221,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "sed" => cmd_sed(args, state),
         "gui" => cmd_gui(args),
         "rect" => cmd_rect(args),
         "selftest" => cmd_selftest(),
@@ -353,6 +357,7 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  sed [-n] s/OLD/NEW/[gp] <file> - Simple sed (literal)\n");
     syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
@@ -493,6 +498,145 @@ fn cmd_cat(args: &str, state: &ShellState) {
     }
 
     let _ = syscall::handle_close(&handle);
+}
+
+/// sed の式をパースする
+///
+/// 形式: s/OLD/NEW/[gp]
+fn parse_sed_expr(expr: &str) -> Result<(&str, &str, bool, bool), &'static str> {
+    if !expr.starts_with("s/") {
+        return Err("Error: only s/OLD/NEW/ is supported");
+    }
+    let rest = &expr[2..];
+    let Some(pos1) = rest.find('/') else {
+        return Err("Error: invalid sed expression");
+    };
+    let from = &rest[..pos1];
+    let rest = &rest[pos1 + 1..];
+    let Some(pos2) = rest.find('/') else {
+        return Err("Error: invalid sed expression");
+    };
+    let to = &rest[..pos2];
+    let flags = &rest[pos2 + 1..];
+
+    let mut global = false;
+    let mut print_on_change = false;
+    for ch in flags.chars() {
+        match ch {
+            'g' => global = true,
+            'p' => print_on_change = true,
+            _ => return Err("Error: unsupported sed flag"),
+        }
+    }
+
+    Ok((from, to, global, print_on_change))
+}
+
+/// ハンドルから全データを読み取る
+fn read_all_handle(handle: &syscall::Handle) -> Result<Vec<u8>, syscall::SyscallResult> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    loop {
+        let n = syscall::handle_read(handle, &mut buf);
+        if n < 0 {
+            return Err(n);
+        }
+        if n == 0 {
+            break;
+        }
+        let len = n as usize;
+        out.extend_from_slice(&buf[..len]);
+    }
+    Ok(out)
+}
+
+/// sed コマンド: 簡易的なリテラル置換
+///
+/// 使い方:
+///   sed [-n] s/OLD/NEW/[gp] <file>
+///
+/// - 置換は正規表現ではなくリテラル一致
+/// - g フラグで全置換、p フラグで置換成功時に出力
+/// - -n を指定すると自動出力を抑制する
+fn cmd_sed(args: &str, state: &ShellState) {
+    let mut parts = args.split_whitespace();
+    let mut suppress = false;
+    let first = parts.next().unwrap_or("");
+    let (expr, file) = if first == "-n" {
+        suppress = true;
+        (parts.next().unwrap_or(""), parts.next().unwrap_or(""))
+    } else {
+        (first, parts.next().unwrap_or(""))
+    };
+    if parts.next().is_some() {
+        syscall::write_str("Usage: sed [-n] s/OLD/NEW/[gp] <file>\n");
+        return;
+    }
+
+    if expr.is_empty() || file.is_empty() {
+        syscall::write_str("Usage: sed [-n] s/OLD/NEW/[gp] <file>\n");
+        return;
+    }
+
+    let (from, to, global, print_on_change) = match parse_sed_expr(expr) {
+        Ok(v) => v,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    if from.is_empty() {
+        syscall::write_str("Error: empty search pattern is not supported\n");
+        return;
+    }
+
+    let handle = match open_file_from_args(state, file) {
+        Ok(h) => h,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    let data = match read_all_handle(&handle) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = syscall::handle_close(&handle);
+            syscall::write_str("Error: Failed to read file\n");
+            return;
+        }
+    };
+    let _ = syscall::handle_close(&handle);
+
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= data.len() {
+        let at_end = i == data.len();
+        let is_nl = !at_end && data[i] == b'\n';
+        if at_end || is_nl {
+            let mut line = &data[start..i];
+            if let Some(b'\r') = line.last().copied() {
+                line = &line[..line.len().saturating_sub(1)];
+            }
+            let Ok(text) = core::str::from_utf8(line) else {
+                syscall::write_str("Error: invalid UTF-8 in input\n");
+                return;
+            };
+
+            let (out, changed) = replace_literal(text, from, to, global);
+            let should_print = if suppress { print_on_change && changed } else { true };
+            if should_print {
+                syscall::write_str(out.as_str());
+                syscall::write_str("\n");
+            }
+
+            start = i + 1;
+        }
+        i += 1;
+    }
 }
 
 /// write コマンド: ファイルを作成/上書き
