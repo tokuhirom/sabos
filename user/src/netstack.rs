@@ -46,6 +46,8 @@ struct NetState {
     mac: [u8; 6],
     tcp_connection: Option<TcpConnection>,
     tcp_recv_flag: bool,
+    tcp_listen_port: Option<u16>,
+    tcp_accept_flag: bool,
     udp_response: Option<(u16, Vec<u8>)>,
 }
 
@@ -65,6 +67,8 @@ fn net_state_mut() -> &'static mut NetState {
                 mac: [0; 6],
                 tcp_connection: None,
                 tcp_recv_flag: false,
+                tcp_listen_port: None,
+                tcp_accept_flag: false,
                 udp_response: None,
             });
         }
@@ -362,6 +366,8 @@ pub enum TcpState {
     Closed,
     /// SYN 送信済み、SYN-ACK 待ち
     SynSent,
+    /// SYN 受信済み、ACK 待ち（サーバー側）
+    SynReceived,
     /// コネクション確立
     Established,
     /// FIN 送信済み、FIN-ACK 待ち
@@ -1089,10 +1095,30 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
 
     // 現在のコネクションを取得
     let state = net_state_mut();
-    let conn = match state.tcp_connection.as_mut() {
-        Some(c) => c,
-        None => return, // コネクションがなければ無視
-    };
+    if state.tcp_connection.is_none() {
+        // リスン中なら SYN を受け付ける
+        if let Some(listen_port) = state.tcp_listen_port {
+            if dst_port == listen_port && tcp_header.has_flag(TCP_FLAG_SYN) {
+                let mut conn = TcpConnection::new(listen_port, ip_header.src_ip, src_port);
+                conn.state = TcpState::SynReceived;
+                conn.ack_num = seq + 1;
+                // SYN-ACK を送信
+                let _ = send_tcp_packet_internal(
+                    conn.remote_ip,
+                    conn.remote_port,
+                    conn.local_port,
+                    conn.seq_num,
+                    conn.ack_num,
+                    TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    &[],
+                );
+                state.tcp_connection = Some(conn);
+                return;
+            }
+        }
+        return; // コネクションがなければ無視
+    }
+    let conn = state.tcp_connection.as_mut().unwrap();
 
     // ポートとアドレスが一致するか確認
     if src_port != conn.remote_port || dst_port != conn.local_port {
@@ -1126,6 +1152,18 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                 net_debug!("tcp: connection refused (RST)");
                 conn.state = TcpState::Closed;
                 state.tcp_recv_flag = true;
+            }
+        }
+        TcpState::SynReceived => {
+            // サーバー側: ACK を待つ
+            if tcp_header.has_flag(TCP_FLAG_ACK) {
+                if ack == conn.seq_num + 1 {
+                    conn.seq_num = ack;
+                    conn.state = TcpState::Established;
+                    state.tcp_recv_flag = true;
+                    state.tcp_accept_flag = true;
+                    net_debug!("tcp: server connection established");
+                }
             }
         }
         TcpState::Established => {
@@ -1355,6 +1393,8 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<(), &'static str> {
     {
         let state = net_state_mut();
         state.tcp_connection = None;
+        state.tcp_listen_port = None;
+        state.tcp_accept_flag = false;
     }
 
     // ローカルポート（簡易的に固定）
@@ -1418,6 +1458,40 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<(), &'static str> {
     }
 }
 
+/// TCP のリッスンを開始する（単一接続のみ）
+pub fn tcp_listen(port: u16) -> Result<(), &'static str> {
+    let state = net_state_mut();
+    state.tcp_connection = None;
+    state.tcp_recv_flag = false;
+    state.tcp_listen_port = Some(port);
+    state.tcp_accept_flag = false;
+    Ok(())
+}
+
+/// TCP の accept を待つ（単一接続）
+pub fn tcp_accept(timeout_ms: u64) -> Result<(), &'static str> {
+    let loops = if timeout_ms == 0 {
+        1
+    } else {
+        (timeout_ms as usize).saturating_mul(2000).max(1)
+    };
+
+    for _ in 0..loops {
+        poll_and_handle();
+        {
+            let state = net_state_mut();
+            if state.tcp_accept_flag {
+                state.tcp_accept_flag = false;
+                return Ok(());
+            }
+        }
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+    Err("timeout")
+}
+
 /// TCP でデータを送信する
 pub fn tcp_send(data: &[u8]) -> Result<(), &'static str> {
     let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
@@ -1447,7 +1521,7 @@ pub fn tcp_send(data: &[u8]) -> Result<(), &'static str> {
 }
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
-pub fn tcp_recv(_timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
+pub fn tcp_recv(timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
     // 受信フラグをクリア
     {
         let state = net_state_mut();
@@ -1455,7 +1529,12 @@ pub fn tcp_recv(_timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
     }
 
     // ポーリングループ（簡易タイムアウト）
-    for _ in 0..500000 {
+    let loops = if timeout_ms == 0 {
+        500000
+    } else {
+        (timeout_ms as usize).saturating_mul(2000).max(1)
+    };
+    for _ in 0..loops {
         poll_and_handle();
 
         // 受信バッファをチェック

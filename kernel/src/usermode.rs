@@ -450,8 +450,8 @@ pub fn user_illegal_access() {
 /// ELF コードセクション（0x400000〜）とぶつからない位置に配置する。
 const ELF_USER_STACK_VADDR: u64 = 0x2000000;
 
-/// ELF ユーザースタックのサイズ（16KiB = 4ページ）。
-const ELF_USER_STACK_SIZE: usize = 4096 * 4;
+/// ELF ユーザースタックのサイズ（64KiB = 16ページ）。
+const ELF_USER_STACK_SIZE: usize = 4096 * 16;
 
 /// 埋め込み ELF バイナリのデータを返す。
 ///

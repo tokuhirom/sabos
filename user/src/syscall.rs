@@ -66,6 +66,7 @@ pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マ�
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
 pub const SYS_SPAWN: u64 = 31;   // spawn(path_ptr, path_len) — バックグラウンドでプロセス起動
+pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
 pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
@@ -668,6 +669,9 @@ pub fn spawn(path: &str) -> SyscallResult {
 ///
 /// 現在のタスクの実行を中断し、他の ready なタスクに CPU を譲る。
 #[allow(dead_code)]
+pub fn yield_now() {
+    unsafe { syscall1(SYS_YIELD, 0); }
+}
 
 /// 指定ミリ秒スリープ
 ///

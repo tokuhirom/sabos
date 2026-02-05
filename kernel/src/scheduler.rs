@@ -45,6 +45,7 @@ const TASK_STACK_SIZE: usize = 4096 * 4;
 // =================================================================
 //
 // context_switch(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64)
+// context_switch_enable(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64)
 //   rcx = old_rsp_ptr: 現在のタスクの rsp を保存する場所へのポインタ
 //   rdx = new_rsp: 切り替え先タスクの rsp
 //   r8  = new_cr3: 切り替え先タスクの CR3（ページテーブルの物理アドレス）
@@ -90,6 +91,31 @@ global_asm!(
     "ret",
 );
 
+global_asm!(
+    "context_switch_enable:",
+    "push rbp",
+    "push rbx",
+    "push rdi",
+    "push rsi",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "mov [rcx], rsp",   // 現在の rsp を保存
+    "mov rsp, rdx",     // 新しい rsp に切り替え
+    "mov cr3, r8",      // CR3 を切り替え（TLB フラッシュ）
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rsi",
+    "pop rdi",
+    "pop rbx",
+    "pop rbp",
+    "sti",              // 協調的 yield のみ割り込みを再有効化
+    "ret",
+);
+
 // =================================================================
 // タスクトランポリン（アセンブリ）
 // =================================================================
@@ -129,6 +155,7 @@ unsafe extern "C" {
     /// アセンブリで実装されたコンテキストスイッチ関数。
     /// new_cr3 には切り替え先タスクの CR3 値（ページテーブルの物理アドレス）を渡す。
     fn context_switch(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64);
+    fn context_switch_enable(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64);
 }
 
 /// タスクのエントリ関数が return した後に呼ばれるハンドラ。
@@ -491,7 +518,7 @@ pub fn yield_now() {
             // この関数から「戻ってきた」時点で、このタスクは
             // 別のタスクの yield_now() から再スケジュールされている。
             unsafe {
-                context_switch(old_rsp_ptr, new_rsp, new_cr3);
+                context_switch_enable(old_rsp_ptr, new_rsp, new_cr3);
             }
             // 戻ってきた = このタスクが再び Running になった
             x86_64::instructions::interrupts::enable();

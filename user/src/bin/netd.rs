@@ -27,6 +27,8 @@ const OPCODE_TCP_CONNECT: u32 = 2;
 const OPCODE_TCP_SEND: u32 = 3;
 const OPCODE_TCP_RECV: u32 = 4;
 const OPCODE_TCP_CLOSE: u32 = 5;
+const OPCODE_TCP_LISTEN: u32 = 6;
+const OPCODE_TCP_ACCEPT: u32 = 7;
 
 const IPC_BUF_SIZE: usize = 2048;
 const IPC_RECV_TIMEOUT_MS: u64 = 10;
@@ -126,6 +128,29 @@ fn netd_loop() -> ! {
             OPCODE_TCP_CLOSE => {
                 if let Err(err) = netstack::tcp_close() {
                     status = map_netstack_error(err);
+                }
+            }
+            OPCODE_TCP_LISTEN => {
+                if payload.len() == 2 {
+                    let port = u16::from_le_bytes([payload[0], payload[1]]);
+                    if let Err(err) = netstack::tcp_listen(port) {
+                        status = map_netstack_error(err);
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            OPCODE_TCP_ACCEPT => {
+                if payload.len() == 8 {
+                    let timeout = u64::from_le_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    if let Err(err) = netstack::tcp_accept(timeout) {
+                        status = map_netstack_error(err);
+                    }
+                } else {
+                    status = -1;
                 }
             }
             _ => {

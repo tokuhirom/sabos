@@ -958,6 +958,10 @@ fn sys_ipc_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
 ///   読み取ったバイト数（成功時）
 ///   負の値（エラー時）
 fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // IPC 受信は待ちに入る可能性があるため、割り込みを有効化してタイマ割り込みを許可する。
+    // これをしないと sleep_ticks() が起床できず、待ちが永久に続く。
+    x86_64::instructions::interrupts::enable();
+
     let sender_ptr = user_ptr_from_arg::<u64>(arg1)?;
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();

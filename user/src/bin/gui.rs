@@ -62,6 +62,9 @@ const WINDOW_TITLE_BG: (u8, u8, u8) = (36, 44, 72);
 const WINDOW_TITLE_TEXT: (u8, u8, u8) = (255, 220, 120);
 const WINDOW_TITLE_H: u32 = 24;
 const WINDOW_BORDER_W: u32 = 2;
+// kernel/src/usermode.rs の ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE に合わせた値。
+// スタック使用量の目安をログ出力するための定数（将来変わったら要更新）。
+const USER_STACK_TOP: u64 = 0x2000000 + 0x10000; // 32MiB + 64KiB
 
 struct GuiState {
     width: u32,
@@ -112,9 +115,12 @@ pub extern "C" fn _start() -> ! {
 fn gui_loop() -> ! {
     let mut state = match init_state() {
         Ok(s) => s,
-        Err(_) => loop {
+        Err(_) => {
+            syscall::write_str("[gui] init_state failed\n");
+            loop {
             syscall::sleep(1000);
-        },
+            }
+        }
     };
 
     let mut wm = WindowManager::new();
@@ -150,6 +156,7 @@ fn gui_loop() -> ! {
             match opcode {
                 OPCODE_CLEAR => {
                     if payload.len() == 3 {
+                        let _ = syscall::write_str("[gui] clear\n");
                         clear(&mut state, payload[0], payload[1], payload[2]);
                     } else {
                         status = -10;
@@ -213,6 +220,7 @@ fn gui_loop() -> ! {
                 }
                 OPCODE_TEXT => {
                     if payload.len() >= 18 {
+                        let _ = syscall::write_str("[gui] text\n");
                         let x = read_u32(payload, 0).unwrap_or(0);
                         let y = read_u32(payload, 4).unwrap_or(0);
                         let fg = (payload[8], payload[9], payload[10]);
@@ -222,9 +230,17 @@ fn gui_loop() -> ! {
                             let text_bytes = &payload[18..18 + len];
                             let text = core::str::from_utf8(text_bytes).map_err(|_| ()).ok();
                             if let Some(text) = text {
+                                // 先にレスポンスを返し、描画は後で行う（重い描画で IPC が詰まるのを防ぐ）
+                                let mut resp = [0u8; IPC_BUF_SIZE];
+                                resp[0..4].copy_from_slice(&opcode.to_le_bytes());
+                                resp[4..8].copy_from_slice(&0i32.to_le_bytes());
+                                resp[8..12].copy_from_slice(&0u32.to_le_bytes());
+                                let _ = syscall::ipc_send(sender, &resp[..12]);
+
                                 if draw_text(&mut state, x, y, fg, bg, text).is_err() {
-                                    status = -10;
+                                    // 描画に失敗しても IPC 応答は返したので続行する
                                 }
+                                continue;
                             } else {
                                 status = -10;
                             }
@@ -279,6 +295,12 @@ fn gui_loop() -> ! {
                 }
                 OPCODE_WINDOW_CREATE => {
                     if payload.len() >= 12 {
+                        let rsp = current_rsp();
+                        let used = USER_STACK_TOP.saturating_sub(rsp);
+                        let _ = syscall::write_str(&format!(
+                            "[gui] window create: rsp=0x{:x} used={} bytes\n",
+                            rsp, used
+                        ));
                         let w = read_u32(payload, 0).unwrap_or(0);
                         let h = read_u32(payload, 4).unwrap_or(0);
                         let len = read_u32(payload, 8).unwrap_or(0) as usize;
@@ -440,6 +462,9 @@ fn gui_loop() -> ! {
                 }
             }
         }
+
+        // GUI サービスが他タスクにCPUを譲れるよう、明示的に yield する
+        syscall::yield_now();
     }
 }
 
@@ -1310,6 +1335,14 @@ fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
 
 fn read_i32(buf: &[u8], offset: usize) -> Option<i32> {
     read_u32(buf, offset).map(|v| v as i32)
+}
+
+fn current_rsp() -> u64 {
+    let rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp);
+    }
+    rsp
 }
 
 #[panic_handler]

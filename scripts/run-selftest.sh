@@ -146,6 +146,8 @@ wait_for_prompt_after() {
 }
 
 # mkdir t
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
 base=$(log_line_count)
 send_command "mkdir $TEST_DIR"
 
@@ -199,6 +201,8 @@ echo "Sending user shell rmdir command..."
 sleep 0.5
 
 # rmdir t
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
 base=$(log_line_count)
 send_command "rmdir $TEST_DIR"
 

@@ -12,6 +12,8 @@ SHELL_ELF = user/target/x86_64-unknown-none/debug/shell
 GUI_ELF = user/target/x86_64-unknown-none/debug/gui
 CALC_ELF = user/target/x86_64-unknown-none/debug/calc
 PAD_ELF = user/target/x86_64-unknown-none/debug/pad
+TELNETD_ELF = user/target/x86_64-unknown-none/debug/telnetd
+TSH_ELF = user/target/x86_64-unknown-none/debug/tsh
 ESP_DIR = esp/EFI/BOOT
 
 # OVMF ファームウェアの検出（Ubuntu: /usr/share/OVMF/）
@@ -61,7 +63,7 @@ $(ESP_DIR):
 # FAT16 ディスクイメージを作成する。
 # 32MB のイメージを dd で作り、mkfs.fat -F 16 で FAT16 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF を書き込む。
+# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TELNETD.ELF, TSH.ELF を書き込む。
 # USER_ELF (旧シェル) は HELLO.ELF としてテスト用に残す。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=32
@@ -75,6 +77,8 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(GUI_ELF) ::GUI.ELF
 	mcopy -i $(DISK_IMG) $(CALC_ELF) ::CALC.ELF
 	mcopy -i $(DISK_IMG) $(PAD_ELF) ::PAD.ELF
+	mcopy -i $(DISK_IMG) $(TELNETD_ELF) ::TELNETD.ELF
+	mcopy -i $(DISK_IMG) $(TSH_ELF) ::TSH.ELF
 	@echo "Disk image created: $(DISK_IMG)"
 
 run: build $(ESP_DIR) $(DISK_IMG)

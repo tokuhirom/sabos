@@ -110,7 +110,7 @@ impl Shell {
             "ip" => self.cmd_ip(),
             "dns" => self.cmd_dns(args),
             "http" => self.cmd_http(args),
-            "selftest" => self.cmd_selftest(),
+            "selftest" => self.cmd_selftest(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -148,7 +148,7 @@ impl Shell {
         kprintln!("  ip              - Show IP configuration");
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
         kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
-        kprintln!("  selftest        - Run automated self-tests");
+        kprintln!("  selftest [target] - Run automated self-tests (target: all/core/fs/net/gui/service/list)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -1163,178 +1163,122 @@ impl Shell {
     /// selftest コマンド: 各サブシステムの自動テストを実行する。
     /// CI で使いやすいように、各テスト結果を [PASS]/[FAIL] で出力し、
     /// 最後にサマリーを出力する。
-    fn cmd_selftest(&self) {
-        kprintln!("=== SELFTEST START ===");
+    fn cmd_selftest(&self, args: &str) {
+        let target = args.trim();
+        let target = if target.is_empty() { "all" } else { target };
+
+        if target == "list" {
+            kprintln!("selftest targets: all, core, fs, net, gui, service");
+            return;
+        }
+
+        if target == "all" {
+            kprintln!("=== SELFTEST START ===");
+        } else {
+            kprintln!("=== SELFTEST START ({}) ===", target);
+        }
 
         let mut passed = 0;
         let mut failed = 0;
-
-        // 1. メモリアロケータのテスト
-        if self.test_memory_allocator() {
-            Self::print_pass("memory_allocator");
-            passed += 1;
-        } else {
-            Self::print_fail("memory_allocator");
-            failed += 1;
-        }
-
-        // 1.5. メモリマッピングの整合性テスト
-        if self.test_memory_mapping() {
-            Self::print_pass("memory_mapping");
-            passed += 1;
-        } else {
-            Self::print_fail("memory_mapping");
-            failed += 1;
-        }
-
-        // 2. ページングのテスト
-        if self.test_paging() {
-            Self::print_pass("paging");
-            passed += 1;
-        } else {
-            Self::print_fail("paging");
-            failed += 1;
-        }
-
-        // 3. PCI 列挙のテスト
-        if self.test_pci_enum() {
-            Self::print_pass("pci_enum");
-            passed += 1;
-        } else {
-            Self::print_fail("pci_enum");
-            failed += 1;
-        }
-
-        // 4. procfs のテスト
-        if self.test_procfs() {
-            Self::print_pass("procfs");
-            passed += 1;
-        } else {
-            Self::print_fail("procfs");
-            failed += 1;
-        }
-
-        // 5. フレームバッファ描画のテスト
-        if self.test_framebuffer_draw() {
-            Self::print_pass("framebuffer_draw");
-            passed += 1;
-        } else {
-            Self::print_fail("framebuffer_draw");
-            failed += 1;
-        }
-
-        // 6. フレームバッファ情報のテスト
-        if self.test_framebuffer_info() {
-            Self::print_pass("framebuffer_info");
-            passed += 1;
-        } else {
-            Self::print_fail("framebuffer_info");
-            failed += 1;
-        }
-
-        // 6.5. マウス初期化のテスト
-        if self.test_mouse() {
-            Self::print_pass("mouse");
-            passed += 1;
-        } else {
-            Self::print_fail("mouse");
-            failed += 1;
-        }
-
-        // 7. ハンドル open/read のテスト
-        if self.test_handle_open_read() {
-            Self::print_pass("handle_open");
-            passed += 1;
-        } else {
-            Self::print_fail("handle_open");
-            failed += 1;
-        }
-
-        // 8. スケジューラのテスト
-        if self.test_scheduler() {
-            Self::print_pass("scheduler");
-            passed += 1;
-        } else {
-            Self::print_fail("scheduler");
-            failed += 1;
-        }
-
-        // 9. ブロックデバイス syscalls のテスト
-        if self.test_block_syscall() {
-            Self::print_pass("block_syscall");
-            passed += 1;
-        } else {
-            Self::print_fail("block_syscall");
-            failed += 1;
-        }
-
-        // 10. IPC のテスト
-        if self.test_ipc() {
-            Self::print_pass("ipc");
-            passed += 1;
-        } else {
-            Self::print_fail("ipc");
-            failed += 1;
-        }
-
-        // 11. 型安全 IPC のテスト
-        if self.test_ipc_typed() {
-            Self::print_pass("ipc_typed");
-            passed += 1;
-        } else {
-            Self::print_fail("ipc_typed");
-            failed += 1;
-        }
-
-        // 12. virtio-blk のテスト
-        if self.test_virtio_blk() {
-            Self::print_pass("virtio_blk");
-            passed += 1;
-        } else {
-            Self::print_fail("virtio_blk");
-            failed += 1;
-        }
-
-        // 13. FAT16 のテスト
-        if self.test_fat16() {
-            Self::print_pass("fat16");
-            passed += 1;
-        } else {
-            Self::print_fail("fat16");
-            failed += 1;
-        }
-
-        // 14. ネットワーク (DNS) のテスト
-        if self.netd_is_running() {
-            Self::print_pass("network_dns");
-            kprintln!("  (kernel DNS skipped: netd is active)");
-            passed += 1;
-        } else {
-            if self.test_network_dns() {
-                Self::print_pass("network_dns");
+        let mut run_test = |name: &str, ok: bool| {
+            if ok {
+                Self::print_pass(name);
                 passed += 1;
             } else {
-                Self::print_fail("network_dns");
+                Self::print_fail(name);
                 failed += 1;
             }
-        }
+        };
 
-        // 15. ユーザー空間 netd の DNS テスト
-        if self.test_network_netd_dns() {
-            Self::print_pass("network_netd_dns");
-            passed += 1;
-        } else {
-            Self::print_fail("network_netd_dns");
-            failed += 1;
-        }
+        let run_core = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 1. メモリアロケータのテスト
+            run_test("memory_allocator", this.test_memory_allocator());
 
-        // 16. GUI IPC のテスト
-        if self.test_gui_ipc() {
-            Self::print_pass("gui_ipc");
-            passed += 1;
-        } else {
-            Self::print_fail("gui_ipc");
-            failed += 1;
+            // 1.5. メモリマッピングの整合性テスト
+            run_test("memory_mapping", this.test_memory_mapping());
+
+            // 2. ページングのテスト
+            run_test("paging", this.test_paging());
+
+            // 3. PCI 列挙のテスト
+            run_test("pci_enum", this.test_pci_enum());
+
+            // 4. procfs のテスト
+            run_test("procfs", this.test_procfs());
+
+            // 5. フレームバッファ描画のテスト
+            run_test("framebuffer_draw", this.test_framebuffer_draw());
+
+            // 6. フレームバッファ情報のテスト
+            run_test("framebuffer_info", this.test_framebuffer_info());
+
+            // 6.5. マウス初期化のテスト
+            run_test("mouse", this.test_mouse());
+
+            // 7. ハンドル open/read のテスト
+            run_test("handle_open", this.test_handle_open_read());
+
+            // 8. スケジューラのテスト
+            run_test("scheduler", this.test_scheduler());
+
+            // 9. ブロックデバイス syscalls のテスト
+            run_test("block_syscall", this.test_block_syscall());
+
+            // 10. IPC のテスト
+            run_test("ipc", this.test_ipc());
+
+            // 11. 型安全 IPC のテスト
+            run_test("ipc_typed", this.test_ipc_typed());
+        };
+
+        let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 12. virtio-blk のテスト
+            run_test("virtio_blk", this.test_virtio_blk());
+
+            // 13. FAT16 のテスト
+            run_test("fat16", this.test_fat16());
+        };
+
+        let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 14. ネットワーク (DNS) のテスト
+            if this.netd_is_running() {
+                run_test("network_dns", true);
+                kprintln!("  (kernel DNS skipped: netd is active)");
+            } else {
+                run_test("network_dns", this.test_network_dns());
+            }
+
+            // 15. ユーザー空間 netd の DNS テスト
+            run_test("network_netd_dns", this.test_network_netd_dns());
+        };
+
+        let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 16. GUI IPC のテスト
+            run_test("gui_ipc", this.test_gui_ipc());
+        };
+
+        let run_service = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 17. telnetd サービスの起動確認
+            run_test("telnetd_service", this.test_telnetd_service());
+        };
+
+        match target {
+            "all" => {
+                run_core(self, &mut run_test);
+                run_fs(self, &mut run_test);
+                run_net(self, &mut run_test);
+                run_gui(self, &mut run_test);
+                run_service(self, &mut run_test);
+            }
+            "core" => run_core(self, &mut run_test),
+            "fs" => run_fs(self, &mut run_test),
+            "net" => run_net(self, &mut run_test),
+            "gui" => run_gui(self, &mut run_test),
+            "service" => run_service(self, &mut run_test),
+            _ => {
+                kprintln!("Usage: selftest [all|core|fs|net|gui|service|list]");
+                return;
+            }
         }
 
         // サマリー出力
@@ -1919,6 +1863,8 @@ impl Shell {
                 Some(start_tick + ticks)
             };
 
+            // 予備のスピン上限（タイマが止まっていても永久待ちしない）
+            let mut spin_limit: u64 = 5_000_000;
             loop {
                 if let Some(msg) = crate::ipc::try_recv(task_id) {
                     return Ok(msg);
@@ -1932,7 +1878,11 @@ impl Shell {
                     }
                 }
 
-                crate::scheduler::yield_now();
+                if spin_limit == 0 {
+                    return Err(crate::user_ptr::SyscallError::Timeout);
+                }
+                spin_limit -= 1;
+                core::hint::spin_loop();
             }
         }
 
@@ -2189,6 +2139,11 @@ impl Shell {
         true
     }
 
+    /// telnetd サービスが起動しているかを確認する
+    fn test_telnetd_service(&self) -> bool {
+        crate::scheduler::find_task_id_by_name("TELNETD.ELF").is_some()
+    }
+
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
     /// panic ハンドラのテスト用。シリアルと画面に赤字で panic 情報が表示されるはず。
     fn cmd_panic(&self) {
@@ -2212,5 +2167,5 @@ impl Shell {
 /// syscall から呼べるように、最小限の Shell を生成して selftest を実行する。
 pub fn run_selftest() {
     let shell = Shell::new(0, 0);
-    shell.cmd_selftest();
+    shell.cmd_selftest("");
 }
