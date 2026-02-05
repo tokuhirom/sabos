@@ -1221,6 +1221,8 @@ impl Shell {
         let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             // 16. GUI IPC のテスト
             run_test("gui_ipc", this.test_gui_ipc());
+            // 16.5. GUI アプリ (TETRIS) の存在確認
+            run_test("gui_tetris_elf", this.test_tetris_elf());
         };
 
         let run_service = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1756,6 +1758,23 @@ impl Shell {
         }
         let used = total - free;
         used > 0
+    }
+
+    /// GUI アプリ (TETRIS.ELF) の存在確認
+    /// ELF ヘッダのマジックを検証して、ファイルが読めることを確認する。
+    fn test_tetris_elf(&self) -> bool {
+        let mut fs = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let data = match fs.read_file("TETRIS.ELF") {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        if data.len() < 4 {
+            return false;
+        }
+        data[0] == 0x7F && data[1] == b'E' && data[2] == b'L' && data[3] == b'F'
     }
 
     /// ネットワーク (DNS) のテスト
