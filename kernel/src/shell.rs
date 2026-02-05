@@ -1234,6 +1234,8 @@ impl Shell {
         let run_service = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             // 17. telnetd サービスの起動確認
             run_test("telnetd_service", this.test_telnetd_service());
+            // 17.5. httpd サービスの起動確認
+            run_test("httpd_service", this.test_httpd_service());
         };
         let run_base = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             run_core(this, run_test);
@@ -2193,6 +2195,11 @@ impl Shell {
     /// telnetd サービスが起動しているかを確認する
     fn test_telnetd_service(&self) -> bool {
         crate::scheduler::find_task_id_by_name("TELNETD.ELF").is_some()
+    }
+
+    /// httpd サービスが起動しているかを確認する
+    fn test_httpd_service(&self) -> bool {
+        crate::scheduler::find_task_id_by_name("HTTPD.ELF").is_some()
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。

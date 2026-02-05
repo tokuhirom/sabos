@@ -14,6 +14,7 @@ CALC_ELF = user/target/x86_64-unknown-none/debug/calc
 PAD_ELF = user/target/x86_64-unknown-none/debug/pad
 TETRIS_ELF = user/target/x86_64-unknown-none/debug/tetris
 ED_ELF = user/target/x86_64-unknown-none/debug/ed
+HTTPD_ELF = user/target/x86_64-unknown-none/debug/httpd
 TELNETD_ELF = user/target/x86_64-unknown-none/debug/telnetd
 TSH_ELF = user/target/x86_64-unknown-none/debug/tsh
 ESP_DIR = esp/EFI/BOOT
@@ -65,7 +66,7 @@ $(ESP_DIR):
 # FAT32 ディスクイメージを作成する。
 # 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, TELNETD.ELF, TSH.ELF を書き込む。
+# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF を書き込む。
 # USER_ELF (旧シェル) は HELLO.ELF としてテスト用に残す。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
@@ -81,6 +82,7 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(PAD_ELF) ::PAD.ELF
 	mcopy -i $(DISK_IMG) $(TETRIS_ELF) ::TETRIS.ELF
 	mcopy -i $(DISK_IMG) $(ED_ELF) ::ED.ELF
+	mcopy -i $(DISK_IMG) $(HTTPD_ELF) ::HTTPD.ELF
 	mcopy -i $(DISK_IMG) $(TELNETD_ELF) ::TELNETD.ELF
 	mcopy -i $(DISK_IMG) $(TSH_ELF) ::TSH.ELF
 	@echo "Disk image created: $(DISK_IMG)"

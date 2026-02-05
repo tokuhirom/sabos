@@ -46,8 +46,9 @@ unsafe impl Sync for Service {}
 /// - netd: ネットワークサービス（再起動有効）
 /// - gui: GUI サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
+/// - httpd: HTTP サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
-static SERVICES: [Service; 4] = [
+static SERVICES: [Service; 5] = [
     Service {
         name: "netd",
         path: "/NETD.ELF",
@@ -63,6 +64,12 @@ static SERVICES: [Service; 4] = [
     Service {
         name: "telnetd",
         path: "/TELNETD.ELF",
+        restart: true,
+        task_id: AtomicU64::new(0),
+    },
+    Service {
+        name: "httpd",
+        path: "/HTTPD.ELF",
         restart: true,
         task_id: AtomicU64::new(0),
     },
