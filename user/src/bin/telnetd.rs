@@ -16,6 +16,7 @@ mod json;
 #[path = "../syscall.rs"]
 mod syscall;
 
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 const TELNET_PORT: u16 = 2323;
@@ -58,120 +59,149 @@ fn telnetd_main() -> ! {
             continue;
         }
 
-        // accept 待ち
+        let mut sessions: Vec<Session> = Vec::new();
+        let mut tcp_buf = [0u8; 256];
+        let mut ipc_buf = [0u8; IPC_BUF_SIZE];
+
         loop {
-            match netd_tcp_accept(netd_id, 0) {
-                Ok(()) => break,
-                Err(_) => {
-                    syscall::sleep(10);
+            // 新規接続の accept
+            if let Ok(conn_id) = netd_tcp_accept(netd_id, 0) {
+                if let Some(session) = start_session(netd_id, my_id, conn_id) {
+                    sessions.push(session);
+                } else {
+                    let _ = netd_tcp_close(netd_id, conn_id);
                 }
             }
-        }
 
-        let tsh_id = syscall::spawn("/TSH.ELF");
-        if tsh_id < 0 {
-            let _ = netd_tcp_close(netd_id);
+            // tsh からの出力を処理
+            let mut sender = 0u64;
+            let n = syscall::ipc_recv(&mut sender, &mut ipc_buf, 0);
+            if n > 0 {
+                if let Some(pos) = sessions.iter().position(|s| s.tsh_id == sender) {
+                    let conn_id = sessions[pos].conn_id;
+                    if handle_tsh_output(&ipc_buf[..n as usize], netd_id, conn_id).is_err() {
+                        close_session(netd_id, sessions.remove(pos));
+                    }
+                }
+            }
+
+            // TCP 受信を各セッションで処理
+            let mut i = 0usize;
+            while i < sessions.len() {
+                let conn_id = sessions[i].conn_id;
+                match netd_tcp_recv(netd_id, conn_id, &mut tcp_buf, 0) {
+                    Ok(0) => {
+                        i += 1;
+                    }
+                    Ok(n) => {
+                        handle_tcp_input(&mut sessions[i], netd_id, &tcp_buf[..n]);
+                        i += 1;
+                    }
+                    Err(_) => {
+                        let session = sessions.remove(i);
+                        close_session(netd_id, session);
+                    }
+                }
+            }
+
+            syscall::sleep(1);
+        }
+    }
+}
+
+struct Session {
+    conn_id: u32,
+    tsh_id: u64,
+    line_buf: [u8; 512],
+    line_len: usize,
+    telnet_skip: u8,
+}
+
+fn start_session(netd_id: u64, my_id: u64, conn_id: u32) -> Option<Session> {
+    let tsh_id = syscall::spawn("/TSH.ELF");
+    if tsh_id < 0 {
+        return None;
+    }
+    let tsh_id = tsh_id as u64;
+
+    let mut init_msg = [0u8; 16];
+    init_msg[0..4].copy_from_slice(&OPCODE_INIT.to_le_bytes());
+    init_msg[4..8].copy_from_slice(&8u32.to_le_bytes());
+    init_msg[8..16].copy_from_slice(&my_id.to_le_bytes());
+    let _ = syscall::ipc_send(tsh_id, &init_msg);
+
+    let _ = netd_tcp_send(netd_id, conn_id, b"Welcome to SABOS telnetd\r\n");
+
+    Some(Session {
+        conn_id,
+        tsh_id,
+        line_buf: [0u8; 512],
+        line_len: 0,
+        telnet_skip: 0,
+    })
+}
+
+fn close_session(netd_id: u64, session: Session) {
+    let _ = send_line_to_tsh(session.tsh_id, b"exit");
+    let _ = syscall::wait(session.tsh_id, 1000);
+    let _ = netd_tcp_close(netd_id, session.conn_id);
+}
+
+fn handle_tcp_input(session: &mut Session, netd_id: u64, data: &[u8]) {
+    for &b in data {
+        if session.telnet_skip > 0 {
+            session.telnet_skip -= 1;
             continue;
         }
-        let tsh_id = tsh_id as u64;
-
-        // 初期化メッセージ（telnetd の PID を渡す）
-        let mut init_msg = [0u8; 16];
-        init_msg[0..4].copy_from_slice(&OPCODE_INIT.to_le_bytes());
-        init_msg[4..8].copy_from_slice(&8u32.to_le_bytes());
-        init_msg[8..16].copy_from_slice(&my_id.to_le_bytes());
-        let _ = syscall::ipc_send(tsh_id, &init_msg);
-
-        // バナー
-        let _ = netd_tcp_send(netd_id, b"Welcome to SABOS telnetd\r\n");
-
-        // 入出力ループ
-        session_loop(netd_id, tsh_id);
-
-        let _ = netd_tcp_close(netd_id);
-        let _ = syscall::wait(tsh_id, 1000);
-    }
-}
-
-fn session_loop(netd_id: u64, tsh_id: u64) {
-    let mut line_buf = [0u8; 512];
-    let mut line_len = 0usize;
-    let mut telnet_skip = 0u8;
-
-    let mut tcp_buf = [0u8; 256];
-    let mut ipc_buf = [0u8; IPC_BUF_SIZE];
-    let mut sender = 0u64;
-
-    loop {
-        // tsh からの出力を先に処理
-        let n = syscall::ipc_recv(&mut sender, &mut ipc_buf, 10);
-        if n > 0 {
-            if handle_tsh_output(&ipc_buf[..n as usize], netd_id).is_err() {
-                break;
-            }
+        if b == 0xFF {
+            session.telnet_skip = 2;
+            continue;
         }
-
-        // TCP 受信（タイムアウトは短め）
-        match netd_tcp_recv(netd_id, &mut tcp_buf, 20) {
-            Ok(0) => {
-                // no data
-            }
-            Ok(n) => {
-                let data = &tcp_buf[..n];
-                for &b in data {
-                    if telnet_skip > 0 {
-                        telnet_skip -= 1;
-                        continue;
-                    }
-                    if b == 0xFF {
-                        // IAC + 2 bytes をスキップ（最小実装）
-                        telnet_skip = 2;
-                        continue;
-                    }
-                    match b {
-                        b'\r' | b'\n' => {
-                            let _ = netd_tcp_send(netd_id, b"\r\n");
-                            if line_len > 0 {
-                                send_line_to_tsh(tsh_id, &line_buf[..line_len]);
-                                line_len = 0;
-                            } else {
-                                send_line_to_tsh(tsh_id, b"");
-                            }
-                        }
-                        0x08 | 0x7F => {
-                            if line_len > 0 {
-                                line_len -= 1;
-                                let _ = netd_tcp_send(netd_id, b"\x08 \x08");
-                            }
-                        }
-                        b if b.is_ascii() && !b.is_ascii_control() => {
-                            if line_len < line_buf.len() {
-                                line_buf[line_len] = b;
-                                line_len += 1;
-                                let _ = netd_tcp_send(netd_id, &[b]);
-                            }
-                        }
-                        _ => {}
-                    }
+        match b {
+            b'\r' | b'\n' => {
+                let _ = netd_tcp_send(netd_id, session.conn_id, b"\r\n");
+                if session.line_len > 0 {
+                    let line = &session.line_buf[..session.line_len];
+                    let _ = send_line_to_tsh(session.tsh_id, line);
+                    session.line_len = 0;
+                } else {
+                    let _ = send_line_to_tsh(session.tsh_id, b"");
                 }
             }
-            Err(_) => break,
+            0x08 | 0x7F => {
+                if session.line_len > 0 {
+                    session.line_len -= 1;
+                    let _ = netd_tcp_send(netd_id, session.conn_id, b"\x08 \x08");
+                }
+            }
+            b if b.is_ascii() && !b.is_ascii_control() => {
+                if session.line_len < session.line_buf.len() {
+                    session.line_buf[session.line_len] = b;
+                    session.line_len += 1;
+                    let _ = netd_tcp_send(netd_id, session.conn_id, &[b]);
+                }
+            }
+            _ => {}
         }
     }
 }
 
-fn send_line_to_tsh(tsh_id: u64, line: &[u8]) {
+fn send_line_to_tsh(tsh_id: u64, line: &[u8]) -> Result<(), ()> {
     let mut buf = [0u8; IPC_BUF_SIZE];
     if 8 + line.len() > buf.len() {
-        return;
+        return Err(());
     }
     buf[0..4].copy_from_slice(&OPCODE_INPUT.to_le_bytes());
     buf[4..8].copy_from_slice(&(line.len() as u32).to_le_bytes());
     buf[8..8 + line.len()].copy_from_slice(line);
-    let _ = syscall::ipc_send(tsh_id, &buf[..8 + line.len()]);
+    if syscall::ipc_send(tsh_id, &buf[..8 + line.len()]) < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
-fn handle_tsh_output(msg: &[u8], netd_id: u64) -> Result<(), ()> {
+fn handle_tsh_output(msg: &[u8], netd_id: u64, conn_id: u32) -> Result<(), ()> {
     if msg.len() < 8 {
         return Ok(());
     }
@@ -181,7 +211,7 @@ fn handle_tsh_output(msg: &[u8], netd_id: u64) -> Result<(), ()> {
         return Ok(());
     }
     let data = &msg[8..8 + len];
-    let _ = netd_tcp_send(netd_id, data);
+    let _ = netd_tcp_send(netd_id, conn_id, data);
     Ok(())
 }
 
@@ -195,21 +225,33 @@ fn netd_tcp_listen(netd_id: u64, port: u16) -> Result<(), ()> {
     if status < 0 { Err(()) } else { Ok(()) }
 }
 
-fn netd_tcp_accept(netd_id: u64, timeout_ms: u64) -> Result<(), ()> {
+fn netd_tcp_accept(netd_id: u64, timeout_ms: u64) -> Result<u32, ()> {
     let payload = timeout_ms.to_le_bytes();
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_ACCEPT, &payload, &mut [0u8; 32])?;
+    let mut resp = [0u8; 32];
+    let (status, len) = netd_request(netd_id, NETD_OPCODE_TCP_ACCEPT, &payload, &mut resp)?;
+    if status < 0 || len != 4 {
+        Err(())
+    } else {
+        Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
+    }
+}
+
+fn netd_tcp_send(netd_id: u64, conn_id: u32, data: &[u8]) -> Result<(), ()> {
+    let mut payload = [0u8; IPC_BUF_SIZE];
+    if 4 + data.len() > payload.len() {
+        return Err(());
+    }
+    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
+    payload[4..4 + data.len()].copy_from_slice(data);
+    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_SEND, &payload[..4 + data.len()], &mut [0u8; 32])?;
     if status < 0 { Err(()) } else { Ok(()) }
 }
 
-fn netd_tcp_send(netd_id: u64, data: &[u8]) -> Result<(), ()> {
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_SEND, data, &mut [0u8; 32])?;
-    if status < 0 { Err(()) } else { Ok(()) }
-}
-
-fn netd_tcp_recv(netd_id: u64, buf: &mut [u8], timeout_ms: u64) -> Result<usize, ()> {
-    let mut payload = [0u8; 12];
-    payload[0..4].copy_from_slice(&(buf.len() as u32).to_le_bytes());
-    payload[4..12].copy_from_slice(&timeout_ms.to_le_bytes());
+fn netd_tcp_recv(netd_id: u64, conn_id: u32, buf: &mut [u8], timeout_ms: u64) -> Result<usize, ()> {
+    let mut payload = [0u8; 16];
+    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&(buf.len() as u32).to_le_bytes());
+    payload[8..16].copy_from_slice(&timeout_ms.to_le_bytes());
 
     let (status, len) = netd_request(netd_id, NETD_OPCODE_TCP_RECV, &payload, buf)?;
     if status == -42 {
@@ -221,8 +263,9 @@ fn netd_tcp_recv(netd_id: u64, buf: &mut [u8], timeout_ms: u64) -> Result<usize,
     Ok(len)
 }
 
-fn netd_tcp_close(netd_id: u64) -> Result<(), ()> {
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_CLOSE, &[], &mut [0u8; 32])?;
+fn netd_tcp_close(netd_id: u64, conn_id: u32) -> Result<(), ()> {
+    let payload = conn_id.to_le_bytes();
+    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_CLOSE, &payload, &mut [0u8; 32])?;
     if status < 0 { Err(()) } else { Ok(()) }
 }
 
@@ -263,6 +306,7 @@ fn netd_request(
     if 12 + len > n {
         return Err(());
     }
+    resp_buf.copy_within(12..12 + len, 0);
     Ok((status, len))
 }
 

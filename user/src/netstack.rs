@@ -17,6 +17,7 @@
 // ホストからゲストへの直接 ping は SLIRP の制限でできないが、
 // ゲスト内で ARP/ICMP が動作していることを確認できる。
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
@@ -44,10 +45,11 @@ macro_rules! net_debug {
 /// ネットワークスタックの内部状態
 struct NetState {
     mac: [u8; 6],
-    tcp_connection: Option<TcpConnection>,
-    tcp_recv_flag: bool,
+    tcp_connections: Vec<TcpConnection>,
+    tcp_next_id: u32,
+    tcp_next_port: u16,
     tcp_listen_port: Option<u16>,
-    tcp_accept_flag: bool,
+    tcp_pending_accept: VecDeque<u32>,
     udp_response: Option<(u16, Vec<u8>)>,
 }
 
@@ -65,10 +67,11 @@ fn net_state_mut() -> &'static mut NetState {
         if slot.is_none() {
             *slot = Some(NetState {
                 mac: [0; 6],
-                tcp_connection: None,
-                tcp_recv_flag: false,
+                tcp_connections: Vec::new(),
+                tcp_next_id: 1,
+                tcp_next_port: 49152,
                 tcp_listen_port: None,
-                tcp_accept_flag: false,
+                tcp_pending_accept: VecDeque::new(),
                 udp_response: None,
             });
         }
@@ -384,9 +387,10 @@ pub enum TcpState {
 
 /// TCP コネクション
 ///
-/// クライアント側の TCP コネクションを管理する。
-/// 簡易実装のため、同時に 1 コネクションのみ対応。
+/// 簡易実装だが、複数コネクションを管理できるようにする。
 pub struct TcpConnection {
+    /// コネクション ID
+    pub id: u32,
     /// コネクション状態
     pub state: TcpState,
     /// ローカルポート
@@ -404,11 +408,12 @@ pub struct TcpConnection {
 }
 
 impl TcpConnection {
-    pub fn new(local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Self {
+    pub fn new(id: u32, local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Self {
         // 初期シーケンス番号は簡易的に固定値を使用
         // 本来はランダムにすべきだが、学習用なので省略
         let initial_seq = 1000;
         Self {
+            id,
             state: TcpState::Closed,
             local_port,
             remote_ip,
@@ -417,6 +422,48 @@ impl TcpConnection {
             ack_num: 0,
             recv_buffer: Vec::new(),
         }
+    }
+}
+
+fn alloc_conn_id(state: &mut NetState) -> u32 {
+    let mut id = state.tcp_next_id;
+    if id == 0 {
+        id = 1;
+    }
+    state.tcp_next_id = state.tcp_next_id.wrapping_add(1);
+    if state.tcp_next_id == 0 {
+        state.tcp_next_id = 1;
+    }
+    id
+}
+
+fn alloc_local_port(state: &mut NetState) -> u16 {
+    let port = state.tcp_next_port;
+    let next = state.tcp_next_port.wrapping_add(1);
+    state.tcp_next_port = if next < 49152 { 49152 } else { next };
+    port
+}
+
+fn find_conn_index_by_id(state: &NetState, id: u32) -> Option<usize> {
+    state.tcp_connections.iter().position(|c| c.id == id)
+}
+
+fn find_conn_index_by_tuple(
+    state: &NetState,
+    src_ip: [u8; 4],
+    src_port: u16,
+    dst_port: u16,
+) -> Option<usize> {
+    state.tcp_connections.iter().position(|c| {
+        c.remote_ip == src_ip && c.remote_port == src_port && c.local_port == dst_port
+    })
+}
+
+fn remove_conn_by_id(state: &mut NetState, id: u32) -> Option<TcpConnection> {
+    if let Some(idx) = find_conn_index_by_id(state, id) {
+        Some(state.tcp_connections.remove(idx))
+    } else {
+        None
     }
 }
 
@@ -1093,154 +1140,142 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
         ip_header.src_ip[0], src_port, dst_port, seq, ack, flags, tcp_payload.len()
     );
 
-    // 現在のコネクションを取得
-    let state = net_state_mut();
-    if state.tcp_connection.is_none() {
-        // リスン中なら SYN を受け付ける
-        if let Some(listen_port) = state.tcp_listen_port {
-            if dst_port == listen_port && tcp_header.has_flag(TCP_FLAG_SYN) {
-                let mut conn = TcpConnection::new(listen_port, ip_header.src_ip, src_port);
-                conn.state = TcpState::SynReceived;
-                conn.ack_num = seq + 1;
-                // SYN-ACK を送信
-                let _ = send_tcp_packet_internal(
-                    conn.remote_ip,
-                    conn.remote_port,
-                    conn.local_port,
-                    conn.seq_num,
-                    conn.ack_num,
-                    TCP_FLAG_SYN | TCP_FLAG_ACK,
-                    &[],
-                );
-                state.tcp_connection = Some(conn);
-                return;
-            }
-        }
-        return; // コネクションがなければ無視
-    }
-    let conn = state.tcp_connection.as_mut().unwrap();
-
-    // ポートとアドレスが一致するか確認
-    if src_port != conn.remote_port || dst_port != conn.local_port {
-        return;
-    }
-    if ip_header.src_ip != conn.remote_ip {
-        return;
-    }
-
-    // 状態に応じた処理
-    match conn.state {
-        TcpState::SynSent => {
-            // SYN-ACK を待っている
-            if tcp_header.has_flag(TCP_FLAG_SYN) && tcp_header.has_flag(TCP_FLAG_ACK) {
-                net_debug!("tcp: received SYN-ACK");
-                // ACK 番号が正しいか確認 (我々の SYN の seq + 1)
-                if ack == conn.seq_num + 1 {
-                    conn.seq_num = ack; // 次の送信 seq
-                    conn.ack_num = seq + 1; // 相手の SYN を確認
-                    conn.state = TcpState::Established;
-
-                    // ACK を送信
-                    send_tcp_ack();
-
-                    // 受信フラグをセット
-                    state.tcp_recv_flag = true;
-
-                    net_debug!("tcp: connection established");
-                }
-            } else if tcp_header.has_flag(TCP_FLAG_RST) {
-                net_debug!("tcp: connection refused (RST)");
-                conn.state = TcpState::Closed;
-                state.tcp_recv_flag = true;
-            }
-        }
-        TcpState::SynReceived => {
-            // サーバー側: ACK を待つ
-            if tcp_header.has_flag(TCP_FLAG_ACK) {
-                if ack == conn.seq_num + 1 {
-                    conn.seq_num = ack;
-                    conn.state = TcpState::Established;
-                    state.tcp_recv_flag = true;
-                    state.tcp_accept_flag = true;
-                    net_debug!("tcp: server connection established");
-                }
-            }
-        }
-        TcpState::Established => {
-            // データ受信または FIN
-            if tcp_header.has_flag(TCP_FLAG_FIN) {
-                net_debug!("tcp: received FIN");
-                conn.ack_num = seq + 1;
-                conn.state = TcpState::CloseWait;
-
-                // ACK を送信
-                send_tcp_ack();
-            } else if tcp_payload.len() > 0 {
-                // データを受信バッファに追加
-                net_debug!("tcp: received {} bytes of data", tcp_payload.len());
-                conn.recv_buffer.extend_from_slice(tcp_payload);
-                conn.ack_num = seq + tcp_payload.len() as u32;
-
-                // ACK を送信
-                send_tcp_ack();
-            } else if tcp_header.has_flag(TCP_FLAG_ACK) {
-                // 純粋な ACK（データ送信への確認）
-                // seq_num の更新は不要（送信側で管理）
-            }
-
-            // 受信フラグをセット
-            state.tcp_recv_flag = true;
-        }
-        TcpState::FinWait1 => {
-            // FIN-ACK または ACK を待っている
-            if tcp_header.has_flag(TCP_FLAG_ACK) {
-                if tcp_header.has_flag(TCP_FLAG_FIN) {
-                    // FIN-ACK 同時
+    let mut send_packet: Option<([u8; 4], u16, u16, u32, u32, u8)> = None;
+    let mut push_accept: Option<u32> = None;
+    {
+        let state = net_state_mut();
+        let idx = find_conn_index_by_tuple(state, ip_header.src_ip, src_port, dst_port);
+        if idx.is_none() {
+            // リスン中なら SYN を受け付ける
+            if let Some(listen_port) = state.tcp_listen_port {
+                if dst_port == listen_port && tcp_header.has_flag(TCP_FLAG_SYN) {
+                    let id = alloc_conn_id(state);
+                    let mut conn = TcpConnection::new(id, listen_port, ip_header.src_ip, src_port);
+                    conn.state = TcpState::SynReceived;
                     conn.ack_num = seq + 1;
-                    conn.state = TcpState::TimeWait;
-                    send_tcp_ack();
-                } else {
-                    // ACK のみ
-                    conn.state = TcpState::FinWait2;
+                    send_packet = Some((
+                        conn.remote_ip,
+                        conn.remote_port,
+                        conn.local_port,
+                        conn.seq_num,
+                        conn.ack_num,
+                        TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    ));
+                    state.tcp_connections.push(conn);
                 }
-                state.tcp_recv_flag = true;
+            }
+        } else {
+            let idx = idx.unwrap();
+            let conn = &mut state.tcp_connections[idx];
+            match conn.state {
+                TcpState::SynSent => {
+                    if tcp_header.has_flag(TCP_FLAG_SYN) && tcp_header.has_flag(TCP_FLAG_ACK) {
+                        net_debug!("tcp: received SYN-ACK");
+                        if ack == conn.seq_num + 1 {
+                            conn.seq_num = ack;
+                            conn.ack_num = seq + 1;
+                            conn.state = TcpState::Established;
+                            send_packet = Some((
+                                conn.remote_ip,
+                                conn.remote_port,
+                                conn.local_port,
+                                conn.seq_num,
+                                conn.ack_num,
+                                TCP_FLAG_ACK,
+                            ));
+                            net_debug!("tcp: connection established");
+                        }
+                    } else if tcp_header.has_flag(TCP_FLAG_RST) {
+                        net_debug!("tcp: connection refused (RST)");
+                        conn.state = TcpState::Closed;
+                    }
+                }
+                TcpState::SynReceived => {
+                    if tcp_header.has_flag(TCP_FLAG_ACK) {
+                        if ack == conn.seq_num + 1 {
+                            conn.seq_num = ack;
+                            conn.state = TcpState::Established;
+                            push_accept = Some(conn.id);
+                            net_debug!("tcp: server connection established");
+                        }
+                    }
+                }
+                TcpState::Established => {
+                    if tcp_header.has_flag(TCP_FLAG_FIN) {
+                        net_debug!("tcp: received FIN");
+                        conn.ack_num = seq + 1;
+                        conn.state = TcpState::CloseWait;
+                        send_packet = Some((
+                            conn.remote_ip,
+                            conn.remote_port,
+                            conn.local_port,
+                            conn.seq_num,
+                            conn.ack_num,
+                            TCP_FLAG_ACK,
+                        ));
+                    } else if !tcp_payload.is_empty() {
+                        net_debug!("tcp: received {} bytes of data", tcp_payload.len());
+                        conn.recv_buffer.extend_from_slice(tcp_payload);
+                        conn.ack_num = seq + tcp_payload.len() as u32;
+                        send_packet = Some((
+                            conn.remote_ip,
+                            conn.remote_port,
+                            conn.local_port,
+                            conn.seq_num,
+                            conn.ack_num,
+                            TCP_FLAG_ACK,
+                        ));
+                    }
+                }
+                TcpState::FinWait1 => {
+                    if tcp_header.has_flag(TCP_FLAG_ACK) {
+                        if tcp_header.has_flag(TCP_FLAG_FIN) {
+                            conn.ack_num = seq + 1;
+                            conn.state = TcpState::TimeWait;
+                            send_packet = Some((
+                                conn.remote_ip,
+                                conn.remote_port,
+                                conn.local_port,
+                                conn.seq_num,
+                                conn.ack_num,
+                                TCP_FLAG_ACK,
+                            ));
+                        } else {
+                            conn.state = TcpState::FinWait2;
+                        }
+                    }
+                }
+                TcpState::FinWait2 => {
+                    if tcp_header.has_flag(TCP_FLAG_FIN) {
+                        conn.ack_num = seq + 1;
+                        conn.state = TcpState::TimeWait;
+                        send_packet = Some((
+                            conn.remote_ip,
+                            conn.remote_port,
+                            conn.local_port,
+                            conn.seq_num,
+                            conn.ack_num,
+                            TCP_FLAG_ACK,
+                        ));
+                    }
+                }
+                TcpState::LastAck => {
+                    if tcp_header.has_flag(TCP_FLAG_ACK) {
+                        conn.state = TcpState::Closed;
+                    }
+                }
+                _ => {}
             }
         }
-        TcpState::FinWait2 => {
-            if tcp_header.has_flag(TCP_FLAG_FIN) {
-                conn.ack_num = seq + 1;
-                conn.state = TcpState::TimeWait;
-                send_tcp_ack();
-                state.tcp_recv_flag = true;
-            }
+
+        if let Some(id) = push_accept {
+            state.tcp_pending_accept.push_back(id);
         }
-        TcpState::LastAck => {
-            if tcp_header.has_flag(TCP_FLAG_ACK) {
-                conn.state = TcpState::Closed;
-                state.tcp_recv_flag = true;
-            }
-        }
-        _ => {}
     }
-}
 
-/// TCP ACK パケットを送信する
-fn send_tcp_ack() {
-    let state = net_state_mut();
-    let conn = match state.tcp_connection.as_ref() {
-        Some(c) => c,
-        None => return,
-    };
-
-    let _ = send_tcp_packet_internal(
-        conn.remote_ip,
-        conn.remote_port,
-        conn.local_port,
-        conn.seq_num,
-        conn.ack_num,
-        TCP_FLAG_ACK,
-        &[],
-    );
+    if let Some((dst_ip, dst_port, src_port, seq_num, ack_num, flags)) = send_packet {
+        let _ = send_tcp_packet_internal(dst_ip, dst_port, src_port, seq_num, ack_num, flags, &[]);
+    }
 }
 
 /// TCP パケットを送信する（内部用）
@@ -1386,37 +1421,20 @@ fn calculate_tcp_checksum(
 /// - `dst_port`: 宛先ポート
 ///
 /// # 戻り値
-/// - `Ok(())`: コネクション確立成功
+/// - `Ok(conn_id)`: コネクション ID
 /// - `Err(&str)`: エラー
-pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<(), &'static str> {
-    // 既存のコネクションがあれば閉じる
-    {
+pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> {
+    let (conn_id, local_port, initial_seq) = {
         let state = net_state_mut();
-        state.tcp_connection = None;
-        state.tcp_listen_port = None;
-        state.tcp_accept_flag = false;
-    }
+        let id = alloc_conn_id(state);
+        let local_port = alloc_local_port(state);
+        let mut conn = TcpConnection::new(id, local_port, dst_ip, dst_port);
+        conn.state = TcpState::SynSent;
+        let initial_seq = conn.seq_num;
+        state.tcp_connections.push(conn);
+        (id, local_port, initial_seq)
+    };
 
-    // ローカルポート（簡易的に固定）
-    let local_port = 49152;
-
-    // 新しいコネクションを作成
-    let mut conn = TcpConnection::new(local_port, dst_ip, dst_port);
-    conn.state = TcpState::SynSent;
-    let initial_seq = conn.seq_num;
-
-    {
-        let state = net_state_mut();
-        state.tcp_connection = Some(conn);
-    }
-
-    // 受信フラグをクリア
-    {
-        let state = net_state_mut();
-        state.tcp_recv_flag = false;
-    }
-
-    // SYN を送信
     net_debug!("tcp: sending SYN");
     send_tcp_packet_internal(
         dst_ip,
@@ -1428,48 +1446,41 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<(), &'static str> {
         &[],
     )?;
 
-    // SYN-ACK を待つ（ポーリング）
     for _ in 0..1000000 {
         poll_and_handle();
 
-        // 受信フラグをチェック
-        {
-            let state = net_state_mut();
-            if state.tcp_recv_flag {
+        let state = net_state_mut();
+        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+            let c = &state.tcp_connections[idx];
+            if c.state == TcpState::Established {
+                return Ok(conn_id);
+            }
+            if c.state == TcpState::Closed {
                 break;
             }
+        } else {
+            break;
         }
 
-        // 簡単なビジーウェイト
         for _ in 0..10000 {
             core::hint::spin_loop();
         }
     }
 
-    // コネクション状態を確認
     let state = net_state_mut();
-    match state.tcp_connection.as_ref() {
-        Some(c) if c.state == TcpState::Established => Ok(()),
-        Some(c) => {
-            net_debug!("tcp: connect failed, state={:?}", c.state);
-            Err("connection failed")
-        }
-        None => Err("no connection"),
-    }
+    let _ = remove_conn_by_id(state, conn_id);
+    Err("connection failed")
 }
 
-/// TCP のリッスンを開始する（単一接続のみ）
+/// TCP のリッスンを開始する
 pub fn tcp_listen(port: u16) -> Result<(), &'static str> {
     let state = net_state_mut();
-    state.tcp_connection = None;
-    state.tcp_recv_flag = false;
     state.tcp_listen_port = Some(port);
-    state.tcp_accept_flag = false;
     Ok(())
 }
 
-/// TCP の accept を待つ（単一接続）
-pub fn tcp_accept(timeout_ms: u64) -> Result<(), &'static str> {
+/// TCP の accept を待つ（複数接続対応）
+pub fn tcp_accept(timeout_ms: u64) -> Result<u32, &'static str> {
     let loops = if timeout_ms == 0 {
         1
     } else {
@@ -1480,9 +1491,8 @@ pub fn tcp_accept(timeout_ms: u64) -> Result<(), &'static str> {
         poll_and_handle();
         {
             let state = net_state_mut();
-            if state.tcp_accept_flag {
-                state.tcp_accept_flag = false;
-                return Ok(());
+            if let Some(id) = state.tcp_pending_accept.pop_front() {
+                return Ok(id);
             }
         }
         for _ in 0..1000 {
@@ -1493,10 +1503,11 @@ pub fn tcp_accept(timeout_ms: u64) -> Result<(), &'static str> {
 }
 
 /// TCP でデータを送信する
-pub fn tcp_send(data: &[u8]) -> Result<(), &'static str> {
+pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
     let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
         let state = net_state_mut();
-        let conn = state.tcp_connection.as_mut().ok_or("no connection")?;
+        let idx = find_conn_index_by_id(state, conn_id).ok_or("no connection")?;
+        let conn = &mut state.tcp_connections[idx];
 
         if conn.state != TcpState::Established {
             return Err("connection not established");
@@ -1521,14 +1532,7 @@ pub fn tcp_send(data: &[u8]) -> Result<(), &'static str> {
 }
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
-pub fn tcp_recv(timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
-    // 受信フラグをクリア
-    {
-        let state = net_state_mut();
-        state.tcp_recv_flag = false;
-    }
-
-    // ポーリングループ（簡易タイムアウト）
+pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
     let loops = if timeout_ms == 0 {
         500000
     } else {
@@ -1540,19 +1544,21 @@ pub fn tcp_recv(timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
         // 受信バッファをチェック
         {
             let state = net_state_mut();
-            if let Some(ref mut c) = state.tcp_connection {
+            if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+                let c = &mut state.tcp_connections[idx];
                 if !c.recv_buffer.is_empty() {
                     let data = core::mem::take(&mut c.recv_buffer);
                     return Ok(data);
                 }
                 if c.state == TcpState::CloseWait || c.state == TcpState::Closed {
-                    // まだバッファにデータがあれば返す
                     if !c.recv_buffer.is_empty() {
                         let data = core::mem::take(&mut c.recv_buffer);
                         return Ok(data);
                     }
                     return Err("connection closed");
                 }
+            } else {
+                return Err("no connection");
             }
         }
 
@@ -1566,10 +1572,11 @@ pub fn tcp_recv(timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
 }
 
 /// TCP コネクションを閉じる
-pub fn tcp_close() -> Result<(), &'static str> {
+pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
     let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
         let state = net_state_mut();
-        let conn = state.tcp_connection.as_mut().ok_or("no connection")?;
+        let idx = find_conn_index_by_id(state, conn_id).ok_or("no connection")?;
+        let conn = &mut state.tcp_connections[idx];
 
         if conn.state != TcpState::Established && conn.state != TcpState::CloseWait {
             return Err("invalid state for close");
@@ -1605,7 +1612,8 @@ pub fn tcp_close() -> Result<(), &'static str> {
 
         {
             let state = net_state_mut();
-            if let Some(ref c) = state.tcp_connection {
+            if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+                let c = &state.tcp_connections[idx];
                 if c.state == TcpState::TimeWait || c.state == TcpState::Closed {
                     break;
                 }
@@ -1617,10 +1625,9 @@ pub fn tcp_close() -> Result<(), &'static str> {
         }
     }
 
-    // コネクションをクリア
     {
         let state = net_state_mut();
-        state.tcp_connection = None;
+        let _ = remove_conn_by_id(state, conn_id);
     }
 
     net_debug!("tcp: connection closed");

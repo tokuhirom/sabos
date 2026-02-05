@@ -1508,10 +1508,13 @@ fn cmd_http(args: &str) {
     write_ip(&ip);
     syscall::write_str(":80...\n");
 
-    if netd_tcp_connect(&ip, 80).is_err() {
-        syscall::write_str("Error: TCP connect failed\n");
-        return;
-    }
+    let conn_id = match netd_tcp_connect(&ip, 80) {
+        Ok(id) => id,
+        Err(_) => {
+            syscall::write_str("Error: TCP connect failed\n");
+            return;
+        }
+    };
     syscall::write_str("Connected!\n");
 
     // HTTP リクエストを構築
@@ -1519,17 +1522,17 @@ fn cmd_http(args: &str) {
     syscall::write_str("Sending HTTP request...\n");
 
     // GET line
-    let _ = netd_tcp_send(b"GET ");
-    let _ = netd_tcp_send(path.as_bytes());
-    let _ = netd_tcp_send(b" HTTP/1.0\r\n");
+    let _ = netd_tcp_send(conn_id, b"GET ");
+    let _ = netd_tcp_send(conn_id, path.as_bytes());
+    let _ = netd_tcp_send(conn_id, b" HTTP/1.0\r\n");
 
     // Host header
-    let _ = netd_tcp_send(b"Host: ");
-    let _ = netd_tcp_send(host.as_bytes());
-    let _ = netd_tcp_send(b"\r\n");
+    let _ = netd_tcp_send(conn_id, b"Host: ");
+    let _ = netd_tcp_send(conn_id, host.as_bytes());
+    let _ = netd_tcp_send(conn_id, b"\r\n");
 
     // Connection header and end of headers
-    let _ = netd_tcp_send(b"Connection: close\r\n\r\n");
+    let _ = netd_tcp_send(conn_id, b"Connection: close\r\n\r\n");
 
     // レスポンスを受信
     syscall::write_str("Receiving response...\n");
@@ -1537,7 +1540,7 @@ fn cmd_http(args: &str) {
 
     let mut buf = [0u8; 1024];
     loop {
-        let n = match netd_tcp_recv(&mut buf, 5000) {
+        let n = match netd_tcp_recv(conn_id, &mut buf, 5000) {
             Ok(n) => n,
             Err(_) => -1,
         };
@@ -1556,7 +1559,7 @@ fn cmd_http(args: &str) {
     syscall::write_str("\n--- End ---\n");
 
     // 接続を閉じる
-    let _ = netd_tcp_close();
+    let _ = netd_tcp_close(conn_id);
 }
 
 /// gui コマンド: GUI サービスに描画要求を送る
@@ -1859,22 +1862,28 @@ fn netd_dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> Result<(), ()> {
     Ok(())
 }
 
-fn netd_tcp_connect(ip: &[u8; 4], port: u16) -> Result<(), ()> {
+fn netd_tcp_connect(ip: &[u8; 4], port: u16) -> Result<u32, ()> {
     let mut payload = [0u8; 6];
     payload[0..4].copy_from_slice(ip);
     payload[4..6].copy_from_slice(&port.to_le_bytes());
     let mut resp = [0u8; 2048];
-    let (status, _) = netd_request(OPCODE_TCP_CONNECT, &payload, &mut resp)?;
-    if status < 0 {
+    let (status, len) = netd_request(OPCODE_TCP_CONNECT, &payload, &mut resp)?;
+    if status < 0 || len != 4 {
         Err(())
     } else {
-        Ok(())
+        Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
     }
 }
 
-fn netd_tcp_send(data: &[u8]) -> Result<(), ()> {
+fn netd_tcp_send(conn_id: u32, data: &[u8]) -> Result<(), ()> {
     let mut resp = [0u8; 2048];
-    let (status, _) = netd_request(OPCODE_TCP_SEND, data, &mut resp)?;
+    let mut payload = [0u8; 2048];
+    if 4 + data.len() > payload.len() {
+        return Err(());
+    }
+    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
+    payload[4..4 + data.len()].copy_from_slice(data);
+    let (status, _) = netd_request(OPCODE_TCP_SEND, &payload[..4 + data.len()], &mut resp)?;
     if status < 0 {
         Err(())
     } else {
@@ -1882,11 +1891,12 @@ fn netd_tcp_send(data: &[u8]) -> Result<(), ()> {
     }
 }
 
-fn netd_tcp_recv(buf: &mut [u8], timeout_ms: u64) -> Result<i64, ()> {
-    let mut payload = [0u8; 12];
+fn netd_tcp_recv(conn_id: u32, buf: &mut [u8], timeout_ms: u64) -> Result<i64, ()> {
+    let mut payload = [0u8; 16];
     let max_len = buf.len() as u32;
-    payload[0..4].copy_from_slice(&max_len.to_le_bytes());
-    payload[4..12].copy_from_slice(&timeout_ms.to_le_bytes());
+    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
+    payload[4..8].copy_from_slice(&max_len.to_le_bytes());
+    payload[8..16].copy_from_slice(&timeout_ms.to_le_bytes());
 
     let mut resp = [0u8; 2048];
     let (status, len) = netd_request(OPCODE_TCP_RECV, &payload, &mut resp)?;
@@ -1898,9 +1908,10 @@ fn netd_tcp_recv(buf: &mut [u8], timeout_ms: u64) -> Result<i64, ()> {
     Ok(copy_len as i64)
 }
 
-fn netd_tcp_close() -> Result<(), ()> {
+fn netd_tcp_close(conn_id: u32) -> Result<(), ()> {
     let mut resp = [0u8; 2048];
-    let (status, _) = netd_request(OPCODE_TCP_CLOSE, &[], &mut resp)?;
+    let payload = conn_id.to_le_bytes();
+    let (status, _) = netd_request(OPCODE_TCP_CLOSE, &payload, &mut resp)?;
     if status < 0 {
         Err(())
     } else {
@@ -1957,6 +1968,7 @@ fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32
     if IPC_RESP_HEADER + len > n {
         return Err(());
     }
+    resp_buf.copy_within(IPC_RESP_HEADER..IPC_RESP_HEADER + len, 0);
 
     Ok((status, len))
 }

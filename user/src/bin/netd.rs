@@ -91,26 +91,39 @@ fn netd_loop() -> ! {
                 if payload.len() == 6 {
                     let ip = [payload[0], payload[1], payload[2], payload[3]];
                     let port = u16::from_le_bytes([payload[4], payload[5]]);
-                    if let Err(err) = netstack::tcp_connect(ip, port) {
-                        status = map_netstack_error(err);
+                    match netstack::tcp_connect(ip, port) {
+                        Ok(conn_id) => {
+                            resp_len = 4;
+                            resp[12..16].copy_from_slice(&conn_id.to_le_bytes());
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
                     }
                 } else {
                     status = -1;
                 }
             }
             OPCODE_TCP_SEND => {
-                if let Err(err) = netstack::tcp_send(payload) {
-                    status = map_netstack_error(err);
+                if payload.len() < 4 {
+                    status = -1;
+                } else {
+                    let conn_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let data = &payload[4..];
+                    if let Err(err) = netstack::tcp_send(conn_id, data) {
+                        status = map_netstack_error(err);
+                    }
                 }
             }
             OPCODE_TCP_RECV => {
-                if payload.len() == 12 {
-                    let max_len = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+                if payload.len() == 16 {
+                    let conn_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let max_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
                     let timeout = u64::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
                         payload[8], payload[9], payload[10], payload[11],
+                        payload[12], payload[13], payload[14], payload[15],
                     ]);
-                    match netstack::tcp_recv(timeout) {
+                    match netstack::tcp_recv(conn_id, timeout) {
                         Ok(data) => {
                             let cap = core::cmp::min(max_len, data.len());
                             let cap = core::cmp::min(cap, resp.len() - 12);
@@ -126,8 +139,13 @@ fn netd_loop() -> ! {
                 }
             }
             OPCODE_TCP_CLOSE => {
-                if let Err(err) = netstack::tcp_close() {
-                    status = map_netstack_error(err);
+                if payload.len() == 4 {
+                    let conn_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if let Err(err) = netstack::tcp_close(conn_id) {
+                        status = map_netstack_error(err);
+                    }
+                } else {
+                    status = -1;
                 }
             }
             OPCODE_TCP_LISTEN => {
@@ -146,8 +164,14 @@ fn netd_loop() -> ! {
                         payload[0], payload[1], payload[2], payload[3],
                         payload[4], payload[5], payload[6], payload[7],
                     ]);
-                    if let Err(err) = netstack::tcp_accept(timeout) {
-                        status = map_netstack_error(err);
+                    match netstack::tcp_accept(timeout) {
+                        Ok(conn_id) => {
+                            resp_len = 4;
+                            resp[12..16].copy_from_slice(&conn_id.to_le_bytes());
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
                     }
                 } else {
                     status = -1;
