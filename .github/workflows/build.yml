@@ -49,4 +49,36 @@ jobs:
         run: mkdir -p esp/EFI/BOOT
 
       - name: Run selftest
+        env:
+          SELFTEST_TARGET: base
+        run: make test
+
+  test-gui:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-unknown-uefi,x86_64-unknown-none
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools netcat-openbsd
+
+      - name: Build
+        run: make build
+
+      - name: Create disk image
+        run: make disk-img
+
+      - name: Create ESP directory
+        run: mkdir -p esp/EFI/BOOT
+
+      - name: Run selftest (GUI)
+        env:
+          SELFTEST_TARGET: gui
         run: make test

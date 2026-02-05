@@ -148,7 +148,7 @@ impl Shell {
         kprintln!("  ip              - Show IP configuration");
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
         kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
-        kprintln!("  selftest [target] - Run automated self-tests (target: all/core/fs/net/gui/service/list)");
+        kprintln!("  selftest [target] - Run automated self-tests (target: all/base/core/fs/net/gui/service/list)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -1168,7 +1168,7 @@ impl Shell {
         let target = if target.is_empty() { "all" } else { target };
 
         if target == "list" {
-            kprintln!("selftest targets: all, core, fs, net, gui, service");
+            kprintln!("selftest targets: all, base, core, fs, net, gui, service");
             return;
         }
 
@@ -1261,6 +1261,12 @@ impl Shell {
             // 17. telnetd サービスの起動確認
             run_test("telnetd_service", this.test_telnetd_service());
         };
+        let run_base = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            run_core(this, run_test);
+            run_fs(this, run_test);
+            run_net(this, run_test);
+            run_service(this, run_test);
+        };
 
         match target {
             "all" => {
@@ -1270,13 +1276,14 @@ impl Shell {
                 run_gui(self, &mut run_test);
                 run_service(self, &mut run_test);
             }
+            "base" => run_base(self, &mut run_test),
             "core" => run_core(self, &mut run_test),
             "fs" => run_fs(self, &mut run_test),
             "net" => run_net(self, &mut run_test),
             "gui" => run_gui(self, &mut run_test),
             "service" => run_service(self, &mut run_test),
             _ => {
-                kprintln!("Usage: selftest [all|core|fs|net|gui|service|list]");
+                kprintln!("Usage: selftest [all|base|core|fs|net|gui|service|list]");
                 return;
             }
         }

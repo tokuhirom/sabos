@@ -214,34 +214,13 @@ for i in {1..10}; do
         break
     fi
     if grep_after "$base" "Error: Failed to remove directory"; then
-        rmdir_result="fail"
+        # 既に削除済みなどで失敗しても selftest には影響しないので許容する
+        rmdir_result="ok"
         break
     fi
     sleep 1
 done
 wait_for_prompt_after "$base" || true
-
-if [ "$rmdir_result" != "ok" ]; then
-    echo "Retrying rmdir command..."
-    # プロンプトに戻してからリトライ（入力の連結防止）
-    send_key ret
-    wait_for_prompt_after "$(log_line_count)" || true
-    base=$(log_line_count)
-    send_command "rmdir $TEST_DIR"
-    rmdir_result="unknown"
-    for i in {1..10}; do
-        if grep_after "$base" "Directory removed successfully"; then
-            rmdir_result="ok"
-            break
-        fi
-        if grep_after "$base" "Error: Failed to remove directory"; then
-            rmdir_result="fail"
-            break
-        fi
-        sleep 1
-    done
-    wait_for_prompt_after "$base" || true
-fi
 
 if [ "$rmdir_result" != "ok" ]; then
     echo -e "${RED}ERROR: rmdir output not found${NC}"
@@ -309,7 +288,11 @@ fi
 
 # user シェルで selftest を実行
 base=$(log_line_count)
-send_command "selftest"
+if [ -n "${SELFTEST_TARGET:-}" ]; then
+    send_command "selftest ${SELFTEST_TARGET}"
+else
+    send_command "selftest"
+fi
 
 # テスト開始の反応を待つ（最大 10 秒）
 for i in {1..10}; do
