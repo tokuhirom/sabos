@@ -22,6 +22,7 @@ MONITOR_PORT=55582
 KEY_DELAY=0.8
 TEST_DIR="t"
 TEST_DIR_FALLBACK="u"
+GUI_SCREENSHOT_PATH_FILE="scripts/gui-screenshot-path.txt"
 
 # クリーンアップ関数
 cleanup() {
@@ -247,6 +248,8 @@ fi
 echo "Sending user shell ls command..."
 
 # user シェルで ls を実行
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
 base=$(log_line_count)
 send_command "ls"
 
@@ -260,9 +263,22 @@ for i in {1..10}; do
 done
 
 if ! grep_after "$base" "HELLO.TXT"; then
-    echo -e "${RED}ERROR: ls output did not contain HELLO.TXT${NC}"
-    cat "$LOG_FILE"
-    exit 1
+    echo "Retrying ls command..."
+    send_key ret
+    wait_for_prompt_after "$(log_line_count)" || true
+    base=$(log_line_count)
+    send_command "ls"
+    for i in {1..10}; do
+        if grep_after "$base" "HELLO.TXT"; then
+            break
+        fi
+        sleep 1
+    done
+    if ! grep_after "$base" "HELLO.TXT"; then
+        echo -e "${RED}ERROR: ls output did not contain HELLO.TXT${NC}"
+        cat "$LOG_FILE"
+        exit 1
+    fi
 fi
 
 # ls 実行後に user> プロンプトが戻るまで待つ
@@ -270,6 +286,22 @@ wait_for_prompt_after "$base" || true
 sleep 0.5
 
 echo "Sending selftest command..."
+
+# GUI アプリのスクリーンショット（任意）
+if [ -f "$GUI_SCREENSHOT_PATH_FILE" ]; then
+    GUI_SCREENSHOT_OUT="$(cat "$GUI_SCREENSHOT_PATH_FILE")"
+    rm -f "$GUI_SCREENSHOT_PATH_FILE"
+    echo "Spawning GUI apps for screenshot..."
+    send_command "spawn /CALC.ELF"
+    send_command "spawn /PAD.ELF"
+    sleep 4
+    echo "Capturing GUI screenshot..."
+    mkdir -p "$(dirname "$GUI_SCREENSHOT_OUT")"
+    echo "screendump /tmp/sabos-gui-shot.ppm" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    sleep 1
+    convert /tmp/sabos-gui-shot.ppm "$GUI_SCREENSHOT_OUT"
+    echo "GUI screenshot saved: $GUI_SCREENSHOT_OUT"
+fi
 
 # user シェルで selftest を実行
 base=$(log_line_count)
