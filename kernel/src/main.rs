@@ -254,59 +254,10 @@ fn main() -> Status {
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
     kprintln!();
 
-    // --- マルチタスクのデモ ---
-    // 2つのデモタスクを生成して、タスクの切り替えを確認する。
-    // 各タスクはメッセージを表示して yield を繰り返し、最後に return する。
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-    kprintln!("Spawning demo tasks...");
-    scheduler::spawn("demo_a", demo_task_a);
-    scheduler::spawn("demo_b", demo_task_b);
-
-    kprintln!("Running demo tasks:");
-    // タイマー割り込みで切り替わるので、カーネルは HLT で待機するだけでよい。
-    scheduler::wait_until_no_ready_tasks();
-
-    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-    kprintln!("All demo tasks finished!");
-    kprintln!();
-
-    // --- プリエンプティブマルチタスクのデモ ---
-    // yield_now() を呼ばないビジーループタスクを2つ生成する。
-    // タイマー割り込みによる強制切り替え（プリエンプション）が正しく動いていれば、
-    // 各タスクが交互にメッセージを出力するはず。
-    // yield を使わずに切り替わることがプリエンプティブの証明。
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-    kprintln!("Spawning preemptive demo tasks (no yield)...");
-    scheduler::spawn("preempt_x", preemptive_task_x);
-    scheduler::spawn("preempt_y", preemptive_task_y);
-
-    kprintln!("Running preemptive demo tasks:");
-    // タイマー割り込みがラウンドロビンで全タスクを切り替える。
-    // カーネルは HLT で待機する。
-    scheduler::wait_until_no_ready_tasks();
-
-    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-    kprintln!("All preemptive demo tasks finished!");
-    let (calls, switches) = scheduler::preempt_stats();
-    let ticks = interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
-    kprintln!("  timer ticks: {}, preempt() called: {}, switched: {}", ticks, calls, switches);
-    kprintln!();
-
-    // --- sleep デモ ---
-    // sleep_ms() を使ってタスクを一定時間停止させるデモ。
-    // busy-wait ではなくタスクを Sleeping 状態にするので、
-    // スリープ中は CPU を他のタスクに譲れる（CPU 時間を無駄にしない）。
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-    kprintln!("Spawning sleep demo tasks...");
-    scheduler::spawn("sleep_1", sleep_demo_1);
-    scheduler::spawn("sleep_2", sleep_demo_2);
-
-    kprintln!("Running sleep demo tasks:");
-    scheduler::wait_until_no_ready_tasks();
-
-    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-    kprintln!("All sleep demo tasks finished!");
-    kprintln!();
+    // --- 起動時デモ（必要なときだけ） ---
+    // デモがあると起動が遅くなるので、必要なときだけ機能フラグで有効化する。
+    #[cfg(feature = "boot-demos")]
+    boot_demos::run();
 
     // --- init プロセスの起動 ---
     // disk.img から INIT.ELF を読み込んで最初のユーザープロセスとして起動する。
@@ -393,121 +344,187 @@ fn main() -> Status {
     }
 }
 
-// =================================================================
-// マルチタスクのデモ用タスク
-// =================================================================
-//
-// 各タスクはメッセージを表示して yield_now() で CPU を譲る。
-// これを数回繰り返してから return する。
-// return すると task_trampoline → task_exit_handler で自動的に Finished になる。
+#[cfg(feature = "boot-demos")]
+mod boot_demos {
+    use core::sync::atomic::Ordering;
 
-/// デモタスク A: メッセージを3回表示する。
-fn demo_task_a() {
-    framebuffer::set_global_colors((100, 200, 255), (0, 0, 128));
-    kprintln!("  [Task A] Hello! (1/3)");
-    scheduler::yield_now();
-    kprintln!("  [Task A] Running! (2/3)");
-    scheduler::yield_now();
-    kprintln!("  [Task A] Done! (3/3)");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-}
+    use crate::framebuffer;
+    use crate::interrupts;
+    use crate::scheduler;
 
-/// デモタスク B: メッセージを3回表示する。
-fn demo_task_b() {
-    framebuffer::set_global_colors((255, 200, 100), (0, 0, 128));
-    kprintln!("  [Task B] Hello! (1/3)");
-    scheduler::yield_now();
-    kprintln!("  [Task B] Running! (2/3)");
-    scheduler::yield_now();
-    kprintln!("  [Task B] Done! (3/3)");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-}
+    /// 起動時に走らせるデモ一式をまとめて実行する。
+    pub fn run() {
+        // --- マルチタスクのデモ ---
+        // 2つのデモタスクを生成して、タスクの切り替えを確認する。
+        // 各タスクはメッセージを表示して yield を繰り返し、最後に return する。
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        kprintln!("Spawning demo tasks...");
+        scheduler::spawn("demo_a", demo_task_a);
+        scheduler::spawn("demo_b", demo_task_b);
 
-// =================================================================
-// プリエンプティブマルチタスクのデモ用タスク
-// =================================================================
-//
-// これらのタスクは yield_now() を一切呼ばない。
-// それでもタイマー割り込み（IRQ 0）でプリエンプションが発生し、
-// 強制的に他のタスクに切り替わる。
-// 協調的デモと違い「自発的に譲らなくても切り替わる」ことを実証する。
-//
-// ビジーループで一定回数待ってからメッセージを表示する方式。
-// ループ回数は PIT の周波数（約 18.2 Hz = 約 55ms 間隔）を考慮して、
-// タイマー割り込みが何回か発火する程度の長さにしている。
+        kprintln!("Running demo tasks:");
+        // タイマー割り込みで切り替わるので、カーネルは HLT で待機するだけでよい。
+        scheduler::wait_until_no_ready_tasks();
 
-/// ビジーウェイト用のヘルパー関数。
-/// インラインアセンブリの nop ループで、コンパイラの最適化に左右されない
-/// 確実なビジーウェイトを行う。
-fn busy_wait(iterations: u64) {
-    // インラインアセンブリでカウントダウンループを実装する。
-    // コンパイラの最適化で消されることがない。
-    // `pause` 命令はスピンループ向けのヒントで、CPU のパイプラインを効率化する。
-    unsafe {
-        core::arch::asm!(
-            "2:",
-            "pause",
-            "sub {0}, 1",
-            "jnz 2b",
-            inout(reg) iterations => _,
-            options(nostack, nomem),
-        );
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("All demo tasks finished!");
+        kprintln!();
+
+        // --- プリエンプティブマルチタスクのデモ ---
+        // yield_now() を呼ばないビジーループタスクを2つ生成する。
+        // タイマー割り込みによる強制切り替え（プリエンプション）が正しく動いていれば、
+        // 各タスクが交互にメッセージを出力するはず。
+        // yield を使わずに切り替わることがプリエンプティブの証明。
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        kprintln!("Spawning preemptive demo tasks (no yield)...");
+        scheduler::spawn("preempt_x", preemptive_task_x);
+        scheduler::spawn("preempt_y", preemptive_task_y);
+
+        kprintln!("Running preemptive demo tasks:");
+        // タイマー割り込みがラウンドロビンで全タスクを切り替える。
+        // カーネルは HLT で待機する。
+        scheduler::wait_until_no_ready_tasks();
+
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("All preemptive demo tasks finished!");
+        let (calls, switches) = scheduler::preempt_stats();
+        let ticks = interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+        kprintln!("  timer ticks: {}, preempt() called: {}, switched: {}", ticks, calls, switches);
+        kprintln!();
+
+        // --- sleep デモ ---
+        // sleep_ms() を使ってタスクを一定時間停止させるデモ。
+        // busy-wait ではなくタスクを Sleeping 状態にするので、
+        // スリープ中は CPU を他のタスクに譲れる（CPU 時間を無駄にしない）。
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        kprintln!("Spawning sleep demo tasks...");
+        scheduler::spawn("sleep_1", sleep_demo_1);
+        scheduler::spawn("sleep_2", sleep_demo_2);
+
+        kprintln!("Running sleep demo tasks:");
+        scheduler::wait_until_no_ready_tasks();
+
+        framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+        kprintln!("All sleep demo tasks finished!");
+        kprintln!();
     }
-}
 
-/// プリエンプティブデモタスク X:
-/// yield を使わずにメッセージを3回表示する。
-/// タイマー割り込みによるプリエンプションで強制的に切り替わる。
-fn preemptive_task_x() {
-    framebuffer::set_global_colors((200, 100, 255), (0, 0, 128));
-    kprintln!("  [Preempt X] Start (1/3)");
-    busy_wait(15_000_000);
-    kprintln!("  [Preempt X] Middle (2/3)");
-    busy_wait(15_000_000);
-    kprintln!("  [Preempt X] Done (3/3)");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-}
+    // =================================================================
+    // マルチタスクのデモ用タスク
+    // =================================================================
+    //
+    // 各タスクはメッセージを表示して yield_now() で CPU を譲る。
+    // これを数回繰り返してから return する。
+    // return すると task_trampoline → task_exit_handler で自動的に Finished になる。
 
-/// プリエンプティブデモタスク Y:
-/// yield を使わずにメッセージを3回表示する。
-/// タイマー割り込みによるプリエンプションで強制的に切り替わる。
-fn preemptive_task_y() {
-    framebuffer::set_global_colors((255, 100, 200), (0, 0, 128));
-    kprintln!("  [Preempt Y] Start (1/3)");
-    busy_wait(15_000_000);
-    kprintln!("  [Preempt Y] Middle (2/3)");
-    busy_wait(15_000_000);
-    kprintln!("  [Preempt Y] Done (3/3)");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-}
+    /// デモタスク A: メッセージを3回表示する。
+    fn demo_task_a() {
+        framebuffer::set_global_colors((100, 200, 255), (0, 0, 128));
+        kprintln!("  [Task A] Hello! (1/3)");
+        scheduler::yield_now();
+        kprintln!("  [Task A] Running! (2/3)");
+        scheduler::yield_now();
+        kprintln!("  [Task A] Done! (3/3)");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
 
-// =================================================================
-// sleep デモ用タスク
-// =================================================================
-//
-// sleep_ms() を使って一定時間スリープしてからメッセージを表示する。
-// busy-wait と違い、スリープ中は CPU を他のタスクに譲る。
-// タイマーティックで起床時刻に達すると自動的に Ready に戻される。
+    /// デモタスク B: メッセージを3回表示する。
+    fn demo_task_b() {
+        framebuffer::set_global_colors((255, 200, 100), (0, 0, 128));
+        kprintln!("  [Task B] Hello! (1/3)");
+        scheduler::yield_now();
+        kprintln!("  [Task B] Running! (2/3)");
+        scheduler::yield_now();
+        kprintln!("  [Task B] Done! (3/3)");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
 
-/// sleep デモタスク 1: 500ms スリープを挟んでメッセージを表示する。
-fn sleep_demo_1() {
-    framebuffer::set_global_colors((100, 255, 100), (0, 0, 128));
-    kprintln!("  [Sleep 1] Start, sleeping 500ms...");
-    scheduler::sleep_ms(500);
-    kprintln!("  [Sleep 1] Woke up! Sleeping 500ms more...");
-    scheduler::sleep_ms(500);
-    kprintln!("  [Sleep 1] Done!");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-}
+    // =================================================================
+    // プリエンプティブマルチタスクのデモ用タスク
+    // =================================================================
+    //
+    // これらのタスクは yield_now() を一切呼ばない。
+    // それでもタイマー割り込み（IRQ 0）でプリエンプションが発生し、
+    // 強制的に他のタスクに切り替わる。
+    // 協調的デモと違い「自発的に譲らなくても切り替わる」ことを実証する。
+    //
+    // ビジーループで一定回数待ってからメッセージを表示する方式。
+    // ループ回数は PIT の周波数（約 18.2 Hz = 約 55ms 間隔）を考慮して、
+    // タイマー割り込みが何回か発火する程度の長さにしている。
 
-/// sleep デモタスク 2: 300ms スリープを挟んでメッセージを表示する。
-/// タスク 1 より短い間隔でスリープするので、先に起きることがある。
-fn sleep_demo_2() {
-    framebuffer::set_global_colors((255, 255, 100), (0, 0, 128));
-    kprintln!("  [Sleep 2] Start, sleeping 300ms...");
-    scheduler::sleep_ms(300);
-    kprintln!("  [Sleep 2] Woke up! Sleeping 300ms more...");
-    scheduler::sleep_ms(300);
-    kprintln!("  [Sleep 2] Done!");
-    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    /// ビジーウェイト用のヘルパー関数。
+    /// インラインアセンブリの nop ループで、コンパイラの最適化に左右されない
+    /// 確実なビジーウェイトを行う。
+    fn busy_wait(iterations: u64) {
+        // インラインアセンブリでカウントダウンループを実装する。
+        // コンパイラの最適化で消されることがない。
+        // `pause` 命令はスピンループ向けのヒントで、CPU のパイプラインを効率化する。
+        unsafe {
+            core::arch::asm!(
+                "2:",
+                "pause",
+                "sub {0}, 1",
+                "jnz 2b",
+                inout(reg) iterations => _,
+                options(nostack, nomem),
+            );
+        }
+    }
+
+    /// プリエンプティブデモタスク X:
+    /// yield を使わずにメッセージを3回表示する。
+    /// タイマー割り込みによるプリエンプションで強制的に切り替わる。
+    fn preemptive_task_x() {
+        framebuffer::set_global_colors((200, 100, 255), (0, 0, 128));
+        kprintln!("  [Preempt X] Start (1/3)");
+        busy_wait(15_000_000);
+        kprintln!("  [Preempt X] Middle (2/3)");
+        busy_wait(15_000_000);
+        kprintln!("  [Preempt X] Done (3/3)");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
+
+    /// プリエンプティブデモタスク Y:
+    /// yield を使わずにメッセージを3回表示する。
+    /// タイマー割り込みによるプリエンプションで強制的に切り替わる。
+    fn preemptive_task_y() {
+        framebuffer::set_global_colors((255, 100, 200), (0, 0, 128));
+        kprintln!("  [Preempt Y] Start (1/3)");
+        busy_wait(15_000_000);
+        kprintln!("  [Preempt Y] Middle (2/3)");
+        busy_wait(15_000_000);
+        kprintln!("  [Preempt Y] Done (3/3)");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
+
+    // =================================================================
+    // sleep デモ用タスク
+    // =================================================================
+    //
+    // sleep_ms() を使って一定時間スリープしてからメッセージを表示する。
+    // busy-wait と違い、スリープ中は CPU を他のタスクに譲る。
+    // タイマーティックで起床時刻に達すると自動的に Ready に戻される。
+
+    /// sleep デモタスク 1: 500ms スリープを挟んでメッセージを表示する。
+    fn sleep_demo_1() {
+        framebuffer::set_global_colors((100, 255, 100), (0, 0, 128));
+        kprintln!("  [Sleep 1] Start, sleeping 500ms...");
+        scheduler::sleep_ms(500);
+        kprintln!("  [Sleep 1] Woke up! Sleeping 500ms more...");
+        scheduler::sleep_ms(500);
+        kprintln!("  [Sleep 1] Done!");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
+
+    /// sleep デモタスク 2: 300ms スリープを挟んでメッセージを表示する。
+    /// タスク 1 より短い間隔でスリープするので、先に起きることがある。
+    fn sleep_demo_2() {
+        framebuffer::set_global_colors((255, 255, 100), (0, 0, 128));
+        kprintln!("  [Sleep 2] Start, sleeping 300ms...");
+        scheduler::sleep_ms(300);
+        kprintln!("  [Sleep 2] Woke up! Sleeping 300ms more...");
+        scheduler::sleep_ms(300);
+        kprintln!("  [Sleep 2] Done!");
+        framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    }
 }

@@ -17,6 +17,7 @@ ED_ELF = user/target/x86_64-unknown-none/debug/ed
 HTTPD_ELF = user/target/x86_64-unknown-none/debug/httpd
 TELNETD_ELF = user/target/x86_64-unknown-none/debug/telnetd
 TSH_ELF = user/target/x86_64-unknown-none/debug/tsh
+EXIT0_ELF = user/target/x86_64-unknown-none/debug/exit0
 ESP_DIR = esp/EFI/BOOT
 
 # OVMF ファームウェアの検出（Ubuntu: /usr/share/OVMF/）
@@ -66,14 +67,13 @@ $(ESP_DIR):
 # FAT32 ディスクイメージを作成する。
 # 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF を書き込む。
-# USER_ELF (旧シェル) は HELLO.ELF としてテスト用に残す。
+# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF を書き込む。
+# USER_ELF (旧シェル) は現在は disk.img に含めない。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
 	mkfs.fat -F 32 $(DISK_IMG)
 	echo "Hello from FAT32!" > /tmp/hello.txt
 	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
-	mcopy -i $(DISK_IMG) $(USER_ELF) ::HELLO.ELF
 	mcopy -i $(DISK_IMG) $(NETD_ELF) ::NETD.ELF
 	mcopy -i $(DISK_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -i $(DISK_IMG) $(SHELL_ELF) ::SHELL.ELF
@@ -85,6 +85,7 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(HTTPD_ELF) ::HTTPD.ELF
 	mcopy -i $(DISK_IMG) $(TELNETD_ELF) ::TELNETD.ELF
 	mcopy -i $(DISK_IMG) $(TSH_ELF) ::TSH.ELF
+	mcopy -i $(DISK_IMG) $(EXIT0_ELF) ::EXIT0.ELF
 	@echo "Disk image created: $(DISK_IMG)"
 
 run: build $(ESP_DIR) $(DISK_IMG)

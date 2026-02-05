@@ -1417,18 +1417,28 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+    exec_by_path(path)?;
+    Ok(0)
+}
+
+/// exec の共通実装（カーネル内でパスが確定済みの場合に使用）
+fn exec_by_path(path: &str) -> Result<(), SyscallError> {
+    // プロセス名を作成（パスからファイル名部分を抽出）
+    let process_name = String::from(
+        path.rsplit('/').next().unwrap_or(path)
+    );
 
     // FAT32 からファイルを読み込む
     let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
-    // ELF プロセスを作成（カーネルのページテーブルで実行）
+    // スケジューラにユーザープロセスとして登録
     let (current_cr3, current_flags) = Cr3::read();
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let (process, entry_point, user_stack_top) = match crate::usermode::create_elf_process(&elf_data) {
-        Ok(result) => result,
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data) {
+        Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }
             return Err(SyscallError::Other);
@@ -1436,13 +1446,17 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     };
     unsafe { Cr3::write(current_cr3, current_flags); }
 
-    // Ring 3 で同期実行（完了するまでブロック）
-    crate::usermode::run_elf_process(&process, entry_point, user_stack_top);
+    // 子プロセスの終了を待つ
+    match crate::scheduler::wait_for_child(task_id, 0) {
+        Ok(exit_code) if exit_code >= 0 => Ok(()),
+        Ok(_) => Err(SyscallError::Other),
+        Err(_) => Err(SyscallError::Other),
+    }
+}
 
-    // プロセスを破棄
-    crate::usermode::destroy_user_process(process);
-
-    Ok(0)
+/// selftest 用: exec の実行確認
+pub fn exec_for_test(path: &str) -> bool {
+    exec_by_path(path).is_ok()
 }
 
 /// SYS_SPAWN: バックグラウンドでプロセスを起動

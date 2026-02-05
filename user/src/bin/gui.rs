@@ -60,8 +60,13 @@ const WINDOW_BG: (u8, u8, u8) = (24, 28, 44);
 const WINDOW_BORDER: (u8, u8, u8) = (80, 120, 200);
 const WINDOW_TITLE_BG: (u8, u8, u8) = (36, 44, 72);
 const WINDOW_TITLE_TEXT: (u8, u8, u8) = (255, 220, 120);
+const WINDOW_CLOSE_BTN_BG: (u8, u8, u8) = (200, 64, 64);
+const WINDOW_CLOSE_BTN_BORDER: (u8, u8, u8) = (255, 255, 255);
+const WINDOW_CLOSE_BTN_FG: (u8, u8, u8) = (255, 255, 255);
 const WINDOW_TITLE_H: u32 = 24;
 const WINDOW_BORDER_W: u32 = 2;
+const WINDOW_CLOSE_BTN_SIZE: u32 = 12;
+const WINDOW_CLOSE_BTN_MARGIN: u32 = 6;
 // kernel/src/usermode.rs の ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE に合わせた値。
 // スタック使用量の目安をログ出力するための定数（将来変わったら要更新）。
 const USER_STACK_TOP: u64 = 0x2000000 + 0x10000; // 32MiB + 64KiB
@@ -958,11 +963,15 @@ impl WindowManager {
 
         let left_now = (mouse.buttons & 0x01) != 0;
         let left_prev = (prev_buttons & 0x01) != 0;
+        let mut moved = false;
+        let mut handled_close = false;
 
         if left_now && !left_prev {
             if let Some(id) = self.find_window_at(mouse.x, mouse.y) {
                 self.bring_to_top(id);
-                if self.hit_title_bar(id, mouse.x, mouse.y) {
+                if self.hit_close_button(id, mouse.x, mouse.y) {
+                    handled_close = self.close_window(id);
+                } else if self.hit_title_bar(id, mouse.x, mouse.y) {
                     if let Some(win) = self.find_window(id) {
                         self.drag = Some(DragState {
                             id,
@@ -977,8 +986,6 @@ impl WindowManager {
         if !left_now && left_prev {
             self.drag = None;
         }
-
-        let mut moved = false;
         if let Some(drag) = self.drag {
             if let Some(win) = self.find_window_mut(drag.id) {
                 let max_x = state.width.saturating_sub(win.w) as i32;
@@ -996,6 +1003,12 @@ impl WindowManager {
         if moved {
             let _ = self.present_all(state);
             cursor.visible = false;
+        }
+
+        if handled_close {
+            let _ = self.present_all(state);
+            cursor.visible = false;
+            self.drag = None;
         }
 
         let _ = update_cursor(state, cursor, mouse);
@@ -1047,6 +1060,12 @@ impl WindowManager {
         }
     }
 
+    fn hit_close_button(&self, id: u32, x: i32, y: i32) -> bool {
+        let Some(win) = self.find_window(id) else { return false; };
+        let (bx, by, bw, bh) = close_button_rect(win);
+        x >= bx && x < bx + bw as i32 && y >= by && y < by + bh as i32
+    }
+
     fn hit_title_bar(&self, id: u32, x: i32, y: i32) -> bool {
         let Some(win) = self.find_window(id) else { return false; };
         let bx = win.x + WINDOW_BORDER_W as i32;
@@ -1061,6 +1080,40 @@ fn window_content_origin(win: &Window) -> (i32, i32) {
     let x = win.x + WINDOW_BORDER_W as i32;
     let y = win.y + WINDOW_BORDER_W as i32 + WINDOW_TITLE_H as i32;
     (x, y)
+}
+
+fn draw_close_button(state: &mut GuiState, win: &Window) {
+    let (bx, by, bw, bh) = close_button_rect(win);
+    let bg_x = bx.max(0) as u32;
+    let bg_y = by.max(0) as u32;
+    let _ = draw_rect(state, bg_x, bg_y, bw, bh, WINDOW_CLOSE_BTN_BG.0, WINDOW_CLOSE_BTN_BG.1, WINDOW_CLOSE_BTN_BG.2);
+    let _ = draw_rect(state, bg_x, bg_y, bw, 1, WINDOW_CLOSE_BTN_BORDER.0, WINDOW_CLOSE_BTN_BORDER.1, WINDOW_CLOSE_BTN_BORDER.2);
+    let _ = draw_rect(state, bg_x, bg_y + bh - 1, bw, 1, WINDOW_CLOSE_BTN_BORDER.0, WINDOW_CLOSE_BTN_BORDER.1, WINDOW_CLOSE_BTN_BORDER.2);
+    let _ = draw_rect(state, bg_x, bg_y, 1, bh, WINDOW_CLOSE_BTN_BORDER.0, WINDOW_CLOSE_BTN_BORDER.1, WINDOW_CLOSE_BTN_BORDER.2);
+    let _ = draw_rect(state, bg_x + bw - 1, bg_y, 1, bh, WINDOW_CLOSE_BTN_BORDER.0, WINDOW_CLOSE_BTN_BORDER.1, WINDOW_CLOSE_BTN_BORDER.2);
+
+    for i in 0..(WINDOW_CLOSE_BTN_SIZE as i32) {
+        let px = bx + i;
+        let py = by + i;
+        let py2 = by + (WINDOW_CLOSE_BTN_SIZE as i32 - 1 - i);
+        draw_close_pixel(state, px, py, WINDOW_CLOSE_BTN_FG);
+        draw_close_pixel(state, px, py2, WINDOW_CLOSE_BTN_FG);
+    }
+}
+
+fn close_button_rect(win: &Window) -> (i32, i32, u32, u32) {
+    let bw = WINDOW_CLOSE_BTN_SIZE;
+    let bh = WINDOW_CLOSE_BTN_SIZE;
+    let bx = win.x + win.w as i32 - WINDOW_BORDER_W as i32 - WINDOW_CLOSE_BTN_MARGIN as i32 - bw as i32;
+    let by = win.y + WINDOW_BORDER_W as i32 + ((WINDOW_TITLE_H as i32 - bh as i32) / 2);
+    (bx, by, bw, bh)
+}
+
+fn draw_close_pixel(state: &mut GuiState, x: i32, y: i32, color: (u8, u8, u8)) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let _ = draw_rect(state, x as u32, y as u32, 1, 1, color.0, color.1, color.2);
 }
 
 fn clear_screen(state: &mut GuiState, r: u8, g: u8, b: u8) {
@@ -1113,6 +1166,7 @@ fn draw_window_frame(state: &mut GuiState, win: &Window) {
         WINDOW_TITLE_BG,
         win.title.as_str(),
     );
+    draw_close_button(state, win);
 }
 
 fn blit_window_content(state: &mut GuiState, win: &Window) {

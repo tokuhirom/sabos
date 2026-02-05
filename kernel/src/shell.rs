@@ -1195,6 +1195,9 @@ impl Shell {
 
             // 11.5. 文字列置換ユーティリティのテスト
             run_test("textutil_replace", this.test_textutil_replace());
+
+            // 11.6. exec のテスト（EXIT0.ELF を同期実行）
+            run_test("exec_exit0", this.test_exec_exit0());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1462,6 +1465,12 @@ impl Shell {
         }
 
         false
+    }
+
+    /// exec のテスト
+    /// EXIT0.ELF を同期実行し、正常終了することを確認する
+    fn test_exec_exit0(&self) -> bool {
+        crate::syscall::exec_for_test("/EXIT0.ELF")
     }
 
     /// PCI 列挙のテスト

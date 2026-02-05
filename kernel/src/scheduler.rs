@@ -29,6 +29,8 @@ static PREEMPT_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 static PREEMPT_SWITCH_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// preempt() の統計情報を返す（呼び出し回数, スイッチ回数）。
+/// 起動デモで使うので、機能フラグが有効なときだけ公開する。
+#[cfg(feature = "boot-demos")]
 pub fn preempt_stats() -> (u64, u64) {
     (
         PREEMPT_CALL_COUNT.load(Ordering::Relaxed),
@@ -867,6 +869,100 @@ pub fn set_exit_code(exit_code: i32) {
     let mut sched = SCHEDULER.lock();
     let current = sched.current;
     sched.tasks[current].exit_code = exit_code;
+}
+
+/// ユーザータスクが例外で落ちたときに強制終了させる。
+///
+/// ページフォルトなどの例外ハンドラから呼ぶ前提で、
+/// 例外が起きたタスクを Finished にし、他のタスクへ切り替える。
+/// 割り込みハンドラ内で使うため、割り込みの有効/無効は操作しない。
+pub fn abort_current_user_task_from_exception() -> ! {
+    let (switch_info, user_process_info) = {
+        let mut sched = SCHEDULER.lock();
+        let current = sched.current;
+
+        // 異常終了として終了コードを設定
+        sched.tasks[current].exit_code = -1;
+        sched.tasks[current].state = TaskState::Finished;
+
+        // ユーザープロセス情報を取り出して後で解放する
+        let user_process_info = sched.tasks[current].user_process_info.take();
+
+        // 次の Ready タスクを探す
+        let num_tasks = sched.tasks.len();
+        let mut next = None;
+        for i in 1..=num_tasks {
+            let idx = (current + i) % num_tasks;
+            if sched.tasks[idx].state == TaskState::Ready {
+                next = Some(idx);
+                break;
+            }
+        }
+
+        // Ready が無ければ kernel タスクを強制的に選ぶ（最後の避難先）
+        let next_idx = match next {
+            Some(idx) => Some(idx),
+            None => {
+                if !sched.tasks.is_empty()
+                    && sched.tasks[0].state != TaskState::Finished
+                    && current != 0
+                {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        };
+
+        let switch_info = next_idx.map(|next_idx| {
+            sched.tasks[next_idx].state = TaskState::Running;
+            sched.current = next_idx;
+
+            let old_rsp_ptr = &mut sched.tasks[current].context.rsp as *mut u64;
+            let new_rsp = sched.tasks[next_idx].context.rsp;
+
+            // 切り替え先タスクの CR3 を取得
+            let new_cr3 = sched.tasks[next_idx]
+                .cr3
+                .map(|f| f.start_address().as_u64())
+                .unwrap_or_else(|| crate::paging::kernel_cr3().as_u64());
+
+            // 切り替え先タスクのカーネルスタックトップを取得（ユーザープロセスのみ）
+            let new_kernel_stack_top = sched.tasks[next_idx]
+                .user_process_info
+                .as_ref()
+                .map(|info| {
+                    let ks_ptr = info.process.kernel_stack.as_ptr() as u64;
+                    let ks_len = info.process.kernel_stack.len() as u64;
+                    ks_ptr + ks_len
+                });
+
+            (old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)
+        });
+
+        (switch_info, user_process_info)
+    };
+
+    // ユーザープロセスのリソースを解放
+    if let Some(info) = user_process_info {
+        crate::usermode::destroy_user_process(info.process);
+    }
+
+    if let Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)) = switch_info {
+        if let Some(kernel_stack_top) = new_kernel_stack_top {
+            unsafe {
+                crate::gdt::set_tss_rsp0(VirtAddr::new(kernel_stack_top));
+            }
+        }
+        unsafe {
+            context_switch(old_rsp_ptr, new_rsp, new_cr3);
+        }
+    }
+
+    // ここに戻ることは想定しない。念のため停止。
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 // =================================================================

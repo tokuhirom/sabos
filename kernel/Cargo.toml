@@ -15,3 +15,7 @@ pc-keyboard = "0.7"
 sabos-blockdev = { path = "../libs/blockdev" }
 sabos-fat-core = { path = "../libs/fat-core" }
 sabos-textutil = { path = "../libs/textutil" }
+
+[features]
+# 起動時のデモを有効化する。普段は無効にしてシェルの起動を優先する。
+boot-demos = []

@@ -230,7 +230,8 @@ unsafe extern "C" {
 /// SAVED_RSP/SAVED_RBP を復元し、jump_to_usermode() の呼び出しから
 /// 正常に return する。結果的にこの関数も正常に return する。
 ///
-/// Ring 3 でページフォルトが発生した場合も exit_usermode() で戻る。
+/// Ring 3 の例外（ページフォルト等）は例外ハンドラ側でユーザータスクを
+/// 強制終了し、スケジューラが別タスクに切り替える。
 pub fn run_in_usermode(process: &UserProcess, program: &UserProgram) {
     // ユーザースタックのトップアドレスを計算。
     // スタックは高いアドレスから低いアドレスに向かって伸びるので、
@@ -277,7 +278,7 @@ pub fn run_in_usermode(process: &UserProcess, program: &UserProgram) {
     // jump_to_usermode() は内部で RSP/RBP を保存し、iretq で Ring 3 に飛ぶ。
     // SYS_EXIT → exit_usermode() で RSP/RBP が復元され、
     // jump_to_usermode() の呼び出しが正常に return したように見える。
-    // ページフォルトの場合も exit_usermode() で戻ってくる。
+    // ページフォルトの場合は例外ハンドラがタスクを終了する。
     unsafe {
         jump_to_usermode(entry_addr, user_cs, rflags, user_stack_top);
     }
@@ -414,12 +415,12 @@ pub fn get_user_illegal_access() -> UserProgram {
 ///
 /// Ring 3 で実行され、USER_ACCESSIBLE が設定されていないアドレス (0x0) を
 /// 読み込もうとする。これにより Page Fault (#PF) が発生し、
-/// page_fault_handler が USER_MODE ビットを検出して exit_usermode() を呼ぶ。
+/// page_fault_handler が USER_MODE ビットを検出してユーザータスクを終了する。
 /// 結果的に run_in_usermode() が正常に return し、シェルに安全に戻る。
 pub fn user_illegal_access() {
     // アドレス 0x0 はカーネル空間（USER_ACCESSIBLE なし）
     // Ring 3 からここを読もうとすると Page Fault が発生する。
-    // → page_fault_handler → exit_usermode() で安全にカーネルに戻る。
+    // → page_fault_handler がタスクを強制終了してカーネルに戻る。
     unsafe {
         core::ptr::read_volatile(0x0 as *const u8);
     }

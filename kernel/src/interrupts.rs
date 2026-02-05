@@ -246,9 +246,10 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::kprintln!("  RIP: {:?}", stack_frame.instruction_pointer);
         crate::kprintln!("  RSP: {:?}", stack_frame.stack_pointer);
         crate::kprintln!("  Terminating user program...");
-        // exit_usermode() で SAVED_RSP/SAVED_RBP を復元し、
-        // run_in_usermode() の呼び出し元に戻る。
-        crate::usermode::exit_usermode();
+        // ユーザーモード例外は現在のユーザータスクを終了させて
+        // 他のタスクに切り替える。割り込みハンドラ内なので
+        // exit_usermode() の longjmp は使わない。
+        crate::scheduler::abort_current_user_task_from_exception();
     }
 
     // Ring 0（カーネル）からのページフォルトは回復不能なので panic する。
