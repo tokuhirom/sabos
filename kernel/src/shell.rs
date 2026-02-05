@@ -1237,6 +1237,9 @@ impl Shell {
 
             // 13. FAT16 のテスト
             run_test("fat16", this.test_fat16());
+
+            // 13.5. FAT16 空き容量のテスト
+            run_test("fat16_space", this.test_fat16_space());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1772,6 +1775,25 @@ impl Shell {
             }
             Err(_) => false,
         }
+    }
+
+    /// FAT16 の空き容量テスト
+    /// 総クラスタ数と空きクラスタ数の整合性を確認する。
+    fn test_fat16_space(&self) -> bool {
+        let fs = match crate::fat16::Fat16::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let total = fs.total_clusters();
+        let free = match fs.free_clusters() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        if total == 0 || free > total {
+            return false;
+        }
+        let used = total - free;
+        used > 0
     }
 
     /// ネットワーク (DNS) のテスト

@@ -134,6 +134,31 @@ impl Fat16 {
         Ok(entries)
     }
 
+    /// 1クラスタあたりのバイト数
+    pub fn cluster_bytes(&self) -> u32 {
+        self.bpb.bytes_per_sector as u32 * self.bpb.sectors_per_cluster as u32
+    }
+
+    /// 総クラスタ数（予約領域を除いたデータ領域）
+    pub fn total_clusters(&self) -> u32 {
+        let bytes_per_sector = self.bpb.bytes_per_sector as u32;
+        let total_entries = (self.bpb.fat_size_16 as u32 * bytes_per_sector) / 2;
+        total_entries.saturating_sub(2)
+    }
+
+    /// 空きクラスタ数を数える（FAT を走査）
+    pub fn free_clusters(&self) -> Result<u32, &'static str> {
+        let bytes_per_sector = self.bpb.bytes_per_sector as u32;
+        let total_entries = (self.bpb.fat_size_16 as u32 * bytes_per_sector) / 2;
+        let mut free = 0u32;
+        for cluster in 2..total_entries {
+            if self.read_fat_entry(cluster as u16)? == 0 {
+                free += 1;
+            }
+        }
+        Ok(free)
+    }
+
     /// ディレクトリを作成する（ルートのみ対応）
     pub fn create_dir(&self, name: &str) -> Result<(), &'static str> {
         let upper = name.trim().trim_start_matches('/').to_ascii_uppercase();

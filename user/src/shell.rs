@@ -177,6 +177,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "pwd" => cmd_pwd(state),
         "pushd" => cmd_pushd(args, state),
         "popd" => cmd_popd(state),
+        "df" => cmd_df(),
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
         "ip" => cmd_ip(),
@@ -334,6 +335,7 @@ fn cmd_help() {
     syscall::write_str("  pwd               - Print current directory\n");
     syscall::write_str("  pushd <dir>       - Push directory and change to it\n");
     syscall::write_str("  popd              - Pop directory and change to it\n");
+    syscall::write_str("  df                - Show filesystem usage (JSON)\n");
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
     syscall::write_str("  ip                - Show network information\n");
@@ -361,6 +363,48 @@ fn cmd_exit() {
 // =================================================================
 // ファイルシステムコマンド
 // =================================================================
+
+/// df コマンド: ファイルシステム使用量を表示
+fn cmd_df() {
+    let fs = match Fat16::new() {
+        Ok(v) => v,
+        Err(err) => {
+            syscall::write_str("Error: Failed to init FAT16: ");
+            syscall::write_str(err);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    let total_clusters = fs.total_clusters();
+    let free_clusters = match fs.free_clusters() {
+        Ok(v) => v,
+        Err(err) => {
+            syscall::write_str("Error: Failed to scan FAT: ");
+            syscall::write_str(err);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+    let cluster_bytes = fs.cluster_bytes() as u64;
+    let total_bytes = total_clusters as u64 * cluster_bytes;
+    let free_bytes = free_clusters as u64 * cluster_bytes;
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    syscall::write_str("{\"fs\":\"fat16\",\"total_bytes\":");
+    write_number(total_bytes);
+    syscall::write_str(",\"used_bytes\":");
+    write_number(used_bytes);
+    syscall::write_str(",\"free_bytes\":");
+    write_number(free_bytes);
+    syscall::write_str(",\"cluster_bytes\":");
+    write_number(cluster_bytes);
+    syscall::write_str(",\"total_clusters\":");
+    write_number(total_clusters as u64);
+    syscall::write_str(",\"free_clusters\":");
+    write_number(free_clusters as u64);
+    syscall::write_str("}\n");
+}
 
 /// ls コマンド: ディレクトリ一覧を表示
 fn cmd_ls(args: &str, state: &ShellState) {
