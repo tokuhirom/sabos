@@ -6,9 +6,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use sabos_blockdev::{BlockDevice, BlockError};
 use sabos_fat_core::{
-    decode_lfn_entries, lfn_checksum, make_short_name, parse_bpb, parse_lfn_part, FatType, LfnPart,
-    ATTR_LFN,
+    decode_lfn_entries, lfn_checksum, make_short_name, parse_bpb, parse_fsinfo, parse_lfn_part,
+    write_fsinfo, FatType, FsInfo, LfnPart, ATTR_LFN,
 };
 
 use crate::syscall;
@@ -27,18 +28,52 @@ pub struct DirEntry {
     pub first_cluster: u32,
 }
 
-/// FAT32 ドライバ
-pub struct Fat32 {
+/// ユーザー空間用のブロックデバイス
+#[derive(Clone, Copy)]
+pub(crate) struct SyscallBlockDevice;
+
+impl BlockDevice for SyscallBlockDevice {
+    fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+        let ret = syscall::block_read(sector, buf);
+        if ret < 0 {
+            return Err(BlockError::IoError);
+        }
+        Ok(())
+    }
+
+    fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
+        let ret = syscall::block_write(sector, buf);
+        if ret < 0 {
+            return Err(BlockError::IoError);
+        }
+        Ok(())
+    }
+}
+
+/// FAT32 ドライバ（BlockDevice 抽象化）
+pub struct Fat32Fs<D: BlockDevice> {
     bpb: sabos_fat_core::Bpb,
     fat_start_sector: u32,
     data_start_sector: u32,
     root_cluster: u32,
+    fsinfo_sector: u32,
+    fsinfo: Option<FsInfo>,
+    dev: D,
 }
+
+/// ユーザー空間用の FAT32 型
+pub type Fat32 = Fat32Fs<SyscallBlockDevice>;
 
 impl Fat32 {
     pub fn new() -> Result<Self, &'static str> {
+        Fat32Fs::new_with_device(SyscallBlockDevice)
+    }
+}
+
+impl<D: BlockDevice> Fat32Fs<D> {
+    pub fn new_with_device(mut dev: D) -> Result<Self, &'static str> {
         let mut buf = [0u8; SECTOR_SIZE];
-        block_read(0, &mut buf)?;
+        dev.read_sector(0, &mut buf).map_err(|_| "block_read failed")?;
         let bpb = parse_bpb(&buf)?;
         if bpb.fat_type != FatType::Fat32 {
             return Err("Not FAT32");
@@ -47,13 +82,19 @@ impl Fat32 {
         let fat_start_sector = bpb.reserved_sectors as u32;
         let data_start_sector = fat_start_sector + bpb.num_fats as u32 * bpb.fat_size;
         let root_cluster = bpb.root_cluster;
+        let fsinfo_sector = bpb.fsinfo_sector as u32;
 
-        Ok(Self {
+        let mut fs = Self {
             bpb,
             fat_start_sector,
             data_start_sector,
             root_cluster,
-        })
+            fsinfo_sector,
+            fsinfo: None,
+            dev,
+        };
+        fs.load_fsinfo();
+        Ok(fs)
     }
 
     /// 1 クラスタあたりのバイト数
@@ -68,7 +109,13 @@ impl Fat32 {
     }
 
     /// 空きクラスタ数をスキャンして数える
-    pub fn free_clusters(&self) -> Result<u32, &'static str> {
+    pub fn free_clusters(&mut self) -> Result<u32, &'static str> {
+        if let Some(info) = self.fsinfo {
+            if let Some(free) = info.free_cluster_count {
+                return Ok(free);
+            }
+        }
+
         let total = self.total_clusters();
         let mut free = 0u32;
         for cluster in 2..(total + 2) {
@@ -76,16 +123,55 @@ impl Fat32 {
                 free += 1;
             }
         }
+
+        if self.fsinfo.is_some() {
+            self.fsinfo = Some(FsInfo {
+                free_cluster_count: Some(free),
+                next_free_cluster: None,
+            });
+            let _ = self.flush_fsinfo();
+        }
+
         Ok(free)
     }
 
+    fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        self.dev.read_sector(sector, buf).map_err(|_| "block_read failed")
+    }
+
+    fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        self.dev.write_sector(sector, buf).map_err(|_| "block_write failed")
+    }
+
+    fn load_fsinfo(&mut self) {
+        if self.fsinfo_sector == 0 || self.fsinfo_sector == 0xFFFF {
+            return;
+        }
+        let mut buf = [0u8; SECTOR_SIZE];
+        if self.read_sector(self.fsinfo_sector as u64, &mut buf).is_ok() {
+            self.fsinfo = parse_fsinfo(&buf);
+        }
+    }
+
+    fn flush_fsinfo(&mut self) -> Result<(), &'static str> {
+        let Some(info) = self.fsinfo else { return Ok(()); };
+        if self.fsinfo_sector == 0 || self.fsinfo_sector == 0xFFFF {
+            return Ok(());
+        }
+        let mut buf = [0u8; SECTOR_SIZE];
+        self.read_sector(self.fsinfo_sector as u64, &mut buf)?;
+        write_fsinfo(&mut buf, info);
+        self.write_sector(self.fsinfo_sector as u64, &buf)?;
+        Ok(())
+    }
+
     /// FAT エントリを読み取る（上位 4bit をマスク）
-    fn read_fat_entry(&self, cluster: u32) -> Result<u32, &'static str> {
+    fn read_fat_entry(&mut self, cluster: u32) -> Result<u32, &'static str> {
         let fat_offset = cluster * 4;
         let sector = self.fat_start_sector + (fat_offset / self.bpb.bytes_per_sector as u32);
         let offset = (fat_offset % self.bpb.bytes_per_sector as u32) as usize;
         let mut buf = [0u8; SECTOR_SIZE];
-        block_read(sector as u64, &mut buf)?;
+        self.read_sector(sector as u64, &mut buf)?;
         let val = u32::from_le_bytes([
             buf[offset],
             buf[offset + 1],
@@ -96,7 +182,7 @@ impl Fat32 {
     }
 
     /// FAT エントリを書き込む（全 FAT に反映）
-    fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
+    fn write_fat_entry(&mut self, cluster: u32, value: u32) -> Result<(), &'static str> {
         let fat_offset = cluster * 4;
         let sector = self.fat_start_sector + (fat_offset / self.bpb.bytes_per_sector as u32);
         let offset = (fat_offset % self.bpb.bytes_per_sector as u32) as usize;
@@ -105,12 +191,12 @@ impl Fat32 {
         for fat_idx in 0..self.bpb.num_fats {
             let fat_sector = sector + fat_idx as u32 * self.bpb.fat_size;
             let mut buf = [0u8; SECTOR_SIZE];
-            block_read(fat_sector as u64, &mut buf)?;
+            self.read_sector(fat_sector as u64, &mut buf)?;
             buf[offset] = bytes[0];
             buf[offset + 1] = bytes[1];
             buf[offset + 2] = bytes[2];
             buf[offset + 3] = bytes[3];
-            block_write(fat_sector as u64, &buf)?;
+            self.write_sector(fat_sector as u64, &buf)?;
         }
         Ok(())
     }
@@ -121,7 +207,7 @@ impl Fat32 {
     }
 
     /// 次のクラスタを取得
-    fn next_cluster(&self, cluster: u32) -> Result<Option<u32>, &'static str> {
+    fn next_cluster(&mut self, cluster: u32) -> Result<Option<u32>, &'static str> {
         let val = self.read_fat_entry(cluster)?;
         if val >= FAT32_EOC_MIN || val == 0 {
             Ok(None)
@@ -131,7 +217,7 @@ impl Fat32 {
     }
 
     /// クラスタチェーンの全セクタを走査してディレクトリエントリを読み取る
-    fn list_dir_cluster(&self, start_cluster: u32) -> Result<Vec<DirEntry>, &'static str> {
+    fn list_dir_cluster(&mut self, start_cluster: u32) -> Result<Vec<DirEntry>, &'static str> {
         let mut entries = Vec::new();
         let mut cluster = start_cluster;
         loop {
@@ -139,7 +225,7 @@ impl Fat32 {
             for sect_offset in 0..self.bpb.sectors_per_cluster {
                 let sector = first_sector + sect_offset as u32;
                 let mut buf = [0u8; SECTOR_SIZE];
-                block_read(sector as u64, &mut buf)?;
+                self.read_sector(sector as u64, &mut buf)?;
                 self.parse_dir_entries(&buf, &mut entries)?;
             }
             match self.next_cluster(cluster)? {
@@ -216,7 +302,7 @@ impl Fat32 {
     }
 
     /// パスからディレクトリの先頭クラスタを取得
-    fn find_dir_cluster(&self, path: &str) -> Result<u32, &'static str> {
+    fn find_dir_cluster(&mut self, path: &str) -> Result<u32, &'static str> {
         let mut current = self.root_cluster;
         let mut parts = path.split('/').filter(|p| !p.is_empty());
         while let Some(part) = parts.next() {
@@ -236,7 +322,7 @@ impl Fat32 {
     }
 
     /// ファイル作成（既存があれば削除して上書き）
-    pub fn create_file(&self, path: &str, data: &[u8]) -> Result<(), &'static str> {
+    pub fn create_file(&mut self, path: &str, data: &[u8]) -> Result<(), &'static str> {
         let _ = self.delete_file(path);
         let (dir_path, name) = split_parent(path)?;
         let dir_cluster = self.find_dir_cluster(dir_path)?;
@@ -244,24 +330,24 @@ impl Fat32 {
     }
 
     /// ディレクトリ作成
-    pub fn create_dir(&self, path: &str) -> Result<(), &'static str> {
+    pub fn create_dir(&mut self, path: &str) -> Result<(), &'static str> {
         let (dir_path, name) = split_parent(path)?;
         let dir_cluster = self.find_dir_cluster(dir_path)?;
         self.create_entry(dir_cluster, name, &[], true)
     }
 
     /// ディレクトリ削除
-    pub fn remove_dir(&self, path: &str) -> Result<(), &'static str> {
+    pub fn remove_dir(&mut self, path: &str) -> Result<(), &'static str> {
         self.delete_entry(path, true)
     }
 
     /// ファイル削除
-    pub fn delete_file(&self, path: &str) -> Result<(), &'static str> {
+    pub fn delete_file(&mut self, path: &str) -> Result<(), &'static str> {
         self.delete_entry(path, false)
     }
 
     fn create_entry(
-        &self,
+        &mut self,
         dir_cluster: u32,
         name: &str,
         data: &[u8],
@@ -307,7 +393,7 @@ impl Fat32 {
     }
 
     fn add_dir_entries(
-        &self,
+        &mut self,
         dir_cluster: u32,
         lfn_entries: &[LfnRaw],
         short_name: &[u8; 11],
@@ -321,7 +407,7 @@ impl Fat32 {
             for sect_offset in 0..self.bpb.sectors_per_cluster {
                 let sector = first_sector + sect_offset as u32;
                 let mut buf = [0u8; SECTOR_SIZE];
-                block_read(sector as u64, &mut buf)?;
+                self.read_sector(sector as u64, &mut buf)?;
                 for i in 0..(SECTOR_SIZE / 32) {
                     let offset = i * 32;
                     let first = buf[offset];
@@ -341,7 +427,7 @@ impl Fat32 {
                                 first_cluster,
                                 size,
                             );
-                            block_write(sector as u64, &buf)?;
+                            self.write_sector(sector as u64, &buf)?;
                             return Ok(());
                         }
                     }
@@ -360,7 +446,7 @@ impl Fat32 {
         }
     }
 
-    fn delete_entry(&self, path: &str, is_dir: bool) -> Result<(), &'static str> {
+    fn delete_entry(&mut self, path: &str, is_dir: bool) -> Result<(), &'static str> {
         let (dir_path, name) = split_parent(path)?;
         let dir_cluster = self.find_dir_cluster(dir_path)?;
         let mut cluster = dir_cluster;
@@ -369,7 +455,7 @@ impl Fat32 {
             for sect_offset in 0..self.bpb.sectors_per_cluster {
                 let sector = first_sector + sect_offset as u32;
                 let mut buf = [0u8; SECTOR_SIZE];
-                block_read(sector as u64, &mut buf)?;
+                self.read_sector(sector as u64, &mut buf)?;
                 let mut lfn_offsets: Vec<usize> = Vec::new();
                 for i in 0..(SECTOR_SIZE / 32) {
                     let offset = i * 32;
@@ -434,7 +520,7 @@ impl Fat32 {
                             buf[lfn_off] = 0xE5;
                         }
                         buf[offset] = 0xE5;
-                        block_write(sector as u64, &buf)?;
+                        self.write_sector(sector as u64, &buf)?;
                         if first_cluster >= 2 {
                             self.free_cluster_chain(first_cluster)?;
                         }
@@ -451,12 +537,12 @@ impl Fat32 {
         Err("File not found")
     }
 
-    fn is_dir_empty(&self, cluster: u32) -> Result<bool, &'static str> {
+    fn is_dir_empty(&mut self, cluster: u32) -> Result<bool, &'static str> {
         let first_sector = self.cluster_to_sector(cluster);
         for sect_offset in 0..self.bpb.sectors_per_cluster {
             let sector = first_sector + sect_offset as u32;
             let mut buf = [0u8; SECTOR_SIZE];
-            block_read(sector as u64, &mut buf)?;
+            self.read_sector(sector as u64, &mut buf)?;
             for i in 0..(SECTOR_SIZE / 32) {
                 let offset = i * 32;
                 let first = buf[offset];
@@ -480,7 +566,7 @@ impl Fat32 {
         Ok(true)
     }
 
-    fn write_file_data(&self, data: &[u8]) -> Result<(u32, usize), &'static str> {
+    fn write_file_data(&mut self, data: &[u8]) -> Result<(u32, usize), &'static str> {
         let mut first_cluster = 0u32;
         let mut prev_cluster = 0u32;
         let mut remaining = data;
@@ -496,7 +582,7 @@ impl Fat32 {
                 let mut buf = [0u8; SECTOR_SIZE];
                 let to_copy = core::cmp::min(SECTOR_SIZE, remaining.len());
                 buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
-                block_write((sector + i as u32) as u64, &buf)?;
+                self.write_sector((sector + i as u32) as u64, &buf)?;
                 remaining = &remaining[to_copy..];
                 if remaining.is_empty() {
                     break;
@@ -510,73 +596,91 @@ impl Fat32 {
         Ok((first_cluster, data.len()))
     }
 
-    fn zero_cluster(&self, cluster: u32) -> Result<(), &'static str> {
+    fn zero_cluster(&mut self, cluster: u32) -> Result<(), &'static str> {
         let first_sector = self.cluster_to_sector(cluster);
         for i in 0..self.bpb.sectors_per_cluster {
             let buf = [0u8; SECTOR_SIZE];
-            block_write((first_sector + i as u32) as u64, &buf)?;
+            self.write_sector((first_sector + i as u32) as u64, &buf)?;
         }
         Ok(())
     }
 
-    fn init_dir_cluster(&self, cluster: u32, parent_cluster: u32) -> Result<(), &'static str> {
+    fn init_dir_cluster(&mut self, cluster: u32, parent_cluster: u32) -> Result<(), &'static str> {
         let mut buf = [0u8; SECTOR_SIZE];
         let name_dot = format_8_3_name(".")?;
         let name_dotdot = format_8_3_name("..")?;
         write_short_entry(&mut buf, 0, &name_dot, true, cluster, 0);
         write_short_entry(&mut buf, 32, &name_dotdot, true, parent_cluster, 0);
         let first_sector = self.cluster_to_sector(cluster);
-        block_write(first_sector as u64, &buf)?;
+        self.write_sector(first_sector as u64, &buf)?;
         for i in 1..self.bpb.sectors_per_cluster {
             let zero = [0u8; SECTOR_SIZE];
-            block_write((first_sector + i as u32) as u64, &zero)?;
+            self.write_sector((first_sector + i as u32) as u64, &zero)?;
         }
         Ok(())
     }
 
-    fn alloc_cluster(&self) -> Result<u32, &'static str> {
+    fn alloc_cluster(&mut self) -> Result<u32, &'static str> {
         let total_entries = (self.bpb.fat_size * self.bpb.bytes_per_sector as u32) / 4;
-        for cluster in 2..total_entries {
+        let start = self
+            .fsinfo
+            .and_then(|info| info.next_free_cluster)
+            .unwrap_or(2);
+        for cluster in start..total_entries {
             if self.read_fat_entry(cluster)? == 0 {
                 self.write_fat_entry(cluster, FAT32_EOC_MIN)?;
+                if let Some(info) = self.fsinfo {
+                    let free = info.free_cluster_count.map(|v| v.saturating_sub(1));
+                    let next = Some(cluster + 1);
+                    self.fsinfo = Some(FsInfo {
+                        free_cluster_count: free,
+                        next_free_cluster: next,
+                    });
+                    let _ = self.flush_fsinfo();
+                }
+                return Ok(cluster);
+            }
+        }
+        for cluster in 2..start {
+            if self.read_fat_entry(cluster)? == 0 {
+                self.write_fat_entry(cluster, FAT32_EOC_MIN)?;
+                if let Some(info) = self.fsinfo {
+                    let free = info.free_cluster_count.map(|v| v.saturating_sub(1));
+                    let next = Some(cluster + 1);
+                    self.fsinfo = Some(FsInfo {
+                        free_cluster_count: free,
+                        next_free_cluster: next,
+                    });
+                    let _ = self.flush_fsinfo();
+                }
                 return Ok(cluster);
             }
         }
         Err("no free cluster")
     }
 
-    fn free_cluster_chain(&self, start: u32) -> Result<(), &'static str> {
+    fn free_cluster_chain(&mut self, start: u32) -> Result<(), &'static str> {
         let mut cluster = start;
+        let mut freed = 0u32;
         while cluster >= 2 && cluster < FAT32_EOC_MIN {
             let next = self.read_fat_entry(cluster)?;
             self.write_fat_entry(cluster, 0)?;
+            freed = freed.saturating_add(1);
             if next >= FAT32_EOC_MIN || next == 0 {
                 break;
             }
             cluster = next;
         }
+        if let Some(info) = self.fsinfo {
+            let free = info.free_cluster_count.map(|v| v.saturating_add(freed));
+            self.fsinfo = Some(FsInfo {
+                free_cluster_count: free,
+                next_free_cluster: Some(start),
+            });
+            let _ = self.flush_fsinfo();
+        }
         Ok(())
     }
-}
-
-// =================================================================
-// 低レベルユーティリティ
-// =================================================================
-
-fn block_read(sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
-    let ret = syscall::block_read(sector, buf);
-    if ret < 0 {
-        return Err("block_read failed");
-    }
-    Ok(())
-}
-
-fn block_write(sector: u64, buf: &[u8]) -> Result<(), &'static str> {
-    let ret = syscall::block_write(sector, buf);
-    if ret < 0 {
-        return Err("block_write failed");
-    }
-    Ok(())
 }
 
 fn short_name_to_string(name: &[u8; 11]) -> String {

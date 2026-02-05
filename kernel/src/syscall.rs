@@ -996,7 +996,7 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     }
 
     // FAT32 からファイルを削除
-    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     fat32.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     Ok(0)
@@ -1038,7 +1038,7 @@ fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError>
     }
 
     // FAT32 からディレクトリ一覧を取得
-    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let entries = fat32.list_dir(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // エントリ名を改行区切りでバッファに書き込む
@@ -1156,7 +1156,7 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
     }
 
     // FAT32 からエントリを取得して種別判定
-    let fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let entry = fat32.find_entry(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // ATTR_DIRECTORY = 0x10
@@ -1419,7 +1419,7 @@ fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
     // FAT32 からファイルを読み込む
-    let fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // ELF プロセスを作成（カーネルのページテーブルで実行）
@@ -1468,7 +1468,7 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     );
 
     // FAT32 からファイルを読み込む
-    let fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // スケジューラにユーザープロセスとして登録（カーネルのページテーブルで実行）

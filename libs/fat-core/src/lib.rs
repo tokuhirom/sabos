@@ -27,6 +27,13 @@ pub struct Bpb {
     pub fat_type: FatType,
 }
 
+/// FAT32 FSInfo 情報
+#[derive(Debug, Clone, Copy)]
+pub struct FsInfo {
+    pub free_cluster_count: Option<u32>,
+    pub next_free_cluster: Option<u32>,
+}
+
 /// BPB をパースして FAT 種別を判定する
 pub fn parse_bpb(buf: &[u8]) -> Result<Bpb, &'static str> {
     if buf.len() < 512 {
@@ -72,6 +79,53 @@ pub fn parse_bpb(buf: &[u8]) -> Result<Bpb, &'static str> {
         fsinfo_sector,
         fat_type,
     })
+}
+
+/// FSInfo セクタをパースする
+///
+/// 仕様:
+/// - 先頭シグネチャ: 0x41615252
+/// - 構造体シグネチャ: 0x61417272 (offset 0x1E4)
+/// - トレーラ: 0xAA550000 (offset 0x1FC)
+/// - free_cluster_count / next_free_cluster が 0xFFFFFFFF の場合は未設定
+pub fn parse_fsinfo(buf: &[u8]) -> Option<FsInfo> {
+    if buf.len() < 512 {
+        return None;
+    }
+    let lead = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let struct_sig = u32::from_le_bytes([buf[0x1E4], buf[0x1E5], buf[0x1E6], buf[0x1E7]]);
+    let trail = u32::from_le_bytes([buf[0x1FC], buf[0x1FD], buf[0x1FE], buf[0x1FF]]);
+    if lead != 0x41615252 || struct_sig != 0x61417272 || trail != 0xAA550000 {
+        return None;
+    }
+
+    let free_raw = u32::from_le_bytes([buf[0x1E8], buf[0x1E9], buf[0x1EA], buf[0x1EB]]);
+    let next_raw = u32::from_le_bytes([buf[0x1EC], buf[0x1ED], buf[0x1EE], buf[0x1EF]]);
+    let free_cluster_count = if free_raw == 0xFFFFFFFF { None } else { Some(free_raw) };
+    let next_free_cluster = if next_raw == 0xFFFFFFFF { None } else { Some(next_raw) };
+
+    Some(FsInfo {
+        free_cluster_count,
+        next_free_cluster,
+    })
+}
+
+/// FSInfo セクタに書き込む
+pub fn write_fsinfo(buf: &mut [u8], info: FsInfo) {
+    if buf.len() < 512 {
+        return;
+    }
+    let lead = 0x41615252u32.to_le_bytes();
+    let struct_sig = 0x61417272u32.to_le_bytes();
+    let trail = 0xAA550000u32.to_le_bytes();
+    buf[0..4].copy_from_slice(&lead);
+    buf[0x1E4..0x1E8].copy_from_slice(&struct_sig);
+    buf[0x1FC..0x200].copy_from_slice(&trail);
+
+    let free_raw = info.free_cluster_count.unwrap_or(0xFFFFFFFF).to_le_bytes();
+    let next_raw = info.next_free_cluster.unwrap_or(0xFFFFFFFF).to_le_bytes();
+    buf[0x1E8..0x1EC].copy_from_slice(&free_raw);
+    buf[0x1EC..0x1F0].copy_from_slice(&next_raw);
 }
 
 /// LFN エントリの属性

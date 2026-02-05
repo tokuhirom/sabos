@@ -340,7 +340,7 @@ fn cmd_exit() {
 
 /// df コマンド: ファイルシステム使用量を表示
 fn cmd_df() {
-    let fs = match Fat32::new() {
+    let mut fs = match Fat32::new() {
         Ok(v) => v,
         Err(err) => {
             syscall::write_str("Error: Failed to init FAT32: ");
@@ -464,7 +464,7 @@ fn cmd_write(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
-    let fs = match Fat32::new() {
+    let mut fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
             syscall::write_str("Error: FAT32 not available\n");
@@ -489,7 +489,7 @@ fn cmd_rm(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, args);
 
-    let fs = match Fat32::new() {
+    let mut fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
             syscall::write_str("Error: FAT32 not available\n");
@@ -515,7 +515,7 @@ fn cmd_mkdir(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, name);
 
-    let fs = match Fat32::new() {
+    let mut fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
             syscall::write_str("Error: FAT32 not available\n");
@@ -541,7 +541,7 @@ fn cmd_rmdir(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, name);
 
-    let fs = match Fat32::new() {
+    let mut fs = match Fat32::new() {
         Ok(f) => f,
         Err(_) => {
             syscall::write_str("Error: FAT32 not available\n");

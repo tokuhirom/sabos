@@ -327,7 +327,7 @@ fn main() -> Status {
 
     // FAT32 から INIT.ELF を読み込む
     match fat32::Fat32::new() {
-        Ok(fs) => {
+        Ok(mut fs) => {
             match fs.read_file("/INIT.ELF") {
                 Ok(elf_data) => {
                     kprintln!("Loaded INIT.ELF ({} bytes)", elf_data.len());

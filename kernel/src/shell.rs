@@ -589,7 +589,7 @@ impl Shell {
     fn cmd_ls(&self, args: &str) {
         let path = args.trim();
 
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -647,7 +647,7 @@ impl Shell {
             return;
         }
 
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -701,7 +701,7 @@ impl Shell {
         let filename = parts[0];
         let text = parts[1];
 
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -737,7 +737,7 @@ impl Shell {
             return;
         }
 
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -779,7 +779,7 @@ impl Shell {
 
         // FAT32 からファイルを読み込む
         kprintln!("Loading {} from disk...", filename);
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -869,7 +869,7 @@ impl Shell {
 
         // FAT32 からファイルを読み込む
         kprintln!("Loading {} from disk...", filename);
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(fs) => fs,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -1726,7 +1726,7 @@ impl Shell {
     /// FAT32 のテスト
     /// HELLO.TXT ファイルを読み取り、内容が "Hello from FAT32!" で始まるか確認
     fn test_fat32(&self) -> bool {
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(f) => f,
             Err(_) => return false,
         };
@@ -1742,7 +1742,7 @@ impl Shell {
     /// FAT32 の空き容量テスト
     /// 総クラスタ数と空きクラスタ数の整合性を確認する。
     fn test_fat32_space(&self) -> bool {
-        let fs = match crate::fat32::Fat32::new() {
+        let mut fs = match crate::fat32::Fat32::new() {
             Ok(f) => f,
             Err(_) => return false,
         };
@@ -1856,6 +1856,7 @@ impl Shell {
 
             // 予備のスピン上限（タイマが止まっていても永久待ちしない）
             let mut spin_limit: u64 = 5_000_000;
+            let mut yield_count: u64 = 0;
             loop {
                 if let Some(msg) = crate::ipc::try_recv(task_id) {
                     return Ok(msg);
@@ -1873,38 +1874,67 @@ impl Shell {
                     return Err(crate::user_ptr::SyscallError::Timeout);
                 }
                 spin_limit -= 1;
+                yield_count += 1;
+                if yield_count % 1_000 == 0 {
+                    crate::scheduler::yield_now();
+                }
                 core::hint::spin_loop();
             }
         }
+
+        let sender = crate::scheduler::current_task_id();
+        let send_and_wait = |opcode: u32, payload: &[u8]| -> bool {
+            let mut req = [0u8; 2048];
+            let header_len = 8;
+            req[0..4].copy_from_slice(&opcode.to_le_bytes());
+            req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            req[8..8 + payload.len()].copy_from_slice(payload);
+
+            for _ in 0..2 {
+                if crate::ipc::send(sender, gui_id, req[..header_len + payload.len()].to_vec()).is_err() {
+                    return false;
+                }
+                crate::scheduler::sleep_ms(10);
+                let msg = match recv_with_timeout(sender, 15000) {
+                    Ok(m) => m,
+                    Err(_) => {
+                        crate::scheduler::sleep_ms(200);
+                        continue;
+                    }
+                };
+                if msg.data.len() < 12 {
+                    crate::scheduler::sleep_ms(200);
+                    continue;
+                }
+                let resp_opcode = u32::from_le_bytes([
+                    msg.data[0],
+                    msg.data[1],
+                    msg.data[2],
+                    msg.data[3],
+                ]);
+                if resp_opcode != opcode {
+                    crate::scheduler::sleep_ms(200);
+                    continue;
+                }
+                let status = i32::from_le_bytes([
+                    msg.data[4],
+                    msg.data[5],
+                    msg.data[6],
+                    msg.data[7],
+                ]);
+                if status != 0 {
+                    return false;
+                }
+                return true;
+            }
+            false
+        };
 
         // CLEAR (opcode=1) を送る
         kprintln!("[selftest] gui_ipc: clear send");
         let opcode_clear: u32 = 1;
         let payload_clear = [0u8, 0u8, 32u8];
-        let mut req = [0u8; 2048];
-        let header_len = 8;
-        req[0..4].copy_from_slice(&opcode_clear.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_clear.len() as u32).to_le_bytes());
-        req[8..8 + payload_clear.len()].copy_from_slice(&payload_clear);
-
-        let sender = crate::scheduler::current_task_id();
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_clear.len()].to_vec()).is_err() {
-            return false;
-        }
-
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if msg.data.len() < 12 {
-            return false;
-        }
-        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
-        if resp_opcode != opcode_clear {
-            return false;
-        }
-        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
-        if status != 0 {
+        if !send_and_wait(opcode_clear, &payload_clear) {
             return false;
         }
         kprintln!("[selftest] gui_ipc: clear ok");
@@ -1924,30 +1954,13 @@ impl Shell {
         payload_circle[14] = 0;
         payload_circle[15] = 0; // outline
         payload_circle[16] = 0;
-        req[0..4].copy_from_slice(&opcode_circle.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_circle.len() as u32).to_le_bytes());
-        req[8..8 + payload_circle.len()].copy_from_slice(&payload_circle);
-
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_circle.len()].to_vec()).is_err() {
-            return false;
-        }
-
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if msg.data.len() < 12 {
-            return false;
-        }
-        let resp_opcode = u32::from_le_bytes([msg.data[0], msg.data[1], msg.data[2], msg.data[3]]);
-        if resp_opcode != opcode_circle {
-            return false;
-        }
-        let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
-        if status != 0 {
+        if !send_and_wait(opcode_circle, &payload_circle) {
             return false;
         }
         kprintln!("[selftest] gui_ipc: circle ok");
+
+        let mut req = [0u8; 2048];
+        let header_len = 8;
 
         // TEXT (opcode=6) を送る
         kprintln!("[selftest] gui_ipc: text send");
@@ -2021,6 +2034,25 @@ impl Shell {
         }
         kprintln!("[selftest] gui_ipc: mouse ok");
 
+        let send_window = |opcode: u32, payload: &[u8]| -> Option<crate::ipc::IpcMessage> {
+            let mut req = [0u8; 2048];
+            let header_len = 8;
+            req[0..4].copy_from_slice(&opcode.to_le_bytes());
+            req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+            req[8..8 + payload.len()].copy_from_slice(payload);
+            for _ in 0..2 {
+                if crate::ipc::send(sender, gui_id, req[..header_len + payload.len()].to_vec()).is_err() {
+                    return None;
+                }
+                crate::scheduler::sleep_ms(10);
+                if let Ok(m) = recv_with_timeout(sender, 15000) {
+                    return Some(m);
+                }
+                crate::scheduler::sleep_ms(200);
+            }
+            None
+        };
+
         // WINDOW_CREATE (opcode=16) を送る
         kprintln!("[selftest] gui_ipc: window create send");
         let opcode_win_create: u32 = 16;
@@ -2030,15 +2062,9 @@ impl Shell {
         payload_win[4..8].copy_from_slice(&120u32.to_le_bytes()); // h
         payload_win[8..12].copy_from_slice(&(title.len() as u32).to_le_bytes());
         payload_win[12..16].copy_from_slice(title);
-        req[0..4].copy_from_slice(&opcode_win_create.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_win.len() as u32).to_le_bytes());
-        req[8..8 + payload_win.len()].copy_from_slice(&payload_win);
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_win.len()].to_vec()).is_err() {
-            return false;
-        }
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
+        let msg = match send_window(opcode_win_create, &payload_win) {
+            Some(m) => m,
+            None => return false,
         };
         if msg.data.len() < 16 {
             return false;
@@ -2066,15 +2092,9 @@ impl Shell {
         payload_clear[4] = 16;
         payload_clear[5] = 16;
         payload_clear[6] = 32;
-        req[0..4].copy_from_slice(&opcode_win_clear.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_clear.len() as u32).to_le_bytes());
-        req[8..8 + payload_clear.len()].copy_from_slice(&payload_clear);
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_clear.len()].to_vec()).is_err() {
-            return false;
-        }
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
+        let msg = match send_window(opcode_win_clear, &payload_clear) {
+            Some(m) => m,
+            None => return false,
         };
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
         if status != 0 {
@@ -2087,15 +2107,9 @@ impl Shell {
         let opcode_win_present: u32 = 22;
         let mut payload_present = [0u8; 4];
         payload_present.copy_from_slice(&win_id.to_le_bytes());
-        req[0..4].copy_from_slice(&opcode_win_present.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_present.len() as u32).to_le_bytes());
-        req[8..12].copy_from_slice(&payload_present);
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_present.len()].to_vec()).is_err() {
-            return false;
-        }
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
+        let msg = match send_window(opcode_win_present, &payload_present) {
+            Some(m) => m,
+            None => return false,
         };
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
         if status != 0 {
@@ -2108,15 +2122,9 @@ impl Shell {
         let opcode_win_mouse: u32 = 23;
         let mut payload_wm = [0u8; 4];
         payload_wm.copy_from_slice(&win_id.to_le_bytes());
-        req[0..4].copy_from_slice(&opcode_win_mouse.to_le_bytes());
-        req[4..8].copy_from_slice(&(payload_wm.len() as u32).to_le_bytes());
-        req[8..12].copy_from_slice(&payload_wm);
-        if crate::ipc::send(sender, gui_id, req[..header_len + payload_wm.len()].to_vec()).is_err() {
-            return false;
-        }
-        let msg = match recv_with_timeout(sender, 5000) {
-            Ok(m) => m,
-            Err(_) => return false,
+        let msg = match send_window(opcode_win_mouse, &payload_wm) {
+            Some(m) => m,
+            None => return false,
         };
         let status = i32::from_le_bytes([msg.data[4], msg.data[5], msg.data[6], msg.data[7]]);
         if status != 0 {
