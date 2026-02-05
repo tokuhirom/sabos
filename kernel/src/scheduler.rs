@@ -1,8 +1,9 @@
-// scheduler.rs — 協調的マルチタスクスケジューラ
+// scheduler.rs — プリエンプティブ・マルチタスクスケジューラ
 //
 // カーネルタスク（軽量スレッド）を管理する。
 // 各タスクは独自のスタックとコンテキスト（レジスタ保存領域）を持ち、
-// yield_now() で自発的に CPU を次のタスクに譲る（協調的マルチタスク）。
+// タイマー割り込みによって強制的に切り替える（プリエンプティブ）。
+// yield_now() は「自発的に譲る」最適化用途として残している。
 //
 // コンテキストスイッチはアセンブリで実装:
 //   1. 現在のタスクの callee-saved レジスタをスタックに push
@@ -671,6 +672,16 @@ pub fn sleep_ms(ms: u64) {
     // 最低でも 1 ティックはスリープする（0 だと即座に起きてしまう）
     let ticks = (ms * 182 / 10000).max(1);
     sleep_ticks(ticks);
+}
+
+/// Ready タスクがなくなるまで HLT で待機する（yield に依存しない待ち）
+///
+/// タイマー割り込みによる preempt を前提にする。
+pub fn wait_until_no_ready_tasks() {
+    x86_64::instructions::interrupts::enable();
+    while has_ready_tasks() {
+        x86_64::instructions::hlt();
+    }
 }
 
 /// Ready または Sleeping 状態のタスクがあるかどうかを返す。

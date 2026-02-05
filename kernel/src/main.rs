@@ -255,7 +255,7 @@ fn main() -> Status {
     kprintln!();
 
     // --- マルチタスクのデモ ---
-    // 2つのデモタスクを生成して、協調的マルチタスクの動作を確認する。
+    // 2つのデモタスクを生成して、タスクの切り替えを確認する。
     // 各タスクはメッセージを表示して yield を繰り返し、最後に return する。
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
     kprintln!("Spawning demo tasks...");
@@ -263,11 +263,8 @@ fn main() -> Status {
     scheduler::spawn("demo_b", demo_task_b);
 
     kprintln!("Running demo tasks:");
-    // yield_now() で kernel → demo_a → demo_b → kernel ... とラウンドロビンする。
-    // 全タスクが Finished になるまで繰り返す。
-    while scheduler::has_ready_tasks() {
-        scheduler::yield_now();
-    }
+    // タイマー割り込みで切り替わるので、カーネルは HLT で待機するだけでよい。
+    scheduler::wait_until_no_ready_tasks();
 
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("All demo tasks finished!");
@@ -284,13 +281,9 @@ fn main() -> Status {
     scheduler::spawn("preempt_y", preemptive_task_y);
 
     kprintln!("Running preemptive demo tasks:");
-    // kernel タスクも yield_now() で Ready に戻り、
     // タイマー割り込みがラウンドロビンで全タスクを切り替える。
-    // ただし kernel タスクはここで Ready タスクの完了を待つ必要があるので、
-    // yield_now() でループする。
-    while scheduler::has_ready_tasks() {
-        scheduler::yield_now();
-    }
+    // カーネルは HLT で待機する。
+    scheduler::wait_until_no_ready_tasks();
 
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("All preemptive demo tasks finished!");
@@ -309,9 +302,7 @@ fn main() -> Status {
     scheduler::spawn("sleep_2", sleep_demo_2);
 
     kprintln!("Running sleep demo tasks:");
-    while scheduler::has_ready_tasks() {
-        scheduler::yield_now();
-    }
+    scheduler::wait_until_no_ready_tasks();
 
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("All sleep demo tasks finished!");
@@ -362,15 +353,13 @@ fn main() -> Status {
     }
 
     // --- カーネルタスクは idle として待機 ---
-    // init が起動したら、カーネルタスクは yield して他のタスクに CPU を譲る。
+    // init が起動したら、カーネルタスクは HLT で待機する。
     // ユーザープロセスがすべて終了したらカーネルシェルにフォールバックする。
     kprintln!("Kernel entering idle mode...");
     kprintln!();
 
-    // ユーザープロセスが動いている間は yield で待機
-    while scheduler::has_ready_tasks() {
-        scheduler::yield_now();
-    }
+    // ユーザープロセスが動いている間は HLT で待機
+    scheduler::wait_until_no_ready_tasks();
 
     // 全ユーザープロセスが終了したらカーネルシェルにフォールバック
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
