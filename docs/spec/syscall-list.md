@@ -179,6 +179,15 @@ Capability-based security を実現するためのハンドル操作。
 - `90` `SYS_IPC_SEND(dest_task_id, buf_ptr, len) -> 0`
 - `91` `SYS_IPC_RECV(sender_ptr, buf_ptr, buf_len, timeout_ms) -> n`
 
+## サウンド (100-109)
+
+- `100` `SYS_SOUND_PLAY(freq_hz, duration_ms) -> 0`
+  - AC97 ドライバで正弦波ビープ音を再生する
+  - `freq_hz`: 周波数 (Hz)、1〜20000
+  - `duration_ms`: 持続時間 (ms)、1〜10000
+  - 再生が完了するまでブロックする
+  - エラー: -10 (引数範囲外), -41 (AC97 未検出)
+
 ## エラーコード
 
 SABOS 独自のエラーコード体系。POSIX 互換は目指さない。

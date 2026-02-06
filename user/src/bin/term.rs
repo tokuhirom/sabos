@@ -392,6 +392,7 @@ fn execute_command(line: &str, term: &mut TermBuffer, state: &mut ShellState) {
         "kill" => cmd_kill(term, args),
         "sleep" => cmd_sleep(term, args),
         "cal" => cmd_cal(term, args),
+        "beep" => cmd_beep(term, args),
         "selftest" => cmd_selftest(term),
         "halt" => cmd_halt(term),
         "" => {}
@@ -460,6 +461,45 @@ fn cmd_selftest(term: &mut TermBuffer) {
     term.write_text("Running kernel selftest...\n");
     let _ = syscall::selftest();
     term.write_text("(selftest output goes to serial console)\n");
+}
+
+/// beep コマンド: AC97 ドライバでビープ音を再生する
+///
+/// # 使い方
+/// - `beep` — デフォルト (440Hz, 200ms)
+/// - `beep 880` — 880Hz, 200ms
+/// - `beep 880 500` — 880Hz, 500ms
+fn cmd_beep(term: &mut TermBuffer, args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    let freq = if parts.is_empty() {
+        440
+    } else {
+        match parts[0].parse::<u32>() {
+            Ok(n) if n >= 1 && n <= 20000 => n,
+            _ => {
+                term.write_text("Error: freq must be 1-20000\n");
+                return;
+            }
+        }
+    };
+
+    let duration = if parts.len() < 2 {
+        200
+    } else {
+        match parts[1].parse::<u32>() {
+            Ok(n) if n >= 1 && n <= 10000 => n,
+            _ => {
+                term.write_text("Error: duration must be 1-10000 ms\n");
+                return;
+            }
+        }
+    };
+
+    let result = syscall::sound_play(freq, duration);
+    if result < 0 {
+        term.write_text("Error: sound_play failed (AC97 not available?)\n");
+    }
 }
 
 /// halt コマンド: システム停止

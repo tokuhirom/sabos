@@ -54,6 +54,7 @@ qemu-system-x86_64 \
     -drive format=raw,file=fat:rw:esp \
     -drive if=virtio,format=raw,file=disk.img \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+    -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
     -serial stdio \
     -display none \
     -monitor telnet:127.0.0.1:$MONITOR_PORT,server,nowait > "$LOG_FILE" 2>&1 &

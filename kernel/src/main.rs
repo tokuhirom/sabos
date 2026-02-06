@@ -5,6 +5,7 @@
 
 extern crate alloc;
 
+mod ac97;
 mod allocator;
 mod console;
 mod elf;
@@ -249,6 +250,23 @@ fn main() -> Status {
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found (add -device virtio-net-pci to QEMU)");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- AC97 オーディオドライバの初期化 ---
+    // PCI バスから AC97 デバイスを探して初期化する。
+    // QEMU の `-device AC97` で追加されたデバイスを検出する。
+    kprint!("Initializing AC97 audio... ");
+    ac97::init();
+    {
+        if ac97::is_available() {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("OK");
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
         }
     }
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));

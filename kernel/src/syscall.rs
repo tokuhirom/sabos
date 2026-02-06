@@ -124,6 +124,9 @@ pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
 pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
 
+// サウンド (100-109)
+pub const SYS_SOUND_PLAY: u64 = 100;  // sound_play(freq_hz, duration_ms) — 正弦波ビープ音再生
+
 // =================================================================
 // アセンブリエントリポイント
 // =================================================================
@@ -316,6 +319,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         // IPC
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
+        // サウンド
+        SYS_SOUND_PLAY => sys_sound_play(arg1, arg2),
         // システム制御
         SYS_DRAW_PIXEL => sys_draw_pixel(arg1, arg2, arg3),
         SYS_DRAW_RECT => sys_draw_rect(arg1, arg2, arg3, arg4),
@@ -2273,4 +2278,40 @@ fn is_page_mapped(
 
     let l1_entry = &l1_table[l1_idx];
     !l1_entry.is_unused()
+}
+
+// =================================================================
+// サウンド関連
+// =================================================================
+
+/// SYS_SOUND_PLAY: AC97 ドライバで正弦波ビープ音を再生する。
+///
+/// # 引数
+/// - arg1 (freq_hz): 周波数 (Hz)。1〜20000 の範囲。
+/// - arg2 (duration_ms): 持続時間 (ミリ秒)。1〜10000 の範囲。
+///
+/// # 戻り値
+/// - 0: 成功
+/// - エラー: InvalidArgument (範囲外), NotSupported (AC97 未検出)
+fn sys_sound_play(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let freq_hz = arg1 as u32;
+    let duration_ms = arg2 as u32;
+
+    // 引数の範囲チェック
+    if freq_hz == 0 || freq_hz > 20000 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if duration_ms == 0 || duration_ms > 10000 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // AC97 ドライバを取得して再生
+    let mut ac97 = crate::ac97::AC97.lock();
+    match ac97.as_mut() {
+        Some(driver) => {
+            driver.play_tone(freq_hz, duration_ms);
+            Ok(0)
+        }
+        None => Err(SyscallError::NotSupported),
+    }
 }

@@ -251,6 +251,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "gui" => cmd_gui(args),
         "rect" => cmd_rect(args),
         "cal" => cmd_cal(args),
+        "beep" => cmd_beep(args),
         "selftest" => cmd_selftest(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
@@ -488,6 +489,7 @@ fn cmd_help() {
     syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  cal <month> <year> - Show calendar for given month\n");
+    syscall::write_str("  beep [freq] [ms]  - Play beep sound (default: 440Hz 200ms)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
@@ -1705,6 +1707,45 @@ fn cmd_sleep(args: &str) {
     syscall::sleep(ms);
 
     syscall::write_str("Done.\n");
+}
+
+/// beep コマンド: AC97 ドライバでビープ音を再生する
+///
+/// # 使い方
+/// - `beep` — デフォルト (440Hz, 200ms)
+/// - `beep 880` — 880Hz, 200ms
+/// - `beep 880 500` — 880Hz, 500ms
+fn cmd_beep(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    let freq = if parts.is_empty() {
+        440
+    } else {
+        match parse_u64(parts[0]) {
+            Some(n) if n >= 1 && n <= 20000 => n as u32,
+            _ => {
+                syscall::write_str("Error: freq must be 1-20000\n");
+                return;
+            }
+        }
+    };
+
+    let duration = if parts.len() < 2 {
+        200
+    } else {
+        match parse_u64(parts[1]) {
+            Some(n) if n >= 1 && n <= 10000 => n as u32,
+            _ => {
+                syscall::write_str("Error: duration must be 1-10000 ms\n");
+                return;
+            }
+        }
+    };
+
+    let result = syscall::sound_play(freq, duration);
+    if result < 0 {
+        syscall::write_str("Error: sound_play failed (AC97 not available?)\n");
+    }
 }
 
 // =================================================================

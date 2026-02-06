@@ -111,6 +111,7 @@ impl Shell {
             "dns" => self.cmd_dns(args),
             "http" => self.cmd_http(args),
             "selftest" => self.cmd_selftest(args),
+            "beep" => self.cmd_beep(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
             _ => {
@@ -149,6 +150,7 @@ impl Shell {
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
         kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
         kprintln!("  selftest [target] - Run automated self-tests (target: all/base/core/fs/net/gui/service/list)");
+        kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
     }
@@ -1213,6 +1215,9 @@ impl Shell {
 
             // 11.11. mmap のテスト（匿名ページの動的マッピング）
             run_test("mmap", this.test_mmap());
+
+            // 11.12. AC97 オーディオコントローラの検出テスト
+            run_test("ac97_detect", this.test_ac97_detect());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1871,6 +1876,12 @@ impl Shell {
         written_ok && unmap_ok
     }
 
+    /// AC97 オーディオコントローラの検出テスト。
+    /// AC97 ドライバが正常に初期化されていることを確認する。
+    fn test_ac97_detect(&self) -> bool {
+        crate::ac97::is_available()
+    }
+
     /// Handle から EOF まで読み取る
     fn read_all_handle(&self, handle: &crate::handle::Handle) -> Result<Vec<u8>, crate::user_ptr::SyscallError> {
         use alloc::vec::Vec;
@@ -2389,6 +2400,52 @@ impl Shell {
             Err(_) => return false,
         };
         text.contains("HELLO.TXT")
+    }
+
+    /// beep コマンド: AC97 ドライバでビープ音を再生する。
+    ///
+    /// # 使い方
+    /// - `beep` — デフォルト (440Hz, 200ms)
+    /// - `beep 880` — 880Hz, 200ms
+    /// - `beep 880 500` — 880Hz, 500ms
+    fn cmd_beep(&self, args: &str) {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+
+        let freq: u32 = if parts.is_empty() {
+            440
+        } else {
+            match parts[0].parse::<u32>() {
+                Ok(n) if n >= 1 && n <= 20000 => n,
+                _ => {
+                    kprintln!("Error: freq must be 1-20000");
+                    return;
+                }
+            }
+        };
+
+        let duration: u32 = if parts.len() < 2 {
+            200
+        } else {
+            match parts[1].parse::<u32>() {
+                Ok(n) if n >= 1 && n <= 10000 => n,
+                _ => {
+                    kprintln!("Error: duration must be 1-10000 ms");
+                    return;
+                }
+            }
+        };
+
+        let mut ac97 = crate::ac97::AC97.lock();
+        match ac97.as_mut() {
+            Some(driver) => {
+                kprintln!("Playing {}Hz for {}ms...", freq, duration);
+                driver.play_tone(freq, duration);
+                kprintln!("Done.");
+            }
+            None => {
+                kprintln!("Error: AC97 audio not available");
+            }
+        }
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。

@@ -106,6 +106,9 @@ pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
 pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
 
+// サウンド (100-109)
+pub const SYS_SOUND_PLAY: u64 = 100;  // sound_play(freq_hz, duration_ms) — 正弦波ビープ音再生
+
 // =================================================================
 // Handle 構造体と権限ビット（Capability-based security）
 // =================================================================
@@ -1068,4 +1071,21 @@ pub fn munmap(addr: *mut u8, len: usize) -> Result<u64, SyscallResult> {
     } else {
         Ok(result as u64)
     }
+}
+
+// =================================================================
+// サウンド関連
+// =================================================================
+
+/// AC97 ドライバで正弦波ビープ音を再生する。
+///
+/// # 引数
+/// - `freq_hz`: 周波数 (Hz)。1〜20000 の範囲。
+/// - `duration_ms`: 持続時間 (ミリ秒)。1〜10000 の範囲。
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時: 引数範囲外、AC97 未検出）
+pub fn sound_play(freq_hz: u32, duration_ms: u32) -> SyscallResult {
+    unsafe { syscall2(SYS_SOUND_PLAY, freq_hz as u64, duration_ms as u64) as i64 }
 }

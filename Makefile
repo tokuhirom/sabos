@@ -45,7 +45,8 @@ QEMU_COMMON = qemu-system-x86_64 \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 	-drive format=raw,file=fat:rw:esp \
 	-drive if=virtio,format=raw,file=$(DISK_IMG) \
-	-netdev user,id=net0 -device virtio-net-pci,netdev=net0
+	-netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+	-audiodev id=snd0,driver=none -device AC97,audiodev=snd0
 
 # スクリーンショットの出力先（デフォルト: docs/images/screenshot.png）
 SCREENSHOT_OUT ?= docs/images/screenshot.png
@@ -107,6 +108,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG)
 		-drive format=raw,file=fat:rw:esp \
 		-drive if=virtio,format=raw,file=$(DISK_IMG) \
 		-netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+		-audiodev id=snd0,driver=sdl -device AC97,audiodev=snd0 \
 		-serial stdio
 
 # スクリーンショットを撮る

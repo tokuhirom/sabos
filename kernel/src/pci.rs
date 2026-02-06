@@ -179,6 +179,57 @@ pub fn find_virtio_blk() -> Option<PciDevice> {
     None
 }
 
+/// PCI Configuration Space に 32 ビット値を書き込む。
+///
+/// CONFIG_ADDRESS にアドレスを書き込み、CONFIG_DATA に 32 ビット書く。
+/// offset は 4 バイトアラインされている必要がある（下位 2 ビットは 0）。
+pub fn pci_config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    let address: u32 = (1 << 31)
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | ((offset as u32) & 0xFC);
+
+    unsafe {
+        let mut addr_port = Port::<u32>::new(CONFIG_ADDRESS);
+        let mut data_port = Port::<u32>::new(CONFIG_DATA);
+        addr_port.write(address);
+        data_port.write(value);
+    }
+}
+
+/// PCI Configuration Space に 16 ビット値を書き込む。
+///
+/// 32 ビット読み取りを行い、該当する 16 ビットだけ書き換えてから書き戻す。
+/// これにより隣接する 16 ビットのレジスタ値を壊さない。
+pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    // まず 32 ビット全体を読む
+    let old = pci_config_read32(bus, device, function, offset & 0xFC);
+    let shift = (offset & 2) * 8;
+    // 該当する 16 ビットだけ書き換える
+    let mask = !(0xFFFF_u32 << shift);
+    let new_val = (old & mask) | ((value as u32) << shift);
+    pci_config_write32(bus, device, function, offset & 0xFC, new_val);
+}
+
+/// AC97 オーディオコントローラを PCI バスから探す。
+///
+/// Intel AC97 コントローラの識別:
+///   vendor_id = 0x8086 (Intel)
+///   device_id = 0x2415 (82801AA AC97 Audio Controller)
+///
+/// QEMU の `-device AC97` でエミュレートされるデバイス。
+/// 見つかった最初のデバイスを返す。見つからなければ None。
+pub fn find_ac97() -> Option<PciDevice> {
+    let devices = enumerate_bus();
+    for dev in devices {
+        if dev.vendor_id == 0x8086 && dev.device_id == 0x2415 {
+            return Some(dev);
+        }
+    }
+    None
+}
+
 /// virtio-net デバイスを PCI バスから探す。
 ///
 /// virtio デバイスの識別:
