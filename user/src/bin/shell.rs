@@ -29,6 +29,8 @@
 // - http <host[:port]> [path]: HTTP GET リクエスト（localhost 対応）
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
 // - grep [-i] [-v] [-c] PATTERN [FILE]: パターンに一致する行を出力
+// - nc <host> <port>: TCP接続（netcat クライアントモード）
+// - nc -l <port>: TCP待ち受け（netcat サーバーモード）
 // - パイプ（|）: echo/cat/sed/grep の簡易パイプライン
 // - selftest: カーネル selftest を実行
 // - halt: システム停止
@@ -233,6 +235,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
+        "nc" => cmd_nc(args),
         "sed" => cmd_sed(args, state),
         "grep" => cmd_grep(args, state),
         "gui" => cmd_gui(args),
@@ -465,6 +468,8 @@ fn cmd_help() {
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host[:port]> [path] - HTTP GET request\n");
+    syscall::write_str("  nc <host> <port>  - TCP connect (netcat client)\n");
+    syscall::write_str("  nc -l <port>      - TCP listen (netcat server)\n");
     syscall::write_str("  sed [-n] s/OLD/NEW/[gp] <file> - Simple sed (literal)\n");
     syscall::write_str("  grep [-i] [-v] [-c] PATTERN [FILE] - Filter lines by pattern\n");
     syscall::write_str("  pipe (|)          - echo/cat/sed/grep pipeline\n");
@@ -1803,6 +1808,205 @@ fn cmd_http(args: &str) {
     let _ = netd_tcp_close(conn_id);
 }
 
+/// nc コマンド: TCP の生データ送受信（netcat 風）
+///
+/// ## 使い方
+/// - クライアントモード: `nc <host> <port>` — 指定ホスト:ポートに接続
+/// - サーバーモード: `nc -l <port>` — 指定ポートで待ち受け
+///
+/// キーボード入力をそのまま送信し、受信データをそのまま表示する。
+/// 相手が切断（recv が 0 またはエラー）すると終了する。
+fn cmd_nc(args: &str) {
+    let args = args.trim();
+    if args.is_empty() {
+        syscall::write_str("Usage: nc <host> <port>    (client mode)\n");
+        syscall::write_str("       nc -l <port>        (server mode)\n");
+        return;
+    }
+
+    // 引数パース: "-l" で始まればサーバーモード
+    let (first, rest) = split_command(args);
+
+    if first == "-l" {
+        // サーバーモード
+        let port_str = rest.trim();
+        let port = match parse_u16(port_str) {
+            Some(p) if p > 0 => p,
+            _ => {
+                syscall::write_str("Error: invalid port number\n");
+                return;
+            }
+        };
+        nc_server(port);
+    } else {
+        // クライアントモード: nc <host> <port>
+        let host = first;
+        let port_str = rest.trim();
+        if port_str.is_empty() {
+            syscall::write_str("Usage: nc <host> <port>\n");
+            return;
+        }
+        let port = match parse_u16(port_str) {
+            Some(p) if p > 0 => p,
+            _ => {
+                syscall::write_str("Error: invalid port number\n");
+                return;
+            }
+        };
+        nc_client(host, port);
+    }
+}
+
+/// nc クライアントモード: 指定ホスト:ポートに TCP 接続して双方向中継する
+fn nc_client(host: &str, port: u16) {
+    // IP アドレスを解決
+    let ip = if host == "localhost" {
+        [10, 0, 2, 15] // QEMU 環境での自分自身の IP
+    } else {
+        match parse_ip(host) {
+            Some(ip) => ip,
+            None => {
+                // DNS で解決
+                syscall::write_str("Resolving ");
+                syscall::write_str(host);
+                syscall::write_str("...\n");
+                let mut resolved_ip = [0u8; 4];
+                if netd_dns_lookup(host, &mut resolved_ip).is_err() {
+                    syscall::write_str("Error: DNS lookup failed\n");
+                    return;
+                }
+                resolved_ip
+            }
+        }
+    };
+
+    syscall::write_str("Connecting to ");
+    write_ip(&ip);
+    syscall::write_str(":");
+    write_number(port as u64);
+    syscall::write_str("...\n");
+
+    let conn_id = match netd_tcp_connect(&ip, port) {
+        Ok(id) => id,
+        Err(_) => {
+            syscall::write_str("Error: TCP connect failed\n");
+            return;
+        }
+    };
+    syscall::write_str("Connected! (peer will close to exit)\n");
+
+    // キーボード入力↔ソケットの双方向中継
+    nc_relay_loop(conn_id);
+
+    let _ = netd_tcp_close(conn_id);
+    syscall::write_str("Connection closed.\n");
+}
+
+/// nc サーバーモード: 指定ポートで待ち受けて双方向中継する
+fn nc_server(port: u16) {
+    syscall::write_str("Listening on port ");
+    write_number(port as u64);
+    syscall::write_str("...\n");
+
+    if netd_tcp_listen(port).is_err() {
+        syscall::write_str("Error: listen failed\n");
+        return;
+    }
+
+    // accept で接続を待つ（タイムアウト 0 = ブロッキング）
+    let conn_id = match netd_tcp_accept(0) {
+        Ok(id) => id,
+        Err(_) => {
+            syscall::write_str("Error: accept failed\n");
+            return;
+        }
+    };
+    syscall::write_str("Client connected! (peer will close to exit)\n");
+
+    // キーボード入力↔ソケットの双方向中継
+    nc_relay_loop(conn_id);
+
+    let _ = netd_tcp_close(conn_id);
+    syscall::write_str("Connection closed.\n");
+}
+
+/// nc のメインループ: キーボード入力を送信し、受信データを表示する
+///
+/// ノンブロッキング key_read でキーボードをポーリングし、
+/// 短いタイムアウトの TCP recv で受信データを確認する。
+/// 相手が切断したら（recv エラー）ループを抜ける。
+fn nc_relay_loop(conn_id: u32) {
+    // キーボードフォーカスを取得（GUI 環境で nc がキーを読めるように）
+    syscall::console_grab(true);
+
+    let mut key_buf = [0u8; 64];
+    let mut recv_buf = [0u8; 1024];
+    // 1行分のキーボード入力バッファ（Enter で送信するモード）
+    let mut line_buf = [0u8; 256];
+    let mut line_len: usize = 0;
+
+    loop {
+        // --- キーボード入力をノンブロッキングで読む ---
+        let key_n = syscall::key_read(&mut key_buf);
+        if key_n > 0 {
+            for i in 0..(key_n as usize) {
+                let c = key_buf[i];
+                match c {
+                    // Enter: 行バッファの内容 + 改行を送信
+                    b'\n' | b'\r' => {
+                        if line_len > 0 {
+                            let _ = netd_tcp_send(conn_id, &line_buf[..line_len]);
+                            line_len = 0;
+                        }
+                        let _ = netd_tcp_send(conn_id, b"\r\n");
+                        syscall::write_str("\n");
+                    }
+                    // Backspace
+                    0x08 | 0x7f => {
+                        if line_len > 0 {
+                            line_len -= 1;
+                            syscall::write_str("\x08 \x08");
+                        }
+                    }
+                    // 通常の印字可能文字
+                    c if c >= 0x20 && c < 0x7f => {
+                        if line_len < line_buf.len() {
+                            line_buf[line_len] = c;
+                            line_len += 1;
+                            syscall::write(&[c]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // --- TCP 受信（短タイムアウトでポーリング） ---
+        match netd_tcp_recv(conn_id, &mut recv_buf, 50) {
+            Ok(n) if n > 0 => {
+                let n = n as usize;
+                // 受信データをそのまま表示
+                if let Ok(text) = core::str::from_utf8(&recv_buf[..n]) {
+                    syscall::write_str(text);
+                } else {
+                    // バイナリデータもベストエフォートで表示
+                    syscall::write(&recv_buf[..n]);
+                }
+            }
+            Ok(_) => {
+                // 0 バイト = 正常だが何もない、次のポーリングへ
+            }
+            Err(_) => {
+                // エラー = 相手が切断した可能性が高い
+                break;
+            }
+        }
+    }
+
+    // キーボードフォーカスを解放
+    syscall::console_grab(false);
+}
+
 /// gui コマンド: GUI サービスに描画要求を送る
 ///
 /// 例:
@@ -2088,6 +2292,8 @@ const OPCODE_TCP_CONNECT: u32 = 2;
 const OPCODE_TCP_SEND: u32 = 3;
 const OPCODE_TCP_RECV: u32 = 4;
 const OPCODE_TCP_CLOSE: u32 = 5;
+const OPCODE_TCP_LISTEN: u32 = 6;
+const OPCODE_TCP_ACCEPT: u32 = 7;
 
 const IPC_REQ_HEADER: usize = 8;
 const IPC_RESP_HEADER: usize = 12;
@@ -2157,6 +2363,26 @@ fn netd_tcp_close(conn_id: u32) -> Result<(), ()> {
         Err(())
     } else {
         Ok(())
+    }
+}
+
+/// 指定ポートで TCP リッスンを開始する（netd に listen を依頼）
+fn netd_tcp_listen(port: u16) -> Result<(), ()> {
+    let payload = port.to_le_bytes();
+    let (status, _) = netd_request(OPCODE_TCP_LISTEN, &payload, &mut [0u8; 32])?;
+    if status < 0 { Err(()) } else { Ok(()) }
+}
+
+/// TCP 接続を受け付ける（netd に accept を依頼）
+/// 成功時は接続 ID を返す。timeout_ms=0 でブロッキング待ち。
+fn netd_tcp_accept(timeout_ms: u64) -> Result<u32, ()> {
+    let payload = timeout_ms.to_le_bytes();
+    let mut resp = [0u8; 32];
+    let (status, len) = netd_request(OPCODE_TCP_ACCEPT, &payload, &mut resp)?;
+    if status < 0 || len != 4 {
+        Err(())
+    } else {
+        Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
     }
 }
 
