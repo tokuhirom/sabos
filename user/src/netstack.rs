@@ -26,6 +26,9 @@ use crate::syscall_netd as syscall;
 /// ゲストの IP アドレス (QEMU user mode デフォルト)
 pub const MY_IP: [u8; 4] = [10, 0, 2, 15];
 
+/// ループバック IP アドレス (127.0.0.1)
+pub const LOOPBACK_IP: [u8; 4] = [127, 0, 0, 1];
+
 /// DNS サーバーの IP アドレス (QEMU user mode デフォルト)
 pub const DNS_SERVER_IP: [u8; 4] = [10, 0, 2, 3];
 
@@ -559,6 +562,13 @@ fn send_arp_reply(request: &ArpPacket) {
 }
 
 /// IPv4 パケットを処理する
+/// 指定された IP がローカル（自分宛）かどうかを判定する
+///
+/// MY_IP (10.0.2.15) と LOOPBACK_IP (127.0.0.1) をローカルとみなす。
+fn is_local_ip(ip: &[u8; 4]) -> bool {
+    *ip == MY_IP || *ip == LOOPBACK_IP
+}
+
 fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 20 {
         return;
@@ -571,8 +581,8 @@ fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
         return;
     }
 
-    // 宛先 IP が自分でなければ無視
-    if ip_header.dst_ip != MY_IP {
+    // 宛先 IP がローカルでなければ無視
+    if !is_local_ip(&ip_header.dst_ip) {
         return;
     }
 
@@ -1368,8 +1378,12 @@ fn send_tcp_packet_internal(
     // TCP ペイロード
     packet.extend_from_slice(payload);
 
-    // 送信
-    if syscall::net_send_frame(&packet) < 0 {
+    // ローカル宛（自分自身 or ループバック）のパケットは
+    // ネットワークに出さず、直接パケットハンドラに戻す（ソフトウェアループバック）
+    if is_local_ip(&dst_ip) {
+        handle_packet(&packet);
+        Ok(())
+    } else if syscall::net_send_frame(&packet) < 0 {
         Err("send failed")
     } else {
         Ok(())

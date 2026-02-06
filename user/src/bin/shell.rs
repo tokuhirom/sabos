@@ -25,7 +25,7 @@
 // - spawn <file>: ELF プログラムをバックグラウンドで実行
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
-// - http <host> [path]: HTTP GET リクエスト
+// - http <host[:port]> [path]: HTTP GET リクエスト（localhost 対応）
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
 // - grep [-i] [-v] [-c] PATTERN [FILE]: パターンに一致する行を出力
 // - パイプ（|）: echo/cat/sed/grep の簡易パイプライン
@@ -461,7 +461,7 @@ fn cmd_help() {
     syscall::write_str("  spawn <file>      - Run ELF program (background)\n");
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
-    syscall::write_str("  http <host> [path] - HTTP GET request\n");
+    syscall::write_str("  http <host[:port]> [path] - HTTP GET request\n");
     syscall::write_str("  sed [-n] s/OLD/NEW/[gp] <file> - Simple sed (literal)\n");
     syscall::write_str("  grep [-i] [-v] [-c] PATTERN [FILE] - Filter lines by pattern\n");
     syscall::write_str("  pipe (|)          - echo/cat/sed/grep pipeline\n");
@@ -1650,45 +1650,67 @@ fn cmd_dns(args: &str) {
 ///
 /// 指定したホストに HTTP GET リクエストを送信し、レスポンスを表示する。
 fn cmd_http(args: &str) {
-    // 引数をパース: host [path]
-    let (host, path) = split_command(args);
+    // 引数をパース: host[:port] [path]
+    let (host_arg, path) = split_command(args);
 
-    if host.is_empty() {
-        syscall::write_str("Usage: http <host> [path]\n");
+    if host_arg.is_empty() {
+        syscall::write_str("Usage: http <host[:port]> [path]\n");
         syscall::write_str("  Example: http example.com /\n");
+        syscall::write_str("  Example: http localhost:8080 /\n");
         return;
     }
 
     let path = if path.is_empty() { "/" } else { path };
 
+    // host:port を分離する
+    let (host, port) = if let Some(colon_pos) = host_arg.rfind(':') {
+        // ":" の右側が数字ならポート指定
+        let maybe_port = &host_arg[colon_pos + 1..];
+        if !maybe_port.is_empty() && maybe_port.as_bytes().iter().all(|b| b.is_ascii_digit()) {
+            let port_num = parse_u16(maybe_port).unwrap_or(80);
+            (&host_arg[..colon_pos], port_num)
+        } else {
+            (host_arg, 80u16)
+        }
+    } else {
+        (host_arg, 80u16)
+    };
+
     // IP アドレスを解決または直接パース
-    let ip = match parse_ip(host) {
-        Some(ip) => ip,
-        None => {
-            // DNS で解決
-            syscall::write_str("Resolving ");
-            syscall::write_str(host);
-            syscall::write_str("...\n");
+    // "localhost" は自分自身の IP として扱う
+    let ip = if host == "localhost" {
+        [10, 0, 2, 15] // MY_IP — ループバックで折り返される
+    } else {
+        match parse_ip(host) {
+            Some(ip) => ip,
+            None => {
+                // DNS で解決
+                syscall::write_str("Resolving ");
+                syscall::write_str(host);
+                syscall::write_str("...\n");
 
-            let mut resolved_ip = [0u8; 4];
-            if netd_dns_lookup(host, &mut resolved_ip).is_err() {
-                syscall::write_str("Error: DNS lookup failed\n");
-                return;
+                let mut resolved_ip = [0u8; 4];
+                if netd_dns_lookup(host, &mut resolved_ip).is_err() {
+                    syscall::write_str("Error: DNS lookup failed\n");
+                    return;
+                }
+
+                syscall::write_str("Resolved to ");
+                write_ip(&resolved_ip);
+                syscall::write_str("\n");
+                resolved_ip
             }
-
-            syscall::write_str("Resolved to ");
-            write_ip(&resolved_ip);
-            syscall::write_str("\n");
-            resolved_ip
         }
     };
 
     // TCP 接続
     syscall::write_str("Connecting to ");
     write_ip(&ip);
-    syscall::write_str(":80...\n");
+    syscall::write_str(":");
+    write_number(port as u64);
+    syscall::write_str("...\n");
 
-    let conn_id = match netd_tcp_connect(&ip, 80) {
+    let conn_id = match netd_tcp_connect(&ip, port) {
         Ok(id) => id,
         Err(_) => {
             syscall::write_str("Error: TCP connect failed\n");
@@ -1698,13 +1720,12 @@ fn cmd_http(args: &str) {
     syscall::write_str("Connected!\n");
 
     // HTTP リクエストを構築
-    // 簡易的に固定フォーマットで送信
     syscall::write_str("Sending HTTP request...\n");
 
-    // GET line
+    // GET line — httpd が HTTP/1.1 を期待するので 1.1 にする
     let _ = netd_tcp_send(conn_id, b"GET ");
     let _ = netd_tcp_send(conn_id, path.as_bytes());
-    let _ = netd_tcp_send(conn_id, b" HTTP/1.0\r\n");
+    let _ = netd_tcp_send(conn_id, b" HTTP/1.1\r\n");
 
     // Host header
     let _ = netd_tcp_send(conn_id, b"Host: ");
@@ -2206,6 +2227,15 @@ fn write_ip(ip: &[u8; 4]) {
 }
 
 /// IP アドレス文字列をパース (例: "192.168.1.1")
+/// 文字列を u16 にパースする
+fn parse_u16(s: &str) -> Option<u16> {
+    let n = parse_u64(s)?;
+    if n > u16::MAX as u64 {
+        return None;
+    }
+    Some(n as u16)
+}
+
 fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let mut ip = [0u8; 4];
     let mut part_index = 0;
