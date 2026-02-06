@@ -250,6 +250,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "grep" => cmd_grep(args, state),
         "gui" => cmd_gui(args),
         "rect" => cmd_rect(args),
+        "cal" => cmd_cal(args),
         "selftest" => cmd_selftest(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
@@ -486,6 +487,7 @@ fn cmd_help() {
     syscall::write_str("  pipe (|)          - echo/cat/sed/grep pipeline\n");
     syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
+    syscall::write_str("  cal <month> <year> - Show calendar for given month\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
@@ -2678,6 +2680,153 @@ fn parse_ip(s: &str) -> Option<[u8; 4]> {
 /// halt コマンド: システム停止
 ///
 /// システムを停止する。この関数は戻らない。
+/// cal コマンド: 指定した月のカレンダーを表示する。
+///
+/// 使い方: cal <月> <年>
+/// 例: cal 2 2026
+///
+/// ツェラーの公式（Zeller's congruence）で曜日を計算する。
+/// ツェラーの公式は「年月日から曜日を求める」数学的な公式で、
+/// グレゴリオ暦に対応している。
+fn cmd_cal(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() != 2 {
+        println!("Usage: cal <month> <year>");
+        println!("  Example: cal 2 2026");
+        return;
+    }
+
+    let month: u32 = match parse_u64(parts[0]) {
+        Some(m) if (1..=12).contains(&m) => m as u32,
+        _ => {
+            println!("Invalid month (1-12)");
+            return;
+        }
+    };
+
+    let year: u32 = match parse_u64(parts[1]) {
+        Some(y) if y >= 1 && y <= u32::MAX as u64 => y as u32,
+        _ => {
+            println!("Invalid year");
+            return;
+        }
+    };
+
+    // 月の名前
+    let month_name = match month {
+        1 => "January", 2 => "February", 3 => "March",
+        4 => "April", 5 => "May", 6 => "June",
+        7 => "July", 8 => "August", 9 => "September",
+        10 => "October", 11 => "November", 12 => "December",
+        _ => unreachable!(),
+    };
+
+    // ヘッダー（月名と年をセンタリング）
+    // "Su Mo Tu We Th Fr Sa" は 20 文字
+    let header = alloc::format!("{} {}", month_name, year);
+    let pad = if header.len() < 20 {
+        (20 - header.len()) / 2
+    } else {
+        0
+    };
+    for _ in 0..pad {
+        print!(" ");
+    }
+    println!("{}", header);
+    println!("Su Mo Tu We Th Fr Sa");
+
+    // その月の日数を計算
+    let days_in_month = cal_days_in_month(year, month);
+
+    // 月初日の曜日を計算（0=日曜, 1=月曜, ..., 6=土曜）
+    let first_dow = cal_day_of_week(year, month, 1);
+
+    // 月初日までの空白を出力
+    for _ in 0..first_dow {
+        print!("   ");
+    }
+
+    // 各日を出力
+    let mut dow = first_dow;
+    for day in 1..=days_in_month {
+        if day < 10 {
+            print!(" {}", day);
+        } else {
+            print!("{}", day);
+        }
+
+        dow += 1;
+        if dow == 7 {
+            // 土曜日の後は改行
+            println!();
+            dow = 0;
+        } else {
+            print!(" ");
+        }
+    }
+
+    // 最終行が改行で終わっていなければ改行
+    if dow != 0 {
+        println!();
+    }
+}
+
+/// ツェラーの公式で曜日を計算する。
+/// 戻り値: 0=日曜, 1=月曜, ..., 6=土曜
+fn cal_day_of_week(year: u32, month: u32, day: u32) -> u32 {
+    // ツェラーの公式では 1月・2月を前年の 13月・14月として扱う
+    let (y, m) = if month <= 2 {
+        (year as i32 - 1, month as i32 + 12)
+    } else {
+        (year as i32, month as i32)
+    };
+
+    let q = day as i32;
+    let k = y % 100;
+    let j = y / 100;
+
+    // ツェラーの公式（グレゴリオ暦）:
+    // h = (q + floor(13*(m+1)/5) + K + floor(K/4) + floor(J/4) - 2*J) mod 7
+    // h: 0=土曜, 1=日曜, 2=月曜, ..., 6=金曜
+    let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
+
+    // h を調整して 0=日曜, 1=月曜, ..., 6=土曜 にする
+    // h が負になることがあるので +7 してから mod 7
+    let h = ((h + 7) % 7) as u32;
+    // h: 0=土曜, 1=日曜, ..., 6=金曜 → 0=日曜 に変換
+    // 日曜=1→0, 月曜=2→1, ..., 土曜=0→6
+    match h {
+        0 => 6, // 土曜
+        1 => 0, // 日曜
+        2 => 1, // 月曜
+        3 => 2, // 火曜
+        4 => 3, // 水曜
+        5 => 4, // 木曜
+        6 => 5, // 金曜
+        _ => unreachable!(),
+    }
+}
+
+/// 指定した年月の日数を返す。うるう年も考慮する。
+fn cal_days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            // うるう年判定:
+            // 4 で割り切れる年はうるう年。
+            // ただし 100 で割り切れる年は平年。
+            // ただし 400 で割り切れる年はうるう年。
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
 fn cmd_halt() {
     syscall::write_str("System halted.\n");
     syscall::halt();
