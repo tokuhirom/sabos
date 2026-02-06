@@ -44,8 +44,6 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
-#[path = "../fat32.rs"]
-mod fat32;
 #[path = "../gui_client.rs"]
 mod gui_client;
 #[path = "../json.rs"]
@@ -61,7 +59,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
-use fat32::Fat32;
 
 /// netd のタスクID（起動できた場合のみ設定）
 static mut NETD_TASK_ID: u64 = 0;
@@ -518,44 +515,15 @@ fn cmd_selftest() {
 
 /// df コマンド: ファイルシステム使用量を表示
 fn cmd_df() {
-    let mut fs = match Fat32::new() {
-        Ok(v) => v,
-        Err(err) => {
-            syscall::write_str("Error: Failed to init FAT32: ");
-            syscall::write_str(err);
-            syscall::write_str("\n");
-            return;
-        }
-    };
-
-    let total_clusters = fs.total_clusters();
-    let free_clusters = match fs.free_clusters() {
-        Ok(v) => v,
-        Err(err) => {
-            syscall::write_str("Error: Failed to scan FAT: ");
-            syscall::write_str(err);
-            syscall::write_str("\n");
-            return;
-        }
-    };
-    let cluster_bytes = fs.cluster_bytes() as u64;
-    let total_bytes = total_clusters as u64 * cluster_bytes;
-    let free_bytes = free_clusters as u64 * cluster_bytes;
-    let used_bytes = total_bytes.saturating_sub(free_bytes);
-
-    syscall::write_str("{\"fs\":\"fat32\",\"total_bytes\":");
-    write_number(total_bytes);
-    syscall::write_str(",\"used_bytes\":");
-    write_number(used_bytes);
-    syscall::write_str(",\"free_bytes\":");
-    write_number(free_bytes);
-    syscall::write_str(",\"cluster_bytes\":");
-    write_number(cluster_bytes);
-    syscall::write_str(",\"total_clusters\":");
-    write_number(total_clusters as u64);
-    syscall::write_str(",\"free_clusters\":");
-    write_number(free_clusters as u64);
-    syscall::write_str("}\n");
+    let mut buf = [0u8; 512];
+    let n = syscall::fs_stat(&mut buf);
+    if n < 0 {
+        syscall::write_str("Error: Failed to get filesystem stats\n");
+        return;
+    }
+    let len = n as usize;
+    syscall::write(&buf[..len]);
+    syscall::write_str("\n");
 }
 
 /// ls コマンド: ディレクトリ一覧を表示
@@ -992,15 +960,7 @@ fn cmd_write(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
-    let mut fs = match Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.create_file(&abs_path, data.as_bytes()).is_err() {
+    if syscall::file_write(&abs_path, data.as_bytes()) < 0 {
         syscall::write_str("Error: Failed to write file\n");
         return;
     }
@@ -1017,15 +977,7 @@ fn cmd_rm(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, args);
 
-    let mut fs = match Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.delete_file(&abs_path).is_err() {
+    if syscall::file_delete(&abs_path) < 0 {
         syscall::write_str("Error: Failed to delete file\n");
         return;
     }
@@ -1043,15 +995,7 @@ fn cmd_mkdir(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, name);
 
-    let mut fs = match Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.create_dir(&abs_path).is_err() {
+    if syscall::dir_create(&abs_path) < 0 {
         syscall::write_str("Error: Failed to create directory\n");
         return;
     }
@@ -1069,15 +1013,7 @@ fn cmd_rmdir(args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, name);
 
-    let mut fs = match Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            syscall::write_str("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.remove_dir(&abs_path).is_err() {
+    if syscall::dir_remove(&abs_path) < 0 {
         syscall::write_str("Error: Failed to remove directory\n");
         return;
     }

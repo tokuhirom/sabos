@@ -64,6 +64,10 @@ pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を
 // ファイルシステム (12-19)
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len) — ファイル削除
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len) — ディレクトリ一覧
+pub const SYS_FILE_WRITE: u64 = 14;  // file_write(path_ptr, path_len, data_ptr, data_len) — ファイル作成/上書き
+pub const SYS_DIR_CREATE: u64 = 15;  // dir_create(path_ptr, path_len) — ディレクトリ作成
+pub const SYS_DIR_REMOVE: u64 = 16;  // dir_remove(path_ptr, path_len) — ディレクトリ削除
+pub const SYS_FS_STAT: u64 = 17;     // fs_stat(buf_ptr, buf_len) — ファイルシステム統計情報
 
 // システム情報 (20-29)
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報取得
@@ -277,6 +281,10 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         // ファイルシステム
         SYS_FILE_DELETE => sys_file_delete(arg1, arg2),
         SYS_DIR_LIST => sys_dir_list(arg1, arg2, arg3, arg4),
+        SYS_FILE_WRITE => sys_file_write(arg1, arg2, arg3, arg4),
+        SYS_DIR_CREATE => sys_dir_create(arg1, arg2),
+        SYS_DIR_REMOVE => sys_dir_remove(arg1, arg2),
+        SYS_FS_STAT => sys_fs_stat(arg1, arg2),
         // システム情報
         SYS_GET_MEM_INFO => sys_get_mem_info(arg1, arg2),
         SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
@@ -1078,6 +1086,134 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     fat32.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     Ok(0)
+}
+
+/// SYS_FILE_WRITE: ファイルを作成/上書き
+///
+/// 既にファイルが存在する場合は削除してから作成する。
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///   arg3 — データのポインタ（ユーザー空間）
+///   arg4 — データの長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // パスを取得
+    let path_slice = user_slice_from_args(arg1, arg2)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // /proc 配下は読み取り専用
+    if path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // データを取得
+    let data_slice = user_slice_from_args(arg3, arg4)?;
+    let data = data_slice.as_slice();
+
+    // FAT32 でファイルを作成/上書き
+    // create_file は既存ファイルがあるとエラーになるので、先に削除を試みる
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let _ = fat32.delete_file(path); // 既存ファイルの削除（なくてもOK）
+    fat32.create_file(path, data).map_err(|_| SyscallError::Other)?;
+
+    Ok(0)
+}
+
+/// SYS_DIR_CREATE: ディレクトリを作成
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_dir_create(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    // パスを取得
+    let path_slice = user_slice_from_args(arg1, arg2)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // /proc 配下は読み取り専用
+    if path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // FAT32 でディレクトリを作成
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    fat32.create_dir(path).map_err(|_| SyscallError::Other)?;
+
+    Ok(0)
+}
+
+/// SYS_DIR_REMOVE: ディレクトリを削除
+///
+/// 空のディレクトリのみ削除可能。
+///
+/// 引数:
+///   arg1 — パスのポインタ（ユーザー空間）
+///   arg2 — パスの長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_dir_remove(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    // パスを取得
+    let path_slice = user_slice_from_args(arg1, arg2)?;
+    let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // /proc 配下は読み取り専用
+    if path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // FAT32 でディレクトリを削除
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    fat32.delete_dir(path).map_err(|_| SyscallError::Other)?;
+
+    Ok(0)
+}
+
+/// SYS_FS_STAT: ファイルシステム統計情報を取得
+///
+/// JSON 形式でファイルシステムの使用状況をバッファに書き込む。
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   負の値（エラー時）
+fn sys_fs_stat(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
+    let buf = buf_slice.as_mut_slice();
+
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let total_clusters = fat32.total_clusters();
+    let free_clusters = fat32.free_clusters().map_err(|_| SyscallError::Other)?;
+    let cluster_bytes = fat32.cluster_bytes() as u64;
+    let total_bytes = total_clusters as u64 * cluster_bytes;
+    let free_bytes = free_clusters as u64 * cluster_bytes;
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    // JSON 形式で書き込む
+    let json = format!(
+        "{{\"fs\":\"fat32\",\"total_bytes\":{},\"used_bytes\":{},\"free_bytes\":{},\"cluster_bytes\":{},\"total_clusters\":{},\"free_clusters\":{}}}",
+        total_bytes, used_bytes, free_bytes, cluster_bytes, total_clusters, free_clusters
+    );
+
+    let json_bytes = json.as_bytes();
+    if json_bytes.len() > buf.len() {
+        return Err(SyscallError::BufferOverflow);
+    }
+    buf[..json_bytes.len()].copy_from_slice(json_bytes);
+
+    Ok(json_bytes.len() as u64)
 }
 
 /// SYS_DIR_LIST: ディレクトリの内容を一覧

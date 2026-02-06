@@ -10,9 +10,6 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
-#[allow(dead_code)]
-#[path = "../fat32.rs"]
-mod fat32;
 #[path = "../print.rs"]
 mod print;
 #[path = "../syscall.rs"]
@@ -21,7 +18,6 @@ mod syscall;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
-use fat32::Fat32;
 
 /// 行バッファの最大サイズ（シェルと同等）
 const LINE_BUFFER_SIZE: usize = 256;
@@ -273,14 +269,7 @@ fn cmd_write(lines: &[String], file_name: &mut String, buf: &mut [u8]) -> bool {
         out.push('\n');
     }
 
-    let mut fs = match Fat32::new() {
-        Ok(v) => v,
-        Err(_) => {
-            syscall::write_str("Error: FAT32 not available\n");
-            return false;
-        }
-    };
-    if fs.create_file(target, out.as_bytes()).is_err() {
+    if syscall::file_write(target, out.as_bytes()) < 0 {
         syscall::write_str("Error: failed to write file\n");
         return false;
     }

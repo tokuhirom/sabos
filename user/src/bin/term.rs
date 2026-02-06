@@ -23,8 +23,6 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
-#[path = "../fat32.rs"]
-mod fat32;
 #[path = "../gui_client.rs"]
 mod gui_client;
 #[path = "../json.rs"]
@@ -585,7 +583,7 @@ fn cmd_cat(term: &mut TermBuffer, args: &str, state: &ShellState) {
 
 /// write コマンド: ファイルを作成/上書き
 ///
-/// Fat32 ドライバを直接使ってファイルを書き込む。
+/// syscall 経由でファイルを書き込む。
 fn cmd_write(term: &mut TermBuffer, args: &str, state: &ShellState) {
     let (filename, content) = split_command(args);
     if filename.is_empty() {
@@ -595,15 +593,7 @@ fn cmd_write(term: &mut TermBuffer, args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
-    let mut fs = match fat32::Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            term.write_text("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.create_file(&abs_path, content.as_bytes()).is_err() {
+    if syscall::file_write(&abs_path, content.as_bytes()) < 0 {
         term.write_text("Error: Failed to write file\n");
         return;
     }
@@ -613,7 +603,7 @@ fn cmd_write(term: &mut TermBuffer, args: &str, state: &ShellState) {
 
 /// rm コマンド: ファイルを削除
 ///
-/// Fat32 ドライバを直接使ってファイルを削除する。
+/// syscall 経由でファイルを削除する。
 fn cmd_rm(term: &mut TermBuffer, args: &str, state: &ShellState) {
     let filename = args.trim();
     if filename.is_empty() {
@@ -623,15 +613,7 @@ fn cmd_rm(term: &mut TermBuffer, args: &str, state: &ShellState) {
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
-    let mut fs = match fat32::Fat32::new() {
-        Ok(f) => f,
-        Err(_) => {
-            term.write_text("Error: FAT32 not available\n");
-            return;
-        }
-    };
-
-    if fs.delete_file(&abs_path).is_err() {
+    if syscall::file_delete(&abs_path) < 0 {
         let _ = writeln!(term, "Error: Failed to delete '{}'", filename);
     } else {
         let _ = writeln!(term, "Deleted '{}'", filename);

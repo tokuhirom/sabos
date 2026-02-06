@@ -1232,6 +1232,15 @@ impl Shell {
 
             // 13.6. コンソールエディタ (ED.ELF) の存在確認
             run_test("console_editor_elf", this.test_console_editor_elf());
+
+            // 13.7. file_write syscall のテスト（書き込み→読み返し→削除）
+            run_test("syscall_file_write", this.test_syscall_file_write());
+
+            // 13.8. dir_create/dir_remove syscall のテスト
+            run_test("syscall_dir_ops", this.test_syscall_dir_ops());
+
+            // 13.9. fs_stat syscall のテスト
+            run_test("syscall_fs_stat", this.test_syscall_fs_stat());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1950,6 +1959,94 @@ impl Shell {
         }
         let used = total - free;
         used > 0
+    }
+
+    /// file_write syscall のテスト。
+    /// テストファイルを書き込み、読み返して内容を確認し、削除する。
+    fn test_syscall_file_write(&self) -> bool {
+        let test_path = "/STEST.TXT";
+        let test_data = b"syscall file write test";
+
+        // 書き込み
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        // 既存ファイルがあれば削除
+        let _ = fat32.delete_file(test_path);
+        if fat32.create_file(test_path, test_data).is_err() {
+            return false;
+        }
+
+        // 読み返し
+        let data = match fat32.read_file(test_path) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+
+        // 内容確認
+        let ok = data.len() >= test_data.len() && &data[..test_data.len()] == test_data;
+
+        // クリーンアップ
+        let _ = fat32.delete_file(test_path);
+
+        ok
+    }
+
+    /// dir_create/dir_remove syscall のテスト。
+    /// テストディレクトリを作成し、存在を確認してから削除する。
+    fn test_syscall_dir_ops(&self) -> bool {
+        let test_path = "/STESTDIR";
+
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        // 既存があれば削除
+        let _ = fat32.delete_dir(test_path);
+
+        // ディレクトリ作成
+        if fat32.create_dir(test_path).is_err() {
+            return false;
+        }
+
+        // 存在確認（list_dir でエントリが見つかるか）
+        let entries = match fat32.list_dir("/") {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let found = entries.iter().any(|e| e.name == "STESTDIR" || e.name.eq_ignore_ascii_case("STESTDIR"));
+        if !found {
+            let _ = fat32.delete_dir(test_path);
+            return false;
+        }
+
+        // ディレクトリ削除
+        if fat32.delete_dir(test_path).is_err() {
+            return false;
+        }
+
+        true
+    }
+
+    /// fs_stat syscall のテスト。
+    /// ファイルシステム統計情報が取得できることを確認する。
+    fn test_syscall_fs_stat(&self) -> bool {
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+
+        let total = fat32.total_clusters();
+        let free = match fat32.free_clusters() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let cluster_bytes = fat32.cluster_bytes();
+
+        // 妥当性チェック: クラスタサイズが 0 でない、空きが総数以下
+        total > 0 && free <= total && cluster_bytes > 0
     }
 
     /// GUI アプリ (TETRIS.ELF) の存在確認

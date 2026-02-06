@@ -101,6 +101,11 @@ impl<D: BlockDevice> Fat32Fs<D> {
         Ok(fs)
     }
 
+    /// 1 クラスタあたりのバイト数
+    pub fn cluster_bytes(&self) -> u32 {
+        self.bpb.bytes_per_sector as u32 * self.bpb.sectors_per_cluster as u32
+    }
+
     /// 総クラスタ数（データ領域）
     pub fn total_clusters(&self) -> u32 {
         let data_sectors = self.bpb.total_sectors.saturating_sub(self.data_start_sector);

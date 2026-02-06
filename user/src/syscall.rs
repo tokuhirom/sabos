@@ -53,9 +53,13 @@ pub const SYS_CONSOLE_GRAB: u64 = 4; // console_grab(grab) — キーボード�
 // テスト/デバッグ (10-11)
 pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を実行
 
-// ファイルシステム (12-19) — パスベース（レガシー）
+// ファイルシステム (12-19) — パスベース
 pub const SYS_FILE_DELETE: u64 = 12; // file_delete(path_ptr, path_len)
 pub const SYS_DIR_LIST: u64 = 13;    // dir_list(path_ptr, path_len, buf_ptr, buf_len)
+pub const SYS_FILE_WRITE: u64 = 14;  // file_write(path_ptr, path_len, data_ptr, data_len)
+pub const SYS_DIR_CREATE: u64 = 15;  // dir_create(path_ptr, path_len)
+pub const SYS_DIR_REMOVE: u64 = 16;  // dir_remove(path_ptr, path_len)
+pub const SYS_FS_STAT: u64 = 17;     // fs_stat(buf_ptr, buf_len)
 
 // システム情報 (20-29)
 pub const SYS_GET_MEM_INFO: u64 = 20;   // get_mem_info(buf_ptr, buf_len) — メモリ情報
@@ -816,6 +820,71 @@ pub fn dir_list(path: &str, buf: &mut [u8]) -> SyscallResult {
     let buf_ptr = buf.as_mut_ptr() as u64;
     let buf_len = buf.len() as u64;
     unsafe { syscall4(SYS_DIR_LIST, path_ptr, path_len, buf_ptr, buf_len) as i64 }
+}
+
+/// ファイルを作成/上書きする（パスベース）
+///
+/// 既にファイルが存在する場合は削除してから作成する。
+///
+/// # 引数
+/// - `path`: ファイルパス
+/// - `data`: 書き込むデータ
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn file_write(path: &str, data: &[u8]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    let data_ptr = data.as_ptr() as u64;
+    let data_len = data.len() as u64;
+    unsafe { syscall4(SYS_FILE_WRITE, path_ptr, path_len, data_ptr, data_len) as i64 }
+}
+
+/// ディレクトリを作成する（パスベース）
+///
+/// # 引数
+/// - `path`: ディレクトリパス
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn dir_create(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_DIR_CREATE, path_ptr, path_len) as i64 }
+}
+
+/// ディレクトリを削除する（パスベース）
+///
+/// 空のディレクトリのみ削除可能。
+///
+/// # 引数
+/// - `path`: ディレクトリパス
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn dir_remove(path: &str) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    unsafe { syscall2(SYS_DIR_REMOVE, path_ptr, path_len) as i64 }
+}
+
+/// ファイルシステム統計情報を取得する
+///
+/// JSON 形式でファイルシステムの使用状況をバッファに書き込む。
+///
+/// # 引数
+/// - `buf`: 結果を書き込むバッファ
+///
+/// # 戻り値
+/// - 書き込んだバイト数（成功時）
+/// - 負の値（エラー時）
+pub fn fs_stat(buf: &mut [u8]) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall2(SYS_FS_STAT, buf_ptr, buf_len) as i64 }
 }
 
 // =================================================================

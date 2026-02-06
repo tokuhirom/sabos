@@ -33,6 +33,19 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 - `12` `SYS_FILE_DELETE(path_ptr, path_len) -> 0`
 - `13` `SYS_DIR_LIST(path_ptr, path_len, buf_ptr, buf_len) -> n`
+- `14` `SYS_FILE_WRITE(path_ptr, path_len, data_ptr, data_len) -> 0`
+  - 指定パスにファイルを作成/上書きする
+  - 既にファイルが存在する場合は削除してから作成する
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+- `15` `SYS_DIR_CREATE(path_ptr, path_len) -> 0`
+  - 指定パスにディレクトリを作成する
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+- `16` `SYS_DIR_REMOVE(path_ptr, path_len) -> 0`
+  - 指定パスの空ディレクトリを削除する
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+- `17` `SYS_FS_STAT(buf_ptr, buf_len) -> n`
+  - ファイルシステムの統計情報を JSON 形式でバッファに書き込む
+  - 出力例: `{"fs":"fat32","total_bytes":...,"used_bytes":...,"free_bytes":...,"cluster_bytes":...,"total_clusters":...,"free_clusters":...}`
 
 ## システム情報 (20-29)
 
