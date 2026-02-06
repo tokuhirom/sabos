@@ -83,6 +83,32 @@ const TASKBAR_PROMPT: (u8, u8, u8) = (120, 180, 255);     // プロンプトの�
 const TASKBAR_CURSOR: (u8, u8, u8) = (255, 255, 255);     // カーソルの色
 const TASKBAR_MAX_INPUT: usize = 64;                       // 入力文字数の上限
 
+/// ネイティブピクセルフォーマットが BGR かどうか。
+/// QEMU + OVMF では BGR が一般的。init_state() で設定される。
+/// GUI プロセスはシングルスレッドなので static mut で問題ない。
+static mut NATIVE_BGR: bool = false;
+
+/// ネイティブピクセルフォーマットでバッファにピクセルを書き込む。
+///
+/// カーネルのフレームバッファが BGR の場合、R と B を入れ替えて書き込む。
+/// これにより、draw_blit syscall でカーネル側のフォーマット変換が不要になり、
+/// 行単位の memcpy で済むようになる（78万回の変換 → 768回の memcpy）。
+#[inline(always)]
+fn write_pixel(buf: &mut [u8], offset: usize, r: u8, g: u8, b: u8) {
+    unsafe {
+        if NATIVE_BGR {
+            buf[offset] = b;
+            buf[offset + 1] = g;
+            buf[offset + 2] = r;
+        } else {
+            buf[offset] = r;
+            buf[offset + 1] = g;
+            buf[offset + 2] = b;
+        }
+    }
+    buf[offset + 3] = 0;
+}
+
 struct GuiState {
     width: u32,
     height: u32,
@@ -610,6 +636,13 @@ fn init_state() -> Result<GuiState, &'static str> {
 
     let width = info.width;
     let height = info.height;
+
+    // フレームバッファのピクセルフォーマットを取得して static に保存。
+    // pixel_format == 2 は BGR（QEMU + OVMF の一般的な値）。
+    // これにより write_pixel がネイティブフォーマットで書き込むようになり、
+    // カーネル側の draw_blit で行単位 memcpy が使える。
+    unsafe { NATIVE_BGR = info.pixel_format == 2; }
+
     let pixel_count = width as usize * height as usize;
     let mut buf = Vec::with_capacity(pixel_count * 4);
     buf.resize(pixel_count * 4, 0);
@@ -620,10 +653,7 @@ fn init_state() -> Result<GuiState, &'static str> {
 fn clear(state: &mut GuiState, r: u8, g: u8, b: u8) {
     let mut i = 0;
     while i + 3 < state.buf.len() {
-        state.buf[i] = r;
-        state.buf[i + 1] = g;
-        state.buf[i + 2] = b;
-        state.buf[i + 3] = 0;
+        write_pixel(&mut state.buf, i, r, g, b);
         i += 4;
     }
 }
@@ -693,10 +723,7 @@ fn set_pixel(state: &mut GuiState, x: u32, y: u32, r: u8, g: u8, b: u8) -> Resul
     if idx + 3 >= state.buf.len() {
         return Err(());
     }
-    state.buf[idx] = r;
-    state.buf[idx + 1] = g;
-    state.buf[idx + 2] = b;
-    state.buf[idx + 3] = 0;
+    write_pixel(&mut state.buf, idx, r, g, b);
     Ok(())
 }
 
@@ -1254,10 +1281,7 @@ fn fill_buf(buf: &mut [u8], w: u32, h: u32, r: u8, g: u8, b: u8) {
     let mut i = 0;
     let total = (w as usize).saturating_mul(h as usize).saturating_mul(4);
     while i + 3 < total {
-        buf[i] = r;
-        buf[i + 1] = g;
-        buf[i + 2] = b;
-        buf[i + 3] = 0;
+        write_pixel(buf, i, r, g, b);
         i += 4;
     }
 }
@@ -1342,10 +1366,7 @@ fn draw_rect_buf(
         for xx in x..max_x {
             let idx = row_offset + (xx * 4) as usize;
             if idx + 3 < buf.len() {
-                buf[idx] = r;
-                buf[idx + 1] = g;
-                buf[idx + 2] = b;
-                buf[idx + 3] = 0;
+                write_pixel(buf, idx, r, g, b);
             }
         }
     }
@@ -1416,10 +1437,7 @@ fn draw_char_buf(
                 continue;
             }
             let (r, g, b) = if on { fg } else { bg };
-            buf[idx] = r;
-            buf[idx + 1] = g;
-            buf[idx + 2] = b;
-            buf[idx + 3] = 0;
+            write_pixel(buf, idx, r, g, b);
         }
     }
 }

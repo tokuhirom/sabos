@@ -159,11 +159,23 @@ pub fn draw_rect_global(
             return Err(DrawError::OutOfBounds);
         }
 
-        // バックバッファに矩形を描画してから、その領域だけ MMIO に転送
-        for yy in y..end_y {
-            for xx in x..end_x {
-                writer.put_pixel(xx, yy, r, g, b);
-            }
+        // バックバッファに矩形を描画してから、その領域だけ MMIO に転送。
+        // 行テンプレートを作って行ごとに copy_within することで put_pixel ループより高速。
+        let pixel = writer.make_pixel(r, g, b);
+        let bpp = 4;
+        let row_bytes = w * bpp;
+
+        // 最初の行をテンプレートとして作成
+        let first_row_offset = (y * writer.stride + x) * bpp;
+        for xx in 0..w {
+            let offset = first_row_offset + xx * bpp;
+            writer.backbuf[offset..offset + bpp].copy_from_slice(&pixel);
+        }
+
+        // 残りの行は最初の行を copy_within でコピー（同じ色パターンなので行コピーで済む）
+        for yy in (y + 1)..end_y {
+            let dst = (yy * writer.stride + x) * bpp;
+            writer.backbuf.copy_within(first_row_offset..first_row_offset + row_bytes, dst);
         }
         writer.flush_rect(x, y, w, h);
         Ok(())
@@ -259,20 +271,17 @@ pub fn draw_blit_global(
             return Err(DrawError::InvalidSize);
         }
 
-        // バックバッファに直接書き込む（put_pixel を使わずオフセット計算を行ごとに最適化）。
-        // 境界チェックは上で済んでいるので、ここでは不要。
-        let mut idx = 0;
+        // ユーザー空間のバッファはネイティブピクセルフォーマット（BGR/RGB）で
+        // 書き込み済みなので、ピクセル単位のフォーマット変換は不要。
+        // 行単位の memcpy でバックバッファにコピーする。
+        // これにより 78万回のピクセル変換 → 768回の行コピーに削減される。
+        let row_bytes = w * 4;
+        let mut src_offset = 0;
         for yy in y..end_y {
-            let row_offset = (yy * writer.stride + x) * 4;
-            for xx in 0..w {
-                let r = buf[idx];
-                let g = buf[idx + 1];
-                let b = buf[idx + 2];
-                let pixel = writer.make_pixel(r, g, b);
-                let offset = row_offset + xx * 4;
-                writer.backbuf[offset..offset + 4].copy_from_slice(&pixel);
-                idx += 4;
-            }
+            let dst_offset = (yy * writer.stride + x) * 4;
+            writer.backbuf[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&buf[src_offset..src_offset + row_bytes]);
+            src_offset += row_bytes;
         }
 
         // 変更された矩形領域だけを MMIO に転送（全画面 flush より高速）
@@ -337,10 +346,23 @@ pub fn _print(args: fmt::Arguments) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         // フレームバッファに出力
         if let Some(writer) = WRITER.lock().as_mut() {
+            // テキスト描画前のカーソル位置を記録。
+            // スクロールが発生しなければ、変更された行だけ flush して高速化する。
+            let y_before = writer.cursor_y;
+
             writer.write_fmt(args).unwrap();
-            // バックバッファの変更を MMIO に転送して画面に反映する。
-            // write_fmt 完了後に一括 flush するので、文字列全体が一度に表示される。
-            writer.flush();
+
+            // スクロール発生チェック: スクロールするとカーソル Y が巻き戻るので
+            // y_after < y_before になる。その場合は全画面 flush が必要。
+            let y_after = writer.cursor_y;
+            if y_after < y_before {
+                // スクロールが発生した → 全画面 flush
+                writer.flush();
+            } else {
+                // スクロールなし → 変更された行だけ flush（高速）
+                let flush_h = y_after + CHAR_HEIGHT - y_before;
+                writer.flush_rect(0, y_before, writer.width, flush_h);
+            }
         }
         // シリアルにも出力（デュアル出力）
         // Exit Boot Services 後のデバッグに便利。
@@ -540,12 +562,30 @@ impl FramebufferWriter {
     /// バックバッファの指定矩形領域だけを MMIO に転送する。
     ///
     /// 画面の一部だけが変更された場合、全画面 flush() より高速。
-    /// 例: draw_blit で特定ウィンドウだけ更新する場合。
+    /// 全幅かつ stride == width の場合は 1 回の連続コピーで転送する最適化つき。
     fn flush_rect(&self, x: usize, y: usize, w: usize, h: usize) {
         let bpp = 4usize;
         let end_y = (y + h).min(self.height);
-        let end_x = (x + w).min(self.width);
-        let row_bytes = (end_x - x) * bpp;
+        let actual_w = w.min(self.width.saturating_sub(x));
+
+        // 全幅コピーかつ stride == width の場合: メモリが連続しているので 1 回の memcpy
+        if x == 0 && actual_w == self.width && self.stride == self.width {
+            let start = y * self.width * bpp;
+            let len = ((end_y - y) * self.width * bpp).min(self.fb_size.saturating_sub(start));
+            if len > 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        self.backbuf.as_ptr().add(start),
+                        self.fb_ptr.add(start),
+                        len,
+                    );
+                }
+            }
+            return;
+        }
+
+        // 部分的な幅の場合: 行ごとにコピー
+        let row_bytes = actual_w * bpp;
         for row in y..end_y {
             let start = (row * self.stride + x) * bpp;
             if start + row_bytes > self.fb_size {
