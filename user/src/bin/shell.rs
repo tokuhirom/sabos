@@ -29,6 +29,7 @@
 // - http <host[:port]> [path]: HTTP GET リクエスト（localhost 対応）
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
 // - grep [-i] [-v] [-c] PATTERN [FILE]: パターンに一致する行を出力
+// - top: リアルタイムシステムモニター（ps + mem を定期更新）
 // - nc <host> <port>: TCP接続（netcat クライアントモード）
 // - nc -l <port>: TCP待ち受け（netcat サーバーモード）
 // - パイプ（|）: echo/cat/sed/grep の簡易パイプライン
@@ -227,6 +228,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "df" => cmd_df(),
         "mem" => cmd_mem(),
         "ps" => cmd_ps(),
+        "top" => cmd_top(),
         "ip" => cmd_ip(),
         "lspci" => cmd_lspci(),
         "run" => cmd_run(args, state),
@@ -460,6 +462,7 @@ fn cmd_help() {
     syscall::write_str("  df                - Show filesystem usage (JSON)\n");
     syscall::write_str("  mem               - Show memory information\n");
     syscall::write_str("  ps                - Show task list\n");
+    syscall::write_str("  top               - System monitor (real-time ps + mem)\n");
     syscall::write_str("  ip                - Show network information\n");
     syscall::write_str("  lspci             - List PCI devices\n");
     syscall::write_str("  run <file>        - Run ELF program (foreground)\n");
@@ -1240,6 +1243,157 @@ fn cmd_ps() {
     }
 
     // 結果を表示（JSON 形式をテーブル形式に変換）
+    let len = result as usize;
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        // ヘッダを表示
+        syscall::write_str("  ID  STATE       TYPE    NAME\n");
+        syscall::write_str("  --  ----------  ------  ----------\n");
+
+        let Some((tasks_start, tasks_end)) = json::json_find_array_bounds(s, "tasks") else {
+            return;
+        };
+
+        let mut i = tasks_start;
+        while i < tasks_end {
+            // 次のオブジェクト開始を探す
+            let bytes = s.as_bytes();
+            while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
+                i += 1;
+            }
+            if i >= tasks_end || bytes[i] == b']' {
+                break;
+            }
+
+            let Some(obj_end) = json::find_matching_brace(s, i) else {
+                break;
+            };
+            if obj_end > tasks_end {
+                break;
+            }
+
+            let obj = &s[i + 1..obj_end];
+            let id = json::json_find_u64(obj, "id");
+            let state = json::json_find_str(obj, "state");
+            let ty = json::json_find_str(obj, "type");
+            let name = json::json_find_str(obj, "name");
+
+            if let (Some(id), Some(state), Some(ty), Some(name)) = (id, state, ty, name) {
+                syscall::write_str("  ");
+                write_number(id);
+                syscall::write_str("  ");
+                write_padded(state, 10);
+                syscall::write_str("  ");
+                write_padded(ty, 6);
+                syscall::write_str("  ");
+                syscall::write_str(name);
+                syscall::write_str("\n");
+            }
+
+            i = obj_end + 1;
+        }
+    }
+}
+
+/// top コマンド: リアルタイムシステムモニター
+///
+/// タスク一覧とメモリ情報を1秒間隔でリフレッシュ表示する。
+/// 'q' / 'Q' / ESC キーで終了。
+/// nc コマンドと同じく console_grab + key_read のポーリングパターンを使う。
+fn cmd_top() {
+    // キーボードフォーカスを取得（GUI 環境で top がキーを読めるように）
+    syscall::console_grab(true);
+
+    loop {
+        // 画面クリアしてヘッダを表示
+        syscall::clear_screen();
+        syscall::write_str("SABOS top - press 'q' to quit\n");
+        syscall::write_str("================================================\n");
+
+        // メモリ情報を1行サマリーで表示
+        top_display_mem();
+
+        syscall::write_str("\n");
+
+        // タスク一覧をテーブル形式で表示
+        top_display_tasks();
+
+        // 1秒のポーリング: 100ms × 10回、毎回 key_read で終了キーをチェック
+        let mut quit = false;
+        for _ in 0..10 {
+            let mut key_buf = [0u8; 16];
+            let key_n = syscall::key_read(&mut key_buf);
+            if key_n > 0 {
+                for j in 0..(key_n as usize) {
+                    if key_buf[j] == b'q' || key_buf[j] == b'Q' || key_buf[j] == 0x1b {
+                        quit = true;
+                        break;
+                    }
+                }
+            }
+            if quit {
+                break;
+            }
+            syscall::sleep(100);
+        }
+        if quit {
+            break;
+        }
+    }
+
+    syscall::console_grab(false);
+}
+
+/// top 用: メモリ情報を1行サマリーで表示
+///
+/// "Memory: {total} total / {alloc} allocated / {free} free ({kib} KiB free)"
+fn top_display_mem() {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_mem_info(&mut buf);
+    if result < 0 {
+        syscall::write_str("Memory: (error)\n");
+        return;
+    }
+
+    let len = result as usize;
+    if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+        let total = json::json_find_u64(s, "total_frames");
+        let allocated = json::json_find_u64(s, "allocated_frames");
+        let free = json::json_find_u64(s, "free_frames");
+        let free_kib = json::json_find_u64(s, "free_kib");
+
+        syscall::write_str("Memory: ");
+        if let Some(v) = total {
+            write_number(v);
+            syscall::write_str(" total / ");
+        }
+        if let Some(v) = allocated {
+            write_number(v);
+            syscall::write_str(" allocated / ");
+        }
+        if let Some(v) = free {
+            write_number(v);
+            syscall::write_str(" free");
+        }
+        if let Some(v) = free_kib {
+            syscall::write_str(" (");
+            write_number(v);
+            syscall::write_str(" KiB free)");
+        }
+        syscall::write_str("\n");
+    }
+}
+
+/// top 用: タスク一覧をテーブル形式で表示
+///
+/// cmd_ps() と同じパースロジックでテーブルを出力する。
+fn top_display_tasks() {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_task_list(&mut buf);
+    if result < 0 {
+        syscall::write_str("Tasks: (error)\n");
+        return;
+    }
+
     let len = result as usize;
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
         // ヘッダを表示
