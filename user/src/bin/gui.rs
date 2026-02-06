@@ -109,10 +109,54 @@ fn write_pixel(buf: &mut [u8], offset: usize, r: u8, g: u8, b: u8) {
     buf[offset + 3] = 0;
 }
 
+/// バックバッファの変更領域を追跡する dirty rectangle。
+/// カーネルの framebuffer.rs と同じパターン。
+/// present() で dirty 領域だけ draw_blit することで全画面転送を避ける。
+struct DirtyRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    dirty: bool,
+}
+
+impl DirtyRect {
+    fn new() -> Self {
+        Self { x: 0, y: 0, w: 0, h: 0, dirty: false }
+    }
+
+    /// 変更領域を追加する。既存の dirty 領域と bounding box で合成する。
+    fn mark(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        if !self.dirty {
+            self.x = x;
+            self.y = y;
+            self.w = w;
+            self.h = h;
+            self.dirty = true;
+        } else {
+            let x2 = (self.x + self.w).max(x + w);
+            let y2 = (self.y + self.h).max(y + h);
+            self.x = self.x.min(x);
+            self.y = self.y.min(y);
+            self.w = x2 - self.x;
+            self.h = y2 - self.y;
+        }
+    }
+
+    /// dirty 状態をリセットする。present() 後に呼ぶ。
+    fn reset(&mut self) {
+        self.dirty = false;
+    }
+}
+
 struct GuiState {
     width: u32,
     height: u32,
     buf: Vec<u8>,
+    dirty: DirtyRect,
 }
 
 struct CursorState {
@@ -352,7 +396,7 @@ fn gui_loop() -> ! {
                     }
                 }
                 OPCODE_PRESENT => {
-                    if present(&state).is_err() {
+                    if present(&mut state).is_err() {
                         status = -99;
                     } else if cursor.visible {
                         redraw_cursor(&state, &mut cursor);
@@ -420,7 +464,7 @@ fn gui_loop() -> ! {
                         if hud_enabled {
                             let _ = wm.present_all(&mut state, &taskbar);
                             let _ = draw_hud(&mut state);
-                            if present(&state).is_err() {
+                            if present(&mut state).is_err() {
                                 status = -99;
                             } else if cursor.visible {
                                 redraw_cursor(&state, &mut cursor);
@@ -621,7 +665,7 @@ fn gui_loop() -> ! {
                 hud_tick = 0;
                 let _ = wm.present_all(&mut state, &taskbar);
                 let _ = draw_hud(&mut state);
-                if present(&state).is_ok() && cursor.visible {
+                if present(&mut state).is_ok() && cursor.visible {
                     redraw_cursor(&state, &mut cursor);
                 }
             }
@@ -657,7 +701,7 @@ fn init_state() -> Result<GuiState, &'static str> {
     let mut buf = Vec::with_capacity(pixel_count * 4);
     buf.resize(pixel_count * 4, 0);
 
-    Ok(GuiState { width, height, buf })
+    Ok(GuiState { width, height, buf, dirty: DirtyRect::new() })
 }
 
 fn clear(state: &mut GuiState, r: u8, g: u8, b: u8) {
@@ -666,6 +710,7 @@ fn clear(state: &mut GuiState, r: u8, g: u8, b: u8) {
         write_pixel(&mut state.buf, i, r, g, b);
         i += 4;
     }
+    state.dirty.mark(0, 0, state.width, state.height);
 }
 
 fn draw_rect(state: &mut GuiState, x: u32, y: u32, w: u32, h: u32, r: u8, g: u8, b: u8) -> Result<(), ()> {
@@ -686,6 +731,7 @@ fn draw_rect(state: &mut GuiState, x: u32, y: u32, w: u32, h: u32, r: u8, g: u8,
             set_pixel(state, xx, yy, r, g, b)?;
         }
     }
+    state.dirty.mark(x, y, w, h);
     Ok(())
 }
 
@@ -693,6 +739,13 @@ fn draw_line(state: &mut GuiState, x0: u32, y0: u32, x1: u32, y1: u32, r: u8, g:
     if x0 >= state.width || y0 >= state.height || x1 >= state.width || y1 >= state.height {
         return Err(());
     }
+
+    // dirty 領域: ラインの bounding box
+    let min_x = x0.min(x1);
+    let min_y = y0.min(y1);
+    let max_x = x0.max(x1);
+    let max_y = y0.max(y1);
+    state.dirty.mark(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
 
     let mut x0 = x0 as i32;
     let mut y0 = y0 as i32;
@@ -759,6 +812,9 @@ fn draw_circle(
     if r > cx || r > cy {
         return Err(());
     }
+
+    // dirty 領域: 円の bounding box
+    state.dirty.mark(cx - r, cy - r, r * 2 + 1, r * 2 + 1);
 
     let mut x = r as i32;
     let mut y = 0i32;
@@ -866,6 +922,11 @@ fn draw_text(
         cursor_x = cursor_x.checked_add(char_w + spacing).ok_or(())?;
     }
 
+    // dirty 領域: テキスト描画範囲の bounding box
+    let dirty_w = (cursor_x + char_w).min(state.width) - x;
+    let dirty_h = (cursor_y + char_h).min(state.height) - y;
+    state.dirty.mark(x, y, dirty_w, dirty_h);
+
     Ok(())
 }
 
@@ -903,10 +964,45 @@ fn redraw_cursor(state: &GuiState, cursor: &mut CursorState) {
     let _ = draw_cursor(state, cursor, cx, cy, cb);
 }
 
-fn present(state: &GuiState) -> Result<(), ()> {
-    if syscall::draw_blit(0, 0, state.width, state.height, &state.buf) < 0 {
-        return Err(());
+/// バックバッファをフレームバッファに転送する。
+/// dirty 領域がある場合はその矩形だけを draw_blit で転送する。
+/// dirty でない場合は何もしない（描画不要）。
+fn present(state: &mut GuiState) -> Result<(), ()> {
+    if !state.dirty.dirty {
+        return Ok(());
     }
+    // dirty 領域を画面サイズにクリップ
+    let dx = state.dirty.x.min(state.width);
+    let dy = state.dirty.y.min(state.height);
+    let dw = state.dirty.w.min(state.width - dx);
+    let dh = state.dirty.h.min(state.height - dy);
+    if dw == 0 || dh == 0 {
+        state.dirty.reset();
+        return Ok(());
+    }
+
+    if dx == 0 && dy == 0 && dw == state.width && dh == state.height {
+        // 全画面 dirty の場合はバッファ全体を一括転送
+        if syscall::draw_blit(0, 0, state.width, state.height, &state.buf) < 0 {
+            return Err(());
+        }
+    } else {
+        // dirty 領域だけを一時バッファにコピーして転送
+        let row_bytes = (dw * 4) as usize;
+        let tmp_size = row_bytes * dh as usize;
+        let mut tmp = Vec::with_capacity(tmp_size);
+        tmp.resize(tmp_size, 0);
+        for row in 0..dh {
+            let src_offset = (((dy + row) * state.width + dx) * 4) as usize;
+            let dst_offset = row as usize * row_bytes;
+            tmp[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&state.buf[src_offset..src_offset + row_bytes]);
+        }
+        if syscall::draw_blit(dx, dy, dw, dh, &tmp) < 0 {
+            return Err(());
+        }
+    }
+    state.dirty.reset();
     Ok(())
 }
 
@@ -1300,6 +1396,7 @@ fn draw_close_pixel(state: &mut GuiState, x: i32, y: i32, color: (u8, u8, u8)) {
 
 fn clear_screen(state: &mut GuiState, r: u8, g: u8, b: u8) {
     fill_buf(&mut state.buf, state.width, state.height, r, g, b);
+    state.dirty.mark(0, 0, state.width, state.height);
 }
 
 fn fill_buf(buf: &mut [u8], w: u32, h: u32, r: u8, g: u8, b: u8) {
@@ -1367,6 +1464,7 @@ fn blit_window_content(state: &mut GuiState, win: &Window) {
                 .copy_from_slice(&win.buf[src_offset..src_offset + len]);
         }
     }
+    state.dirty.mark(cx, cy, w, h);
 }
 
 fn draw_rect_buf(
