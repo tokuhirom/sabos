@@ -1284,11 +1284,64 @@ pub unsafe fn switch_to_kernel_page_table() {
 ///
 /// # 戻り値
 /// 確保した物理フレームのリスト。先頭が virt_start に対応し、以降は連続ページ。
+/// ELF セグメントのフラグ（p_flags）からページテーブルフラグに変換する（W^X 適用）
+///
+/// W^X (Write XOR Execute) のルール:
+/// - 実行可能セグメント（PF_X）→ WRITABLE なし・NO_EXECUTE なし
+/// - 書き込み可能セグメント（PF_W）→ WRITABLE あり・NO_EXECUTE あり
+/// - 読み取り専用セグメント → WRITABLE なし・NO_EXECUTE あり
+///
+/// ここでいう NX ビット（No-Execute）は、x86_64 のページテーブルエントリの
+/// 最上位ビットで、セットすると「このページのコードは実行できない」という意味になる。
+/// W^X と組み合わせることで、書き込み可能なページからコードを実行する攻撃を防ぐ。
+pub fn elf_flags_to_page_flags(elf_flags: u32) -> PageTableFlags {
+    const PF_X: u32 = 1; // 実行可能
+    const PF_W: u32 = 2; // 書き込み可能
+
+    let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+
+    // 書き込み可能セグメントなら WRITABLE を設定
+    if (elf_flags & PF_W) != 0 {
+        flags |= PageTableFlags::WRITABLE;
+    }
+
+    // 実行不可のセグメントなら NO_EXECUTE（NX ビット）を設定
+    if (elf_flags & PF_X) == 0 {
+        flags |= PageTableFlags::NO_EXECUTE;
+    }
+
+    flags
+}
+
+/// 同一ページを共有する複数セグメントのページフラグをマージする。
+///
+/// W^X の理想は「書き込み可能なページは実行不可、実行可能なページは書き込み不可」だが、
+/// リンカがセグメントを 4KiB 境界にアラインしない場合、同一ページに異なる権限の
+/// セグメントが含まれることがある。この場合、より広い権限（union）を適用する。
+/// - WRITABLE: どちらか一方でも W なら書き込み可能にする
+/// - NO_EXECUTE: 両方とも NX なら NX を維持、一方でも実行可能なら NX を外す
+fn merge_page_flags(existing: PageTableFlags, new: PageTableFlags) -> PageTableFlags {
+    let mut merged = existing;
+
+    // WRITABLE: 新しいセグメントが書き込み可能なら追加
+    if new.contains(PageTableFlags::WRITABLE) {
+        merged |= PageTableFlags::WRITABLE;
+    }
+
+    // NO_EXECUTE: 新しいセグメントが実行可能（NX なし）なら NX を外す
+    if !new.contains(PageTableFlags::NO_EXECUTE) {
+        merged.remove(PageTableFlags::NO_EXECUTE);
+    }
+
+    merged
+}
+
 pub fn map_user_pages_in_process(
     process_l4_frame: PhysFrame<Size4KiB>,
     virt_start: VirtAddr,
     size: usize,
     previously_allocated: &[PhysFrame<Size4KiB>],
+    elf_flags: u32,
 ) -> alloc::vec::Vec<PhysFrame<Size4KiB>> {
     if size == 0 {
         return alloc::vec::Vec::new();
@@ -1302,10 +1355,15 @@ pub fn map_user_pages_in_process(
 
     let mut allocated_frames = alloc::vec::Vec::with_capacity(page_count);
 
-    // ページテーブル操作に使うフラグ
-    let user_flags = PageTableFlags::PRESENT
+    // L4/L3/L2 の中間テーブルは常に WRITABLE + USER_ACCESSIBLE にする。
+    // 中間テーブルは「通過するためのエントリ」なので制限しない。
+    // W^X の制限は L1 エントリ（リーフ）にだけ適用する。
+    let intermediate_flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
         | PageTableFlags::USER_ACCESSIBLE;
+
+    // L1 エントリ用のフラグ（W^X 適用済み）
+    let leaf_flags = elf_flags_to_page_flags(elf_flags);
 
     // カーネルの L4 テーブル（分岐コピーの判定に使う）
     let kernel_l4: &PageTable = unsafe {
@@ -1328,16 +1386,16 @@ pub fn map_user_pages_in_process(
         if l4_entry.is_unused() {
             // L4 エントリが空 → 新しい L3 テーブルを作成
             let new_l3_frame = alloc_zeroed_frame();
-            l4_entry.set_addr(new_l3_frame.start_address(), user_flags);
+            l4_entry.set_addr(new_l3_frame.start_address(), intermediate_flags);
         } else {
             // カーネルと同じ L3 を指していたら分岐コピー
             if !kernel_l4[l4_idx].is_unused()
                 && l4_entry.addr() == kernel_l4[l4_idx].addr()
             {
                 let new_l3_frame = fork_page_table(l4_entry.addr());
-                l4_entry.set_addr(new_l3_frame.start_address(), l4_entry.flags() | user_flags);
+                l4_entry.set_addr(new_l3_frame.start_address(), l4_entry.flags() | intermediate_flags);
             } else {
-                l4_entry.set_flags(l4_entry.flags() | user_flags);
+                l4_entry.set_flags(l4_entry.flags() | intermediate_flags);
             }
         }
 
@@ -1349,7 +1407,7 @@ pub fn map_user_pages_in_process(
         let l3_entry = &mut l3_table[l3_idx];
         if l3_entry.is_unused() {
             let new_l2_frame = alloc_zeroed_frame();
-            l3_entry.set_addr(new_l2_frame.start_address(), user_flags);
+            l3_entry.set_addr(new_l2_frame.start_address(), intermediate_flags);
         } else {
             // カーネルの L3 テーブルから対応する L2 アドレスを取得して分岐判定
             let kernel_l2_addr = get_kernel_subtable_addr(kernel_l4, l4_idx, l3_idx, None);
@@ -1361,12 +1419,12 @@ pub fn map_user_pages_in_process(
                         panic!("map_user_pages_in_process: 1GiB 巨大ページの分割は未対応");
                     }
                     let new_l2_frame = fork_page_table(l3_entry.addr());
-                    l3_entry.set_addr(new_l2_frame.start_address(), l3_entry.flags() | user_flags);
+                    l3_entry.set_addr(new_l2_frame.start_address(), l3_entry.flags() | intermediate_flags);
                 } else {
-                    l3_entry.set_flags(l3_entry.flags() | user_flags);
+                    l3_entry.set_flags(l3_entry.flags() | intermediate_flags);
                 }
             } else {
-                l3_entry.set_flags(l3_entry.flags() | user_flags);
+                l3_entry.set_flags(l3_entry.flags() | intermediate_flags);
             }
         }
 
@@ -1384,7 +1442,7 @@ pub fn map_user_pages_in_process(
         let l2_entry = &mut l2_table[l2_idx];
         if l2_entry.is_unused() {
             let new_l1_frame = alloc_zeroed_frame();
-            l2_entry.set_addr(new_l1_frame.start_address(), user_flags);
+            l2_entry.set_addr(new_l1_frame.start_address(), intermediate_flags);
         } else {
             // 2MiB 巨大ページの場合は 4KiB に分割する
             if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
@@ -1396,12 +1454,12 @@ pub fn map_user_pages_in_process(
             if let Some(k_addr) = kernel_l1_addr {
                 if l2_entry.addr() == k_addr {
                     let new_l1_frame = fork_page_table(l2_entry.addr());
-                    l2_entry.set_addr(new_l1_frame.start_address(), l2_entry.flags() | user_flags);
+                    l2_entry.set_addr(new_l1_frame.start_address(), l2_entry.flags() | intermediate_flags);
                 } else {
-                    l2_entry.set_flags(l2_entry.flags() | user_flags);
+                    l2_entry.set_flags(l2_entry.flags() | intermediate_flags);
                 }
             } else {
-                l2_entry.set_flags(l2_entry.flags() | user_flags);
+                l2_entry.set_flags(l2_entry.flags() | intermediate_flags);
             }
         }
 
@@ -1424,7 +1482,15 @@ pub fn map_user_pages_in_process(
             let is_our_frame = allocated_frames.iter().any(|f: &PhysFrame<Size4KiB>| f.start_address() == existing_phys)
                 || previously_allocated.iter().any(|f| f.start_address() == existing_phys);
             if is_our_frame {
-                // 前のセグメントで確保済み → そのまま返す
+                // 前のセグメントで確保済み → フレームは再利用するが、
+                // フラグはマージする（W^X: 複数セグメントが同一ページを共有する場合、
+                // より広い権限を適用する必要がある。例: rodata(R) と data(RW) が
+                // 同じ 4KiB ページにまたがる場合、そのページは RW にする）
+                let existing_flags = l1_entry.flags();
+                let merged_flags = merge_page_flags(existing_flags, leaf_flags);
+                if merged_flags != existing_flags {
+                    l1_entry.set_flags(merged_flags);
+                }
                 let existing_frame = PhysFrame::<Size4KiB>::containing_address(existing_phys);
                 allocated_frames.push(existing_frame);
                 addr += 4096;
@@ -1446,7 +1512,7 @@ pub fn map_user_pages_in_process(
             core::ptr::write_bytes(ptr, 0, 4096);
         }
 
-        l1_entry.set_addr(data_frame.start_address(), user_flags);
+        l1_entry.set_addr(data_frame.start_address(), leaf_flags);
         allocated_frames.push(data_frame);
 
         addr += 4096;

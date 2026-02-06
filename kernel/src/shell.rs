@@ -1387,6 +1387,7 @@ impl Shell {
             VirtAddr::new(test_vaddr),
             4096 * 2,
             &[],
+            4 | 2, // PF_R | PF_W（テスト用: 読み書き可能・実行不可）
         );
         if frames.len() != 2 {
             paging::destroy_process_page_table(l4);

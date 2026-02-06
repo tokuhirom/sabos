@@ -499,6 +499,7 @@ pub fn create_elf_process(
             VirtAddr::new(seg.vaddr),
             seg.memsz as usize,
             &all_allocated_frames,
+            seg.flags, // ELF セグメントのパーミッションを渡す（W^X 適用）
         );
 
         // セグメントのファイルデータを物理フレームにコピーする。
@@ -557,11 +558,15 @@ pub fn create_elf_process(
     //    スタックは 0x2000000 (32MiB) に 16KiB 分確保する。
     //    スタックは高アドレスから低アドレスに向かって伸びるので、
     //    スタックトップは ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE。
+    // スタックは書き込み可能・実行不可（W^X: NX ビットを設定）
+    // PF_R=4, PF_W=2 → WRITABLE あり・NO_EXECUTE あり
+    const STACK_FLAGS: u32 = 4 | 2; // PF_R | PF_W（実行不可）
     let stack_frames = crate::paging::map_user_pages_in_process(
         page_table_frame,
         VirtAddr::new(ELF_USER_STACK_VADDR),
         ELF_USER_STACK_SIZE,
         &all_allocated_frames,
+        STACK_FLAGS,
     );
     // スタックフレームは新規確保なので重複の心配なし
     all_allocated_frames.extend_from_slice(&stack_frames);
