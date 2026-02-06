@@ -7,6 +7,7 @@
 // グローバルライター (WRITER) を提供して、kprint!/kprintln! マクロで
 // カーネルのどこからでも（割り込みハンドラからも）画面に出力できるようにする。
 
+use alloc::vec::Vec;
 use core::fmt;
 use font8x8::UnicodeFonts;
 use spin::Mutex;
@@ -30,6 +31,7 @@ pub static WRITER: Mutex<Option<FramebufferWriter>> = Mutex::new(None);
 pub fn init_global_writer(info: FramebufferInfo) {
     let mut writer = FramebufferWriter::from_info(info);
     writer.clear();
+    writer.flush(); // バックバッファの内容を MMIO に転送して画面に反映
     *WRITER.lock() = Some(writer);
 }
 
@@ -49,6 +51,7 @@ pub fn clear_global_screen() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         if let Some(writer) = WRITER.lock().as_mut() {
             writer.clear();
+            writer.flush();
         }
     });
 }
@@ -123,6 +126,7 @@ pub fn draw_pixel_global(x: usize, y: usize, r: u8, g: u8, b: u8) -> Result<(), 
         }
 
         writer.put_pixel(x, y, r, g, b);
+        writer.flush_rect(x, y, 1, 1);
         Ok(())
     })
 }
@@ -155,11 +159,13 @@ pub fn draw_rect_global(
             return Err(DrawError::OutOfBounds);
         }
 
+        // バックバッファに矩形を描画してから、その領域だけ MMIO に転送
         for yy in y..end_y {
             for xx in x..end_x {
                 writer.put_pixel(xx, yy, r, g, b);
             }
         }
+        writer.flush_rect(x, y, w, h);
         Ok(())
     })
 }
@@ -213,6 +219,8 @@ pub fn draw_line_global(
             }
         }
 
+        // 直線は範囲が不定なので全画面 flush
+        writer.flush();
         Ok(())
     })
 }
@@ -251,17 +259,24 @@ pub fn draw_blit_global(
             return Err(DrawError::InvalidSize);
         }
 
+        // バックバッファに直接書き込む（put_pixel を使わずオフセット計算を行ごとに最適化）。
+        // 境界チェックは上で済んでいるので、ここでは不要。
         let mut idx = 0;
         for yy in y..end_y {
-            for xx in x..end_x {
+            let row_offset = (yy * writer.stride + x) * 4;
+            for xx in 0..w {
                 let r = buf[idx];
                 let g = buf[idx + 1];
                 let b = buf[idx + 2];
-                writer.put_pixel(xx, yy, r, g, b);
+                let pixel = writer.make_pixel(r, g, b);
+                let offset = row_offset + xx * 4;
+                writer.backbuf[offset..offset + 4].copy_from_slice(&pixel);
                 idx += 4;
             }
         }
 
+        // 変更された矩形領域だけを MMIO に転送（全画面 flush より高速）
+        writer.flush_rect(x, y, w, h);
         Ok(())
     })
 }
@@ -299,6 +314,7 @@ pub fn draw_text_global(
         writer.cursor_x = old_x;
         writer.cursor_y = old_y;
 
+        writer.flush();
         Ok(())
     })
 }
@@ -322,6 +338,9 @@ pub fn _print(args: fmt::Arguments) {
         // フレームバッファに出力
         if let Some(writer) = WRITER.lock().as_mut() {
             writer.write_fmt(args).unwrap();
+            // バックバッファの変更を MMIO に転送して画面に反映する。
+            // write_fmt 完了後に一括 flush するので、文字列全体が一度に表示される。
+            writer.flush();
         }
         // シリアルにも出力（デュアル出力）
         // Exit Boot Services 後のデバッグに便利。
@@ -384,10 +403,15 @@ impl FramebufferInfo {
 /// ピクセルフォーマット (RGB/BGR) やストライド（1行あたりのピクセル数）を
 /// 考慮して正しい位置に書き込む。
 pub struct FramebufferWriter {
-    /// フレームバッファの先頭アドレス
+    /// フレームバッファの先頭アドレス（MMIO）
     fb_ptr: *mut u8,
     /// フレームバッファのバイト数
     fb_size: usize,
+    /// RAM 上のバックバッファ。
+    /// すべての描画はまずここに書き込み、flush() で MMIO に一括転送する。
+    /// MMIO への個別 write_volatile は 通常の RAM アクセスの 100〜1000 倍遅いため、
+    /// バックバッファを経由することで描画性能が劇的に向上する。
+    backbuf: Vec<u8>,
     /// 画面の幅（ピクセル）
     width: usize,
     /// 画面の高さ（ピクセル）
@@ -420,9 +444,15 @@ impl FramebufferWriter {
     /// 保存済みの FramebufferInfo から FramebufferWriter を作成する。
     /// Exit Boot Services 後にフレームバッファを使い続けるために使う。
     pub fn from_info(info: FramebufferInfo) -> Self {
+        // バックバッファを RAM 上に確保する。
+        // fb_size 分のメモリをゼロ初期化して確保。
+        // ヒープアロケータが init 済みである必要がある（main.rs の初期化順序で保証）。
+        let backbuf = alloc::vec![0u8; info.fb_size];
+
         Self {
             fb_ptr: info.fb_addr as *mut u8,
             fb_size: info.fb_size,
+            backbuf,
             width: info.width,
             height: info.height,
             stride: info.stride,
@@ -441,23 +471,37 @@ impl FramebufferWriter {
     }
 
     /// 画面全体を背景色で塗りつぶす。
+    ///
+    /// バックバッファ全体を背景色ピクセルで埋める。
+    /// put_pixel を使わず chunks_exact_mut で直接埋めることで高速化。
+    /// MMIO への転送は呼び出し元が flush() で行う。
     pub fn clear(&mut self) {
         let (r, g, b) = self.bg_color;
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.put_pixel(x, y, r, g, b);
-            }
+        let pixel = self.make_pixel(r, g, b);
+        for chunk in self.backbuf.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&pixel);
         }
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
 
-    /// 指定座標に1ピクセルを書き込む。
+    /// RGB 値をピクセルフォーマットに応じた 4 バイト配列に変換する。
+    /// RGB フォーマットなら [R, G, B, 0]、BGR なら [B, G, R, 0]。
+    #[inline(always)]
+    fn make_pixel(&self, r: u8, g: u8, b: u8) -> [u8; 4] {
+        match self.pixel_format {
+            PixelFormat::Rgb => [r, g, b, 0],
+            PixelFormat::Bgr => [b, g, r, 0],
+            _ => [r, g, b, 0], // Bitmask 等は未対応、とりあえず RGB 扱い
+        }
+    }
+
+    /// 指定座標に1ピクセルをバックバッファに書き込む。
     ///
-    /// ピクセルフォーマット (RGB/BGR) に応じてバイト順を変える。
-    /// UEFI の GOP フレームバッファは 1 ピクセル 4 バイト（32bit）。
-    /// stride はピクセル単位なので、バイトオフセットは stride * 4。
-    fn put_pixel(&self, x: usize, y: usize, r: u8, g: u8, b: u8) {
+    /// MMIO（フレームバッファ）には直接書き込まない。
+    /// バックバッファ (RAM) に書き込むことで、MMIO の遅さを回避する。
+    /// 実際の画面への反映は flush() または flush_rect() で行う。
+    fn put_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -469,20 +513,51 @@ impl FramebufferWriter {
             return;
         }
 
-        // ピクセルフォーマットに応じてバイト順を変える。
-        // RGB: [R, G, B, reserved]
-        // BGR: [B, G, R, reserved]  ← QEMU + OVMF はこっちが多い
-        let pixel: [u8; 4] = match self.pixel_format {
-            PixelFormat::Rgb => [r, g, b, 0],
-            PixelFormat::Bgr => [b, g, r, 0],
-            _ => [r, g, b, 0], // Bitmask 等は未対応、とりあえず RGB 扱い
-        };
+        let pixel = self.make_pixel(r, g, b);
+        // バックバッファ (RAM) に書き込む。
+        // 通常のメモリアクセスなので MMIO の write_volatile より桁違いに速い。
+        self.backbuf[offset..offset + 4].copy_from_slice(&pixel);
+    }
 
-        // volatile write でフレームバッファに書き込む。
-        // volatile にしないとコンパイラが最適化で書き込みを消す可能性がある。
+    /// バックバッファの内容を MMIO フレームバッファに一括転送する。
+    ///
+    /// 画面全体を転送するので、部分的な更新には flush_rect() を使う。
+    /// core::ptr::copy_nonoverlapping による一括コピーは、
+    /// ピクセルごとの write_volatile よりはるかに高速。
+    /// CPU のメモリバス幅を活かしてバースト転送できる。
+    fn flush(&self) {
+        let total_bytes = (self.height * self.stride * 4).min(self.fb_size);
+        let copy_len = total_bytes.min(self.backbuf.len());
         unsafe {
-            let ptr = self.fb_ptr.add(offset);
-            core::ptr::write_volatile(ptr as *mut [u8; 4], pixel);
+            core::ptr::copy_nonoverlapping(
+                self.backbuf.as_ptr(),
+                self.fb_ptr,
+                copy_len,
+            );
+        }
+    }
+
+    /// バックバッファの指定矩形領域だけを MMIO に転送する。
+    ///
+    /// 画面の一部だけが変更された場合、全画面 flush() より高速。
+    /// 例: draw_blit で特定ウィンドウだけ更新する場合。
+    fn flush_rect(&self, x: usize, y: usize, w: usize, h: usize) {
+        let bpp = 4usize;
+        let end_y = (y + h).min(self.height);
+        let end_x = (x + w).min(self.width);
+        let row_bytes = (end_x - x) * bpp;
+        for row in y..end_y {
+            let start = (row * self.stride + x) * bpp;
+            if start + row_bytes > self.fb_size {
+                break;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    self.backbuf.as_ptr().add(start),
+                    self.fb_ptr.add(start),
+                    row_bytes,
+                );
+            }
         }
     }
 
@@ -491,7 +566,7 @@ impl FramebufferWriter {
     /// font8x8 のグリフデータは 8 バイトの配列で、
     /// 各バイトが 1 行分（8 ピクセル）のビットパターン。
     /// ビットが 1 なら前景色、0 なら背景色を描く。
-    fn draw_char(&self, x: usize, y: usize, c: char) {
+    fn draw_char(&mut self, x: usize, y: usize, c: char) {
         // font8x8 からグリフを取得。未対応文字は '?' で代用。
         let glyph = font8x8::BASIC_FONTS
             .get(c)
@@ -521,35 +596,26 @@ impl FramebufferWriter {
     }
 
     /// 画面を1行分（CHAR_HEIGHT ピクセル）上にスクロールする。
-    /// フレームバッファの内容を上方向にコピーして、最下行を背景色で埋める。
     ///
-    /// フレームバッファは MMIO（メモリマップドI/O）なので、
-    /// 通常の RAM よりアクセスが遅い。大量のピクセルをコピーするので
-    /// 目に見えるほど遅くなる可能性がある。
-    /// 将来的にはバックバッファ（RAM 上のコピー）を使って高速化できる。
+    /// バックバッファ (RAM) 上でスクロール処理を行う。
+    /// copy_within は memmove 相当で、重なった領域も正しく処理する。
+    /// RAM 上の操作なので、以前の MMIO 上での core::ptr::copy より桁違いに速い。
+    /// MMIO への転送は呼び出し元が flush() で行う。
     fn scroll_up(&mut self) {
         let bytes_per_pixel: usize = 4;
         let row_bytes = self.stride * bytes_per_pixel;
         let scroll_bytes = CHAR_HEIGHT * row_bytes;
-        let total_bytes = self.height * row_bytes;
+        let total_bytes = (self.height * row_bytes).min(self.backbuf.len());
 
-        // フレームバッファの内容を CHAR_HEIGHT 行分上にずらす。
-        // core::ptr::copy は memmove 相当で、重なった領域も正しく処理する。
-        unsafe {
-            core::ptr::copy(
-                self.fb_ptr.add(scroll_bytes),
-                self.fb_ptr,
-                total_bytes - scroll_bytes,
-            );
-        }
+        // バックバッファ内でデータを上にずらす（RAM 上の memmove、非常に高速）
+        self.backbuf.copy_within(scroll_bytes..total_bytes, 0);
 
         // 最下行（スクロールで空いた部分）を背景色でクリア
         let (r, g, b) = self.bg_color;
-        let clear_start_y = self.height - CHAR_HEIGHT;
-        for y in clear_start_y..self.height {
-            for x in 0..self.width {
-                self.put_pixel(x, y, r, g, b);
-            }
+        let pixel = self.make_pixel(r, g, b);
+        let clear_start = total_bytes - scroll_bytes;
+        for chunk in self.backbuf[clear_start..total_bytes].chunks_exact_mut(4) {
+            chunk.copy_from_slice(&pixel);
         }
     }
 
@@ -564,7 +630,7 @@ impl FramebufferWriter {
 
     /// カーソル位置の 1 文字分を背景色で塗りつぶす。
     /// バックスペースで文字を消すときに使う。
-    fn erase_char_at_cursor(&self) {
+    fn erase_char_at_cursor(&mut self) {
         let (r, g, b) = self.bg_color;
         for row in 0..CHAR_HEIGHT {
             for col in 0..CHAR_WIDTH {
