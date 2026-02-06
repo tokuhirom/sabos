@@ -35,6 +35,7 @@ const NETD_OPCODE_TCP_ACCEPT: u32 = 7;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     httpd_main();
 }
 

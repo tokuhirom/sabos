@@ -85,6 +85,7 @@ static SERVICES: [Service; 5] = [
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     syscall::write_str("\n");
     syscall::write_str("[init] SABOS init process starting...\n");
 

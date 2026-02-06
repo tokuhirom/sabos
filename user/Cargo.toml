@@ -11,6 +11,7 @@ panic = "abort"
 
 [dependencies]
 font8x8 = { version = "0.3", default-features = false, features = ["unicode"] }
+linked_list_allocator = "0.10"
 log = { version = "0.4.29", default-features = false }
 sabos-blockdev = { path = "../libs/blockdev" }
 sabos-fat-core = { path = "../libs/fat-core" }

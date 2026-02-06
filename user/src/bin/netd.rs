@@ -35,6 +35,7 @@ const IPC_RECV_TIMEOUT_MS: u64 = 10;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     netd_loop();
 }
 

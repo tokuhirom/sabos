@@ -28,6 +28,7 @@ const FILE_BUFFER_SIZE: usize = 2048;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     tsh_main();
 }
 

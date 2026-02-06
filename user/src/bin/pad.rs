@@ -37,6 +37,7 @@ const BTN_H: u32 = 44;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     app_main();
 }
 

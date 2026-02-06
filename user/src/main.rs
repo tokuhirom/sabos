@@ -32,6 +32,7 @@ use core::panic::PanicInfo;
 /// システムコールを使ってカーネルとやり取りする。
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    allocator::init();
     // ユーザー空間シェルを起動
     shell::run();
 }
