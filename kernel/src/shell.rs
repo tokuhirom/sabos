@@ -1201,6 +1201,9 @@ impl Shell {
 
             // 11.6. exec のテスト（EXIT0.ELF を同期実行）
             run_test("exec_exit0", this.test_exec_exit0());
+
+            // 11.8. kill のテスト（自分自身の kill が拒否されること）
+            run_test("kill_self_reject", this.test_kill_self_reject());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1745,6 +1748,15 @@ impl Shell {
             return false;
         }
         true
+    }
+
+    /// kill の自己 kill 拒否テスト
+    ///
+    /// 自分自身のタスク ID を kill しようとすると拒否されることを確認する。
+    fn test_kill_self_reject(&self) -> bool {
+        let my_id = crate::scheduler::current_task_id();
+        // 自分自身の kill はエラーになるはず
+        crate::scheduler::kill_task(my_id).is_err()
     }
 
     /// Handle から EOF まで読み取る

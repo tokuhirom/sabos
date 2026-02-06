@@ -78,6 +78,7 @@ pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
 pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
+pub const SYS_KILL: u64 = 36;    // kill(task_id) — タスクを強制終了
 
 // ネットワーク (40-49)
 pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
@@ -279,6 +280,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_SLEEP => sys_sleep(arg1),
         SYS_WAIT => sys_wait(arg1, arg2),
         SYS_GETPID => sys_getpid(),
+        SYS_KILL => sys_kill(arg1),
         // ネットワーク
         SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
         SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
@@ -1579,6 +1581,28 @@ fn sys_wait(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///   現在のタスク ID（常に成功）
 fn sys_getpid() -> Result<u64, SyscallError> {
     Ok(crate::scheduler::current_task_id())
+}
+
+/// SYS_KILL: タスクを強制終了する
+///
+/// 引数:
+///   arg1 — 終了させるタスクの ID
+///
+/// 戻り値:
+///   0（成功時）
+///
+/// エラー:
+///   - InvalidArgument: 自分自身を kill しようとした、またはタスクが見つからない
+///   - PermissionDenied: 既に終了済み
+fn sys_kill(arg1: u64) -> Result<u64, SyscallError> {
+    let task_id = arg1;
+    match crate::scheduler::kill_task(task_id) {
+        Ok(()) => Ok(0),
+        Err("cannot kill self") => Err(SyscallError::InvalidArgument),
+        Err("task not found") => Err(SyscallError::InvalidArgument),
+        Err("task already finished") => Err(SyscallError::PermissionDenied),
+        Err(_) => Err(SyscallError::Other),
+    }
 }
 
 // =================================================================

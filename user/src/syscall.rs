@@ -70,6 +70,7 @@ pub const SYS_YIELD: u64 = 32;   // yield() — CPU を譲る
 pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
 pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
+pub const SYS_KILL: u64 = 36;    // kill(task_id) — タスクを強制終了
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
@@ -710,6 +711,18 @@ pub fn wait(task_id: u64, timeout_ms: u64) -> SyscallResult {
 /// 現在のタスク ID（常に成功）
 pub fn getpid() -> u64 {
     unsafe { syscall0(SYS_GETPID) }
+}
+
+/// タスクを強制終了する
+///
+/// # 引数
+/// - `task_id`: 終了させるタスクの ID
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時: 自分自身を kill、タスク不在、既に終了済み）
+pub fn kill(task_id: u64) -> SyscallResult {
+    unsafe { syscall1(SYS_KILL, task_id) as i64 }
 }
 
 // =================================================================

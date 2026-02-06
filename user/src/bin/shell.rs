@@ -23,6 +23,7 @@
 // - lspci: PCI デバイス一覧を表示
 // - run <file>: ELF プログラムをフォアグラウンドで実行
 // - spawn <file>: ELF プログラムをバックグラウンドで実行
+// - kill <task_id>: タスクを強制終了
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
 // - http <host[:port]> [path]: HTTP GET リクエスト（localhost 対応）
@@ -228,6 +229,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "lspci" => cmd_lspci(),
         "run" => cmd_run(args, state),
         "spawn" => cmd_spawn(args, state),
+        "kill" => cmd_kill(args),
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
@@ -459,6 +461,7 @@ fn cmd_help() {
     syscall::write_str("  lspci             - List PCI devices\n");
     syscall::write_str("  run <file>        - Run ELF program (foreground)\n");
     syscall::write_str("  spawn <file>      - Run ELF program (background)\n");
+    syscall::write_str("  kill <task_id>    - Kill a task by ID\n");
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host[:port]> [path] - HTTP GET request\n");
@@ -1485,6 +1488,43 @@ fn cmd_spawn(args: &str, state: &ShellState) {
     write_number(result as u64);
     syscall::write_str(" (background)\n");
     syscall::write_str("Use 'ps' to see running tasks.\n");
+}
+
+/// kill コマンド: タスクを強制終了
+///
+/// 使い方:
+///   kill <task_id>
+///
+/// ps コマンドでタスク ID を確認してから使う。
+/// 自分自身（シェル）の kill はカーネル側で拒否される。
+fn cmd_kill(args: &str) {
+    let id_str = args.trim();
+    if id_str.is_empty() {
+        syscall::write_str("Usage: kill <task_id>\n");
+        syscall::write_str("  Use 'ps' to see task IDs.\n");
+        return;
+    }
+
+    let task_id = match parse_u64(id_str) {
+        Some(id) => id,
+        None => {
+            syscall::write_str("Error: invalid task ID\n");
+            return;
+        }
+    };
+
+    let result = syscall::kill(task_id);
+    if result == 0 {
+        syscall::write_str("Task ");
+        write_number(task_id);
+        syscall::write_str(" killed.\n");
+    } else {
+        syscall::write_str("Error: failed to kill task ");
+        write_number(task_id);
+        syscall::write_str(" (error ");
+        write_number((-result) as u64);
+        syscall::write_str(")\n");
+    }
 }
 
 /// sleep コマンド: 指定ミリ秒スリープ

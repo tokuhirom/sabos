@@ -871,6 +871,49 @@ pub fn set_exit_code(exit_code: i32) {
     sched.tasks[current].exit_code = exit_code;
 }
 
+/// 指定したタスクを強制終了する（kill）
+///
+/// タスクを Finished 状態にして、ユーザープロセスのリソースをクリーンアップする。
+/// 自分自身を kill することはできない（SYS_EXIT を使うべき）。
+/// 既に Finished のタスクを kill しようとした場合もエラーになる。
+pub fn kill_task(task_id: u64) -> Result<(), &'static str> {
+    let user_process_info = {
+        let mut sched = SCHEDULER.lock();
+        let current_id = sched.tasks[sched.current].id;
+
+        // 自分自身の kill は拒否
+        if task_id == current_id {
+            return Err("cannot kill self");
+        }
+
+        // 対象タスクを探す
+        let task = sched
+            .tasks
+            .iter_mut()
+            .find(|t| t.id == task_id)
+            .ok_or("task not found")?;
+
+        // 既に終了済みのタスクは kill できない
+        if task.state == TaskState::Finished {
+            return Err("task already finished");
+        }
+
+        // タスクを終了状態にする
+        task.state = TaskState::Finished;
+        task.exit_code = -1; // 強制終了を示す
+
+        // ユーザープロセスのリソースを回収（ページテーブル等）
+        task.user_process_info.take()
+    };
+
+    // ロック外でリソースを解放する
+    if let Some(info) = user_process_info {
+        crate::usermode::destroy_user_process(info.process);
+    }
+
+    Ok(())
+}
+
 /// ユーザータスクが例外で落ちたときに強制終了させる。
 ///
 /// ページフォルトなどの例外ハンドラから呼ぶ前提で、
