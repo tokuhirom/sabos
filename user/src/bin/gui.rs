@@ -71,6 +71,16 @@ const WINDOW_CLOSE_BTN_MARGIN: u32 = 6;
 // スタック使用量の目安をログ出力するための定数（将来変わったら要更新）。
 const USER_STACK_TOP: u64 = 0x2000000 + 0x10000; // 32MiB + 64KiB
 
+// タスクバー関連の定数
+const TASKBAR_H: u32 = 28;                                // タスクバーの高さ (px)
+const TASKBAR_BG: (u8, u8, u8) = (20, 24, 40);            // タスクバーの背景色
+const TASKBAR_BORDER: (u8, u8, u8) = (60, 90, 160);       // タスクバーの下辺ボーダー色
+const TASKBAR_INPUT_BG: (u8, u8, u8) = (10, 12, 24);      // 入力フィールドの背景色
+const TASKBAR_TEXT: (u8, u8, u8) = (220, 240, 255);        // タスクバーのテキスト色
+const TASKBAR_PROMPT: (u8, u8, u8) = (120, 180, 255);     // プロンプトの色
+const TASKBAR_CURSOR: (u8, u8, u8) = (255, 255, 255);     // カーソルの色
+const TASKBAR_MAX_INPUT: usize = 64;                       // 入力文字数の上限
+
 struct GuiState {
     width: u32,
     height: u32,
@@ -101,6 +111,22 @@ struct DragState {
     id: u32,
     offset_x: i32,
     offset_y: i32,
+}
+
+/// タスクバーの状態
+///
+/// 画面最上部に表示されるタスクバー。キーボード入力でアプリ起動やシステム制御を行う。
+/// - 文字入力: 入力フィールドに文字を追加
+/// - Backspace: 末尾の文字を削除
+/// - Enter: コマンドを実行
+///   - `:shutdown` → システム停止
+///   - `:exit` → GUI を dormant モードに切り替え（シェルに戻る）
+///   - その他 → ELF パスとして spawn で起動
+struct Taskbar {
+    /// 入力中の文字列
+    input: String,
+    /// タスクバーがアクティブかどうか（dormant モードでは false）
+    active: bool,
 }
 
 struct WindowManager {
@@ -142,8 +168,95 @@ fn gui_loop() -> ! {
     let mut hud_tick: u32 = 0;
     let mut hud_tick_interval: u32 = HUD_TICK_INTERVAL_DEFAULT;
 
+    // タスクバーの初期化
+    // 起動時は dormant モード（IPC サービスとしてのみ動作）。
+    // ウィンドウが作成されたとき（OPCODE_WINDOW_CREATE を受信したとき）に
+    // アクティブモードに切り替わり、キーボードフォーカスを取得する。
+    // これにより、テスト環境ではシェルがキー入力を受け取れる。
+    let mut taskbar = Taskbar {
+        input: String::new(),
+        active: false,
+    };
+
     loop {
-        let n = syscall::ipc_recv(&mut sender, &mut buf, 16);
+        // --- キーボード入力（アクティブモードのみ） ---
+        if taskbar.active {
+            let mut key_buf = [0u8; 16];
+            let key_n = syscall::key_read(&mut key_buf);
+            if key_n > 0 {
+                let mut needs_redraw = false;
+                for i in 0..(key_n as usize) {
+                    let ch = key_buf[i] as char;
+                    match ch {
+                        '\n' => {
+                            // Enter: コマンドを実行
+                            let cmd = taskbar.input.as_str().trim();
+                            if !cmd.is_empty() {
+                                if cmd == ":shutdown" {
+                                    // システム停止
+                                    syscall::halt();
+                                } else if cmd == ":exit" {
+                                    // dormant モードに切り替え: フォーカス解放、画面クリア
+                                    taskbar.active = false;
+                                    taskbar.input.clear();
+                                    syscall::console_grab(false);
+                                    syscall::clear_screen();
+                                    let _ = syscall::write_str("[gui] entering dormant mode\n");
+                                    needs_redraw = false;
+                                    break;
+                                } else {
+                                    // ELF パスとして spawn で起動
+                                    let path = if cmd.starts_with('/') {
+                                        String::from(cmd)
+                                    } else {
+                                        format!("/{}", cmd)
+                                    };
+                                    let result = syscall::spawn(&path);
+                                    if result < 0 {
+                                        let _ = syscall::write_str(&format!(
+                                            "[gui] spawn '{}' failed: {}\n", path, result
+                                        ));
+                                    } else {
+                                        let _ = syscall::write_str(&format!(
+                                            "[gui] spawned '{}' as task {}\n", path, result
+                                        ));
+                                    }
+                                }
+                            }
+                            taskbar.input.clear();
+                            needs_redraw = true;
+                        }
+                        '\x08' => {
+                            // Backspace: 末尾の文字を削除
+                            if !taskbar.input.is_empty() {
+                                taskbar.input.pop();
+                                needs_redraw = true;
+                            }
+                        }
+                        c if c.is_ascii_graphic() || c == ' ' => {
+                            // 表示可能な文字を追加（上限チェック）
+                            if taskbar.input.len() < TASKBAR_MAX_INPUT {
+                                taskbar.input.push(c);
+                                needs_redraw = true;
+                            }
+                        }
+                        _ => {
+                            // 制御文字など無視
+                        }
+                    }
+                }
+                if needs_redraw && taskbar.active {
+                    let _ = wm.present_all(&mut state, &taskbar);
+                    if cursor.visible {
+                        let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                    }
+                }
+            }
+        }
+
+        // --- IPC メッセージ処理（dormant / active 共通） ---
+        let ipc_timeout = if taskbar.active { 16 } else { 100 };
+        let n = syscall::ipc_recv(&mut sender, &mut buf, ipc_timeout);
         if n >= 0 {
             let n = n as usize;
             if n < 8 {
@@ -266,7 +379,7 @@ fn gui_loop() -> ! {
                         }
                         hud_tick = 0;
                         if hud_enabled {
-                            let _ = wm.present_all(&mut state);
+                            let _ = wm.present_all(&mut state, &taskbar);
                             let _ = draw_hud(&mut state);
                             if present(&state).is_err() {
                                 status = -99;
@@ -306,6 +419,13 @@ fn gui_loop() -> ! {
                             "[gui] window create: rsp=0x{:x} used={} bytes\n",
                             rsp, used
                         ));
+                        // ウィンドウ作成時にアクティブモードに切り替える
+                        // （初回のウィンドウ作成でキーボードフォーカスを取得する）
+                        if !taskbar.active {
+                            taskbar.active = true;
+                            syscall::console_grab(true);
+                            let _ = syscall::write_str("[gui] activated by window create\n");
+                        }
                         let w = read_u32(payload, 0).unwrap_or(0);
                         let h = read_u32(payload, 4).unwrap_or(0);
                         let len = read_u32(payload, 8).unwrap_or(0) as usize;
@@ -404,7 +524,7 @@ fn gui_loop() -> ! {
                 OPCODE_WINDOW_PRESENT => {
                     if payload.len() == 4 {
                         let _id = read_u32(payload, 0).unwrap_or(0);
-                        if wm.present_all(&mut state).is_err() {
+                        if wm.present_all(&mut state, &taskbar).is_err() {
                             status = -99;
                         }
                     } else {
@@ -453,14 +573,14 @@ fn gui_loop() -> ! {
             _pad: [0; 3],
         };
         if syscall::mouse_read(&mut mouse_state) > 0 {
-            wm.update_mouse(&mut state, &mut cursor, &mouse_state);
+            wm.update_mouse(&mut state, &mut cursor, &mouse_state, &taskbar);
         }
 
         if hud_enabled {
             hud_tick = hud_tick.wrapping_add(1);
             if hud_tick >= hud_tick_interval {
                 hud_tick = 0;
-                let _ = wm.present_all(&mut state);
+                let _ = wm.present_all(&mut state, &taskbar);
                 let _ = draw_hud(&mut state);
                 if present(&state).is_ok() && cursor.visible {
                     let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
@@ -880,7 +1000,9 @@ impl WindowManager {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
         let x = ((state.width - w) / 2) as i32;
-        let y = ((state.height - h) / 2) as i32;
+        // タスクバー分の Y オフセットを考慮してウィンドウを配置する
+        let usable_h = state.height.saturating_sub(TASKBAR_H);
+        let y = (TASKBAR_H + (usable_h.saturating_sub(h)) / 2) as i32;
         self.windows.push(Window {
             id,
             x,
@@ -941,8 +1063,12 @@ impl WindowManager {
         draw_text_buf(&mut win.buf, win.content_w, win.content_h, x, y, fg, bg, text)
     }
 
-    fn present_all(&mut self, state: &mut GuiState) -> Result<(), ()> {
+    fn present_all(&mut self, state: &mut GuiState, taskbar: &Taskbar) -> Result<(), ()> {
         clear_screen(state, 8, 8, 16);
+        // タスクバーがアクティブなら最上部に描画する
+        if taskbar.active {
+            draw_taskbar(state, taskbar)?;
+        }
         for win in &self.windows {
             draw_window_frame(state, win);
             blit_window_content(state, win);
@@ -956,6 +1082,7 @@ impl WindowManager {
         state: &mut GuiState,
         cursor: &mut CursorState,
         mouse: &syscall::MouseState,
+        taskbar: &Taskbar,
     ) {
         let prev_buttons = self.last_mouse.buttons;
         self.last_mouse = *mouse;
@@ -1001,12 +1128,12 @@ impl WindowManager {
         }
 
         if moved {
-            let _ = self.present_all(state);
+            let _ = self.present_all(state, taskbar);
             cursor.visible = false;
         }
 
         if handled_close {
-            let _ = self.present_all(state);
+            let _ = self.present_all(state, taskbar);
             cursor.visible = false;
             self.drag = None;
         }
@@ -1397,6 +1524,46 @@ fn current_rsp() -> u64 {
         core::arch::asm!("mov {}, rsp", out(reg) rsp);
     }
     rsp
+}
+
+/// タスクバーを描画する
+///
+/// 画面最上部にタスクバーを描画する。
+/// - 背景: 暗い色
+/// - 下辺: ボーダーライン
+/// - 入力フィールド: プロンプト `> ` + 入力テキスト + カーソル
+fn draw_taskbar(state: &mut GuiState, taskbar: &Taskbar) -> Result<(), ()> {
+    // タスクバーの背景を描画
+    draw_rect(state, 0, 0, state.width, TASKBAR_H, TASKBAR_BG.0, TASKBAR_BG.1, TASKBAR_BG.2)?;
+
+    // 下辺のボーダーライン
+    draw_rect(state, 0, TASKBAR_H - 1, state.width, 1, TASKBAR_BORDER.0, TASKBAR_BORDER.1, TASKBAR_BORDER.2)?;
+
+    // 入力フィールドの背景（少し内側にマージンを取る）
+    let field_x = 4u32;
+    let field_y = 4u32;
+    let field_w = state.width.saturating_sub(8);
+    let field_h = TASKBAR_H.saturating_sub(9); // 上下マージン分を除く
+    draw_rect(state, field_x, field_y, field_w, field_h, TASKBAR_INPUT_BG.0, TASKBAR_INPUT_BG.1, TASKBAR_INPUT_BG.2)?;
+
+    // プロンプト `> ` を描画
+    let text_y = field_y + (field_h.saturating_sub(8)) / 2; // 8px フォントを縦中央に
+    let prompt = "> ";
+    draw_text(state, field_x + 4, text_y, TASKBAR_PROMPT, TASKBAR_INPUT_BG, prompt)?;
+
+    // 入力テキストを描画
+    let text_x = field_x + 4 + (prompt.len() as u32) * 9; // 9px/char (8px + 1px spacing)
+    if !taskbar.input.is_empty() {
+        draw_text(state, text_x, text_y, TASKBAR_TEXT, TASKBAR_INPUT_BG, &taskbar.input)?;
+    }
+
+    // カーソル（ブロックカーソル）を描画
+    let cursor_x = text_x + (taskbar.input.len() as u32) * 9;
+    if cursor_x + 8 <= field_x + field_w {
+        draw_rect(state, cursor_x, text_y, 8, 8, TASKBAR_CURSOR.0, TASKBAR_CURSOR.1, TASKBAR_CURSOR.2)?;
+    }
+
+    Ok(())
 }
 
 #[panic_handler]

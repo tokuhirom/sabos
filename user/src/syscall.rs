@@ -47,6 +47,8 @@ use core::arch::asm;
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — コンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面クリア
+pub const SYS_KEY_READ: u64 = 3;     // key_read(buf_ptr, len) — ノンブロッキングキー読み取り
+pub const SYS_CONSOLE_GRAB: u64 = 4; // console_grab(grab) — キーボードフォーカス取得/解放
 
 // テスト/デバッグ (10-11)
 pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を実行
@@ -368,6 +370,40 @@ pub fn write_str(s: &str) -> SyscallResult {
 /// 画面をクリアする
 pub fn clear_screen() {
     unsafe { syscall0(SYS_CLEAR_SCREEN); }
+}
+
+/// キーボード入力をノンブロッキングで読み取る
+///
+/// # 引数
+/// - `buf`: 読み取ったデータを格納するバッファ
+///
+/// # 戻り値
+/// - 読み取ったバイト数（0 = 入力なし）
+/// - 負の値（エラー時）
+///
+/// # 動作
+/// SYS_MOUSE_READ と同じパターン。入力がなければ即座に 0 を返す。
+/// キーボードフォーカスを持つタスクのみが読み取れる。
+pub fn key_read(buf: &mut [u8]) -> SyscallResult {
+    let ptr = buf.as_mut_ptr() as u64;
+    let len = buf.len() as u64;
+    unsafe { syscall2(SYS_KEY_READ, ptr, len) as i64 }
+}
+
+/// キーボードフォーカスの取得/解放
+///
+/// # 引数
+/// - `grab`: true = フォーカス取得、false = フォーカス解放
+///
+/// # 戻り値
+/// - 0（成功）
+///
+/// # 動作
+/// フォーカスを取得すると、他のタスクの SYS_READ はフォーカスが
+/// 解放されるまでブロックされる。GUI サービスなどがキーボード入力を
+/// 独占するために使う。
+pub fn console_grab(grab: bool) -> SyscallResult {
+    unsafe { syscall1(SYS_CONSOLE_GRAB, if grab { 1 } else { 0 }) as i64 }
 }
 
 // =================================================================

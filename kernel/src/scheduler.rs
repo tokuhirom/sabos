@@ -165,11 +165,14 @@ unsafe extern "C" {
 /// 現在のタスクを Finished に設定して、他のタスクに切り替える。
 #[unsafe(no_mangle)]
 extern "C" fn task_exit_handler() {
-    {
+    let task_id = {
         let mut sched = SCHEDULER.lock();
         let current = sched.current;
         sched.tasks[current].state = TaskState::Finished;
-    }
+        sched.tasks[current].id
+    };
+    // キーボードフォーカスを持っていたら自動解放する
+    crate::console::release_keyboard(task_id);
     // 他のタスクに切り替える
     yield_now();
     // ここに戻ることはないはず（Finished タスクはスケジュールされない）
@@ -906,6 +909,9 @@ pub fn kill_task(task_id: u64) -> Result<(), &'static str> {
         task.user_process_info.take()
     };
 
+    // キーボードフォーカスを持っていたら自動解放する
+    crate::console::release_keyboard(task_id);
+
     // ロック外でリソースを解放する
     if let Some(info) = user_process_info {
         crate::usermode::destroy_user_process(info.process);
@@ -920,13 +926,14 @@ pub fn kill_task(task_id: u64) -> Result<(), &'static str> {
 /// 例外が起きたタスクを Finished にし、他のタスクへ切り替える。
 /// 割り込みハンドラ内で使うため、割り込みの有効/無効は操作しない。
 pub fn abort_current_user_task_from_exception() -> ! {
-    let (switch_info, user_process_info) = {
+    let (switch_info, user_process_info, task_id) = {
         let mut sched = SCHEDULER.lock();
         let current = sched.current;
 
         // 異常終了として終了コードを設定
         sched.tasks[current].exit_code = -1;
         sched.tasks[current].state = TaskState::Finished;
+        let task_id = sched.tasks[current].id;
 
         // ユーザープロセス情報を取り出して後で解放する
         let user_process_info = sched.tasks[current].user_process_info.take();
@@ -983,8 +990,11 @@ pub fn abort_current_user_task_from_exception() -> ! {
             (old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)
         });
 
-        (switch_info, user_process_info)
+        (switch_info, user_process_info, task_id)
     };
+
+    // キーボードフォーカスを持っていたら自動解放する
+    crate::console::release_keyboard(task_id);
 
     // ユーザープロセスのリソースを解放
     if let Some(info) = user_process_info {
@@ -1063,13 +1073,17 @@ global_asm!(
 /// 現在のタスクを Finished に設定して、他のタスクに切り替える。
 #[unsafe(no_mangle)]
 extern "C" fn user_task_exit_handler() {
-    let user_process_info = {
+    let (user_process_info, task_id) = {
         let mut sched = SCHEDULER.lock();
         let current = sched.current;
         sched.tasks[current].state = TaskState::Finished;
+        let task_id = sched.tasks[current].id;
         // ユーザープロセス情報を取り出す（プロセス破棄のため）
-        sched.tasks[current].user_process_info.take()
+        (sched.tasks[current].user_process_info.take(), task_id)
     };
+
+    // キーボードフォーカスを持っていたら自動解放する
+    crate::console::release_keyboard(task_id);
 
     // ユーザープロセスのリソースを解放
     if let Some(info) = user_process_info {

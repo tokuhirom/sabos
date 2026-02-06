@@ -55,6 +55,8 @@ use x86_64::registers::control::Cr3;
 pub const SYS_READ: u64 = 0;         // read(buf_ptr, len) — コンソールから読み取り
 pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカーネルコンソールに出力
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面をクリア
+pub const SYS_KEY_READ: u64 = 3;     // key_read(buf_ptr, len) — ノンブロッキングキー読み取り
+pub const SYS_CONSOLE_GRAB: u64 = 4; // console_grab(grab) — キーボードフォーカス取得/解放
 
 // テスト/デバッグ (10-11)
 pub const SYS_SELFTEST: u64 = 10;    // selftest() — カーネル selftest を実行
@@ -261,6 +263,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_READ => sys_read(arg1, arg2),
         SYS_WRITE => sys_write(arg1, arg2),
         SYS_CLEAR_SCREEN => sys_clear_screen(),
+        SYS_KEY_READ => sys_key_read(arg1, arg2),
+        SYS_CONSOLE_GRAB => sys_console_grab(arg1),
         // テスト/デバッグ
         SYS_SELFTEST => sys_selftest(),
         // ファイルシステム
@@ -327,7 +331,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
     }
 }
 
-/// SYS_READ: コンソールから読み取り
+/// SYS_READ: コンソールから読み取り（フォーカス対応版）
 ///
 /// 引数:
 ///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
@@ -338,6 +342,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
 ///
 /// 少なくとも1バイト読み取れるまでブロックする。
 /// その後、利用可能なデータがあれば最大 len バイトまで読み取って返す。
+///
+/// キーボードフォーカスが設定されている場合、フォーカス外のタスクは
+/// フォーカスが解放されるまで yield で待機する。
 fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -352,10 +359,66 @@ fn sys_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // 可変スライスとしてアクセス（書き込み用）
     let buf = user_slice.as_mut_slice();
 
-    // コンソール入力バッファから読み取り（ブロッキング）
-    let bytes_read = crate::console::read_input(buf, len);
+    // 呼び出し元のタスク ID を取得してフォーカス対応版で読み取り
+    let caller_task_id = crate::scheduler::current_task_id();
+    let bytes_read = crate::console::read_input_for_task(buf, len, caller_task_id);
 
     Ok(bytes_read as u64)
+}
+
+/// SYS_KEY_READ: ノンブロッキングキー読み取り
+///
+/// SYS_MOUSE_READ と同じパターンで、入力がなければ 0 を返す。
+/// フォーカスを持つタスクのみがキー入力を読み取れる。
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間、書き込み先）
+///   arg2 — バッファの長さ
+///
+/// 戻り値:
+///   読み取ったバイト数（0 = 入力なし）
+fn sys_key_read(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
+    if len == 0 {
+        return Ok(0);
+    }
+
+    let user_slice = user_slice_from_args(arg1, arg2)?;
+    let buf = user_slice.as_mut_slice();
+
+    let caller_task_id = crate::scheduler::current_task_id();
+    let mut count = 0;
+
+    // ノンブロッキングで読めるだけ読む
+    while count < len {
+        if let Some(c) = crate::console::read_input_nonblocking_for_task(caller_task_id) {
+            buf[count] = if c.is_ascii() { c as u8 } else { b'?' };
+            count += 1;
+        } else {
+            break;
+        }
+    }
+
+    Ok(count as u64)
+}
+
+/// SYS_CONSOLE_GRAB: キーボードフォーカスの取得/解放
+///
+/// 引数:
+///   arg1 — 1 = フォーカス取得、0 = フォーカス解放
+///
+/// 戻り値:
+///   0（成功）
+fn sys_console_grab(arg1: u64) -> Result<u64, SyscallError> {
+    let caller_task_id = crate::scheduler::current_task_id();
+    if arg1 != 0 {
+        // フォーカス取得
+        crate::console::grab_keyboard(caller_task_id);
+    } else {
+        // フォーカス解放
+        crate::console::release_keyboard(caller_task_id);
+    }
+    Ok(0)
 }
 
 /// SYS_WRITE: コンソールに文字列を出力
