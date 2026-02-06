@@ -118,22 +118,42 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
         return;
     }
 
-    let target = if path == "/" { "/HELLO.TXT" } else { path };
+    // パスが "/" で終わるか "/" そのものならディレクトリとして扱う
+    if path == "/" || path.ends_with('/') {
+        let dir_path = if path == "/" { "/" } else { &path[..path.len() - 1] };
+        match list_directory(dir_path, path) {
+            Ok(html) => {
+                send_html_response(netd_id, conn_id, 200, "OK", &html);
+            }
+            Err(_) => {
+                send_simple_response(netd_id, conn_id, 404, "Not Found", "not found\n");
+            }
+        }
+        let _ = netd_tcp_close(netd_id, conn_id);
+        return;
+    }
 
-    let data = match read_file(target) {
+    // まずファイルとして開いてみる
+    let data = match read_file(path) {
         Ok(v) => v,
         Err(_) => {
-            send_simple_response(netd_id, conn_id, 404, "Not Found", "not found\n");
-            let _ = netd_tcp_close(netd_id, conn_id);
-            return;
+            // ファイルが見つからなければディレクトリとして試す
+            match list_directory(path, path) {
+                Ok(html) => {
+                    send_html_response(netd_id, conn_id, 200, "OK", &html);
+                    let _ = netd_tcp_close(netd_id, conn_id);
+                    return;
+                }
+                Err(_) => {
+                    send_simple_response(netd_id, conn_id, 404, "Not Found", "not found\n");
+                    let _ = netd_tcp_close(netd_id, conn_id);
+                    return;
+                }
+            }
         }
     };
 
-    let content_type = if target.ends_with(".HTML") || target.ends_with(".HTM") {
-        "text/html"
-    } else {
-        "text/plain"
-    };
+    let content_type = guess_content_type(path);
 
     let mut header = String::new();
     header.push_str("HTTP/1.1 200 OK\r\n");
@@ -186,6 +206,118 @@ fn read_file(path: &str) -> Result<Vec<u8>, ()> {
     }
     let _ = syscall::handle_close(&handle);
     Ok(out)
+}
+
+/// ディレクトリの内容を HTML で返す
+///
+/// handle_enum で取得したエントリ名（改行区切り）を HTML のリンク一覧に変換する。
+/// 各エントリはクリックでアクセスできるリンクになる。
+fn list_directory(dir_path: &str, display_path: &str) -> Result<String, ()> {
+    let handle = syscall::open(dir_path, syscall::HANDLE_RIGHTS_DIRECTORY_READ).map_err(|_| ())?;
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let n = syscall::handle_enum(&handle, &mut buf);
+    let _ = syscall::handle_close(&handle);
+    if n < 0 {
+        return Err(());
+    }
+
+    let entries_text = if n > 0 {
+        core::str::from_utf8(&buf[..n as usize]).map_err(|_| ())?
+    } else {
+        ""
+    };
+
+    // HTML を構築
+    let mut html = String::new();
+    html.push_str("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n");
+    html.push_str("<title>Index of ");
+    html.push_str(display_path);
+    html.push_str("</title>\n");
+    // 簡単なスタイル
+    html.push_str("<style>body{font-family:monospace;margin:2em}a{text-decoration:none}a:hover{text-decoration:underline}li{margin:0.3em 0}</style>\n");
+    html.push_str("</head><body>\n");
+    html.push_str("<h1>Index of ");
+    html.push_str(display_path);
+    html.push_str("</h1>\n<hr>\n<ul>\n");
+
+    // 親ディレクトリへのリンク（ルート以外）
+    if dir_path != "/" {
+        html.push_str("<li><a href=\"");
+        // 親パスを計算
+        let parent = parent_path(display_path);
+        html.push_str(&parent);
+        html.push_str("\">..</a></li>\n");
+    }
+
+    // エントリをリンクとして追加
+    for entry in entries_text.split('\n') {
+        let name = entry.trim();
+        if name.is_empty() {
+            continue;
+        }
+        html.push_str("<li><a href=\"");
+        // リンク先のパスを構築
+        if display_path.ends_with('/') {
+            html.push_str(display_path);
+        } else {
+            html.push_str(display_path);
+            html.push('/');
+        }
+        html.push_str(name);
+        html.push_str("\">");
+        html.push_str(name);
+        html.push_str("</a></li>\n");
+    }
+
+    html.push_str("</ul>\n<hr>\n<p><em>SABOS httpd</em></p>\n</body></html>\n");
+    Ok(html)
+}
+
+/// 親パスを返す（"/" なら "/" のまま）
+fn parent_path(path: &str) -> String {
+    // 末尾の "/" を除去してから最後の "/" を探す
+    let trimmed = if path.ends_with('/') && path.len() > 1 {
+        &path[..path.len() - 1]
+    } else {
+        path
+    };
+    match trimmed.rfind('/') {
+        Some(0) => String::from("/"),
+        Some(pos) => String::from(&trimmed[..pos + 1]),
+        None => String::from("/"),
+    }
+}
+
+/// Content-Type を推測する
+fn guess_content_type(path: &str) -> &'static str {
+    if path.ends_with(".HTML") || path.ends_with(".HTM")
+        || path.ends_with(".html") || path.ends_with(".htm") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".JSON") || path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".ELF") || path.ends_with(".elf") {
+        "application/octet-stream"
+    } else {
+        "text/plain; charset=utf-8"
+    }
+}
+
+/// HTML レスポンスを送信する
+fn send_html_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, body: &str) {
+    let mut header = String::new();
+    header.push_str("HTTP/1.1 ");
+    header.push_str(&itoa(code as u64));
+    header.push(' ');
+    header.push_str(reason);
+    header.push_str("\r\n");
+    header.push_str("Content-Type: text/html; charset=utf-8\r\n");
+    header.push_str("Content-Length: ");
+    header.push_str(&itoa(body.as_bytes().len() as u64));
+    header.push_str("\r\n");
+    header.push_str("Connection: close\r\n\r\n");
+
+    let _ = netd_tcp_send_all(netd_id, conn_id, header.as_bytes());
+    let _ = netd_tcp_send_all(netd_id, conn_id, body.as_bytes());
 }
 
 fn send_simple_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, body: &str) {
