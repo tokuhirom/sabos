@@ -120,6 +120,13 @@ struct CursorState {
     y: i32,
     visible: bool,
     buttons: u8,
+    /// カーソル描画前の背景ピクセルを保存するバッファ（8x8x4 = 256 バイト）。
+    /// 毎フレーム Vec をアロケートする代わりに固定サイズバッファを使う。
+    bg_buf: [u8; (CURSOR_W * CURSOR_H * 4) as usize],
+    /// 保存した背景の幅（画面端でクリップされる場合に CURSOR_W より小さくなる）
+    save_w: u32,
+    /// 保存した背景の高さ（画面端でクリップされる場合に CURSOR_H より小さくなる）
+    save_h: u32,
 }
 
 struct Window {
@@ -192,6 +199,9 @@ fn gui_loop() -> ! {
         y: 0,
         visible: false,
         buttons: 0,
+        bg_buf: [0u8; (CURSOR_W * CURSOR_H * 4) as usize],
+        save_w: 0,
+        save_h: 0,
     };
     let mut hud_enabled = false;
     let mut hud_tick: u32 = 0;
@@ -277,7 +287,7 @@ fn gui_loop() -> ! {
                 if needs_redraw && taskbar.active {
                     let _ = wm.present_all(&mut state, &taskbar);
                     if cursor.visible {
-                        let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                        redraw_cursor(&state, &mut cursor);
                     }
                 }
             }
@@ -345,7 +355,7 @@ fn gui_loop() -> ! {
                     if present(&state).is_err() {
                         status = -99;
                     } else if cursor.visible {
-                        let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                        redraw_cursor(&state, &mut cursor);
                     }
                 }
                 OPCODE_CIRCLE => {
@@ -413,7 +423,7 @@ fn gui_loop() -> ! {
                             if present(&state).is_err() {
                                 status = -99;
                             } else if cursor.visible {
-                                let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                                redraw_cursor(&state, &mut cursor);
                             }
                         }
                     } else {
@@ -612,7 +622,7 @@ fn gui_loop() -> ! {
                 let _ = wm.present_all(&mut state, &taskbar);
                 let _ = draw_hud(&mut state);
                 if present(&state).is_ok() && cursor.visible {
-                    let _ = draw_cursor(&state, cursor.x, cursor.y, cursor.buttons);
+                    redraw_cursor(&state, &mut cursor);
                 }
             }
         }
@@ -886,6 +896,13 @@ fn draw_char(
     Ok(())
 }
 
+/// 現在のカーソル位置にカーソルを再描画するヘルパー。
+/// 借用チェック回避のため、cursor のフィールドをコピーしてから draw_cursor を呼ぶ。
+fn redraw_cursor(state: &GuiState, cursor: &mut CursorState) {
+    let (cx, cy, cb) = (cursor.x, cursor.y, cursor.buttons);
+    let _ = draw_cursor(state, cursor, cx, cy, cb);
+}
+
 fn present(state: &GuiState) -> Result<(), ()> {
     if syscall::draw_blit(0, 0, state.width, state.height, &state.buf) < 0 {
         return Err(());
@@ -895,12 +912,12 @@ fn present(state: &GuiState) -> Result<(), ()> {
 
 fn update_cursor(state: &GuiState, cursor: &mut CursorState, mouse: &syscall::MouseState) -> Result<(), ()> {
     if cursor.visible {
-        restore_cursor(state, cursor.x, cursor.y)?;
+        restore_cursor(cursor)?;
     }
 
     let x = mouse.x;
     let y = mouse.y;
-    draw_cursor(state, x, y, mouse.buttons)?;
+    draw_cursor(state, cursor, x, y, mouse.buttons)?;
     cursor.x = x;
     cursor.y = y;
     cursor.visible = true;
@@ -908,7 +925,29 @@ fn update_cursor(state: &GuiState, cursor: &mut CursorState, mouse: &syscall::Mo
     Ok(())
 }
 
-fn restore_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
+/// カーソル下の背景を復元する。
+/// CursorState.bg_buf に保存済みの背景を draw_blit で一括転送する（Vec 不要）。
+fn restore_cursor(cursor: &CursorState) -> Result<(), ()> {
+    if cursor.x < 0 || cursor.y < 0 {
+        return Ok(());
+    }
+    let w = cursor.save_w;
+    let h = cursor.save_h;
+    if w == 0 || h == 0 {
+        return Ok(());
+    }
+    let len = (w * h * 4) as usize;
+    if syscall::draw_blit(cursor.x as u32, cursor.y as u32, w, h, &cursor.bg_buf[..len]) < 0 {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// カーソルを描画する。
+/// 1. 背景を CursorState.bg_buf に保存
+/// 2. スタック上でカーソルスプライト（背景 + カーソルパターン）を構築
+/// 3. draw_blit 1回でフレームバッファに転送
+fn draw_cursor(state: &GuiState, cursor: &mut CursorState, x: i32, y: i32, buttons: u8) -> Result<(), ()> {
     if x < 0 || y < 0 {
         return Ok(());
     }
@@ -917,74 +956,60 @@ fn restore_cursor(state: &GuiState, x: i32, y: i32) -> Result<(), ()> {
     if x0 >= state.width || y0 >= state.height {
         return Ok(());
     }
+
+    // クリップされたカーソルサイズを計算
     let w = core::cmp::min(CURSOR_W, state.width - x0);
     let h = core::cmp::min(CURSOR_H, state.height - y0);
     if w == 0 || h == 0 {
         return Ok(());
     }
 
-    let mut tmp = Vec::with_capacity((w * h * 4) as usize);
-    tmp.resize((w * h * 4) as usize, 0);
+    // 1. 背景を bg_buf に保存
     for row in 0..h {
         let src_y = y0 + row;
         let src_offset = ((src_y * state.width + x0) * 4) as usize;
         let dst_offset = (row * w * 4) as usize;
         let len = (w * 4) as usize;
-        tmp[dst_offset..dst_offset + len]
+        cursor.bg_buf[dst_offset..dst_offset + len]
             .copy_from_slice(&state.buf[src_offset..src_offset + len]);
     }
+    cursor.save_w = w;
+    cursor.save_h = h;
 
-    if syscall::draw_blit(x0, y0, w, h, &tmp) < 0 {
-        return Err(());
-    }
-    Ok(())
-}
+    // 2. スプライトをスタック上に構築（背景コピー + カーソルパターン上書き）
+    let mut sprite = [0u8; (CURSOR_W * CURSOR_H * 4) as usize];
+    let sprite_len = (w * h * 4) as usize;
+    sprite[..sprite_len].copy_from_slice(&cursor.bg_buf[..sprite_len]);
 
-fn draw_cursor(state: &GuiState, x: i32, y: i32, buttons: u8) -> Result<(), ()> {
-    if x < 0 || y < 0 {
-        return Ok(());
-    }
-    let x0 = x as u32;
-    let y0 = y as u32;
-    if x0 >= state.width || y0 >= state.height {
-        return Ok(());
-    }
-
-    let mut r = 255;
-    let mut g = 255;
-    let mut b = 255;
-    if buttons & 0x01 != 0 {
-        r = 255;
-        g = 64;
-        b = 64;
+    // カーソルの色を決定
+    let (cr, cg, cb) = if buttons & 0x01 != 0 {
+        (255u8, 64u8, 64u8)
     } else if buttons & 0x02 != 0 {
-        r = 64;
-        g = 255;
-        b = 64;
+        (64u8, 255u8, 64u8)
     } else if buttons & 0x04 != 0 {
-        r = 64;
-        g = 160;
-        b = 255;
-    }
+        (64u8, 160u8, 255u8)
+    } else {
+        (255u8, 255u8, 255u8)
+    };
 
-    for dy in 0..CURSOR_H {
-        for dx in 0..CURSOR_W {
-            let px = x0 + dx;
-            let py = y0 + dy;
-            if px >= state.width || py >= state.height {
-                continue;
-            }
+    // カーソルパターンをスプライトに描画
+    for dy in 0..h {
+        for dx in 0..w {
             let on = if buttons == 0 {
                 dx == 0 || dy == 0 || dx == dy
             } else {
                 true
             };
             if on {
-                if syscall::draw_pixel(px, py, r, g, b) < 0 {
-                    return Err(());
-                }
+                let offset = ((dy * w + dx) * 4) as usize;
+                write_pixel(&mut sprite, offset, cr, cg, cb);
             }
         }
+    }
+
+    // 3. draw_blit 1回で転送
+    if syscall::draw_blit(x0, y0, w, h, &sprite[..sprite_len]) < 0 {
+        return Err(());
     }
     Ok(())
 }
