@@ -91,7 +91,12 @@ pub extern "C" fn _start() -> ! {
 
 /// シェルのメインループを実行
 fn run() -> ! {
+    // log クレートのロガーを初期化
+    // これにより log::info!() 等のマクロが使えるようになる
+    print::init_logger();
+
     print_welcome();
+    log::info!("Shell started");
     // init が netd を起動するので、ここでは netd の PID を取得するだけ
     // 将来的には init から netd の PID を受け取る仕組みにする
     find_netd();
