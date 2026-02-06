@@ -1242,6 +1242,8 @@ impl Shell {
             run_test("telnetd_service", this.test_telnetd_service());
             // 17.5. httpd サービスの起動確認
             run_test("httpd_service", this.test_httpd_service());
+            // 17.6. httpd が参照するディレクトリ一覧が取得できることを確認
+            run_test("httpd_dirlist", this.test_httpd_dirlist());
         };
         let run_base = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             run_core(this, run_test);
@@ -2237,6 +2239,32 @@ impl Shell {
     /// httpd サービスが起動しているかを確認する
     fn test_httpd_service(&self) -> bool {
         crate::scheduler::find_task_id_by_name("HTTPD.ELF").is_some()
+    }
+
+    /// httpd のディレクトリリスティングが動作する前提条件をテストする
+    ///
+    /// httpd はルートディレクトリを開いてエントリ一覧を HTML で返す。
+    /// ここでは同じ list_dir_to_buffer を呼んで、
+    /// ルートの一覧に HELLO.TXT が含まれることを確認する。
+    fn test_httpd_dirlist(&self) -> bool {
+        use alloc::vec;
+
+        let mut buf = vec![0u8; 2048];
+        let n = match crate::syscall::list_dir_to_buffer_for_test("/", &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        if n == 0 {
+            return false;
+        }
+
+        // HELLO.TXT が一覧に含まれるか確認
+        let text = match core::str::from_utf8(&buf[..n]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        text.contains("HELLO.TXT")
     }
 
     /// panic コマンド: 意図的にカーネルパニックを発生させる。

@@ -267,6 +267,58 @@ fi
 wait_for_prompt_after "$base" || true
 sleep 0.5
 
+# --- grep コマンドのテスト ---
+# HELLO.TXT に対して grep を実行し、パターンが一致することを確認する
+echo "Testing grep command..."
+
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
+base=$(log_line_count)
+send_command "grep Hello HELLO.TXT"
+
+echo "Waiting for grep output..."
+grep_ok=false
+for i in {1..10}; do
+    if grep_after "$base" "Hello"; then
+        grep_ok=true
+        break
+    fi
+    sleep 1
+done
+wait_for_prompt_after "$base" || true
+
+if [ "$grep_ok" = true ]; then
+    echo -e "${GREEN}grep command test PASSED${NC}"
+else
+    echo -e "${RED}WARN: grep command test did not produce expected output${NC}"
+fi
+
+# grep -v テスト（マッチしない行の出力）
+sleep 0.5
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
+base=$(log_line_count)
+send_command "grep -c Hello HELLO.TXT"
+
+echo "Waiting for grep -c output..."
+grep_c_ok=false
+for i in {1..10}; do
+    if grep_after "$base" "1"; then
+        grep_c_ok=true
+        break
+    fi
+    sleep 1
+done
+wait_for_prompt_after "$base" || true
+
+if [ "$grep_c_ok" = true ]; then
+    echo -e "${GREEN}grep -c command test PASSED${NC}"
+else
+    echo -e "${RED}WARN: grep -c command test did not produce expected output${NC}"
+fi
+
+sleep 0.5
+
 echo "Sending selftest command..."
 
 # GUI アプリのスクリーンショット（任意）

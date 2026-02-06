@@ -1086,6 +1086,14 @@ fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError>
     Ok(offset)
 }
 
+/// selftest 用のテストエントリポイント
+///
+/// list_dir_to_buffer のテスト用ラッパー。
+/// shell.rs の selftest から呼ぶため pub にしている。
+pub fn list_dir_to_buffer_for_test(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
+    list_dir_to_buffer(path, buf)
+}
+
 // =================================================================
 // システム情報関連システムコール
 // =================================================================
