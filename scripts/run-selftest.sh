@@ -47,6 +47,7 @@ echo "Starting QEMU..."
 qemu-system-x86_64 \
     -nodefaults \
     -machine q35 \
+    -cpu max \
     -vga std \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_VARS_4M.fd \

@@ -64,6 +64,8 @@ pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — �
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報
 pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
+pub const SYS_CLOCK_MONOTONIC: u64 = 26; // clock_monotonic() — 起動からの経過ミリ秒を返す
+pub const SYS_GETRANDOM: u64 = 27;       // getrandom(buf_ptr, len) — ランダムバイトを生成
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -973,5 +975,38 @@ pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, Sysca
         Err(result)
     } else {
         Ok(new_handle)
+    }
+}
+
+// =================================================================
+// 時刻・乱数
+// =================================================================
+
+/// 起動からの経過ミリ秒を取得する。
+///
+/// PIT タイマーのティックカウントをミリ秒に変換した値が返る。
+/// std::time::Instant の代替として使用できる。
+#[allow(dead_code)]
+pub fn clock_monotonic() -> u64 {
+    unsafe { syscall0(SYS_CLOCK_MONOTONIC) }
+}
+
+/// ランダムバイトをバッファに書き込む。
+///
+/// RDRAND 命令（ハードウェア乱数生成器）を使って暗号学的に安全な
+/// ランダムバイトを生成する。HashMap の RandomState 等で使用される。
+///
+/// # 戻り値
+/// - Ok(n): 書き込んだバイト数
+/// - Err(errno): エラー時
+#[allow(dead_code)]
+pub fn getrandom(buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let result = unsafe {
+        syscall2(SYS_GETRANDOM, buf.as_mut_ptr() as u64, buf.len() as u64) as i64
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as usize)
     }
 }

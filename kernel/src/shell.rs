@@ -1204,6 +1204,12 @@ impl Shell {
 
             // 11.8. kill のテスト（自分自身の kill が拒否されること）
             run_test("kill_self_reject", this.test_kill_self_reject());
+
+            // 11.9. clock_monotonic のテスト
+            run_test("clock_monotonic", this.test_clock_monotonic());
+
+            // 11.10. getrandom のテスト
+            run_test("getrandom", this.test_getrandom());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1758,6 +1764,49 @@ impl Shell {
         let my_id = crate::scheduler::current_task_id();
         // 自分自身の kill はエラーになるはず
         crate::scheduler::kill_task(my_id).is_err()
+    }
+
+    /// SYS_CLOCK_MONOTONIC のテスト
+    /// 起動からの経過時間が 0 より大きいことを確認する。
+    /// また、2回呼んで2回目が1回目以上であること（単調増加）を確認する。
+    fn test_clock_monotonic(&self) -> bool {
+        let ticks = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let ms1 = ticks * 10000 / 182;
+        // 起動してからしばらく経っているはずなので 0 より大きい
+        if ms1 == 0 {
+            return false;
+        }
+        // 2回目のチェック: 単調増加
+        let ticks2 = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let ms2 = ticks2 * 10000 / 182;
+        ms2 >= ms1
+    }
+
+    /// SYS_GETRANDOM のテスト
+    /// RDRAND 命令でランダムバイトが生成されることを確認する。
+    /// 8 バイトを生成して、全てゼロでないことを確認する。
+    /// （全ゼロの確率は 1/2^64 なので実質的に起こらない）
+    fn test_getrandom(&self) -> bool {
+        // RDRAND 命令で 8 バイト取得
+        let mut value: u64 = 0;
+        let mut success_count = 0;
+        for _ in 0..3 {
+            let ok: u8;
+            unsafe {
+                core::arch::asm!(
+                    "rdrand {val}",
+                    "setc {ok}",
+                    val = out(reg) value,
+                    ok = out(reg_byte) ok,
+                );
+            }
+            if ok != 0 {
+                success_count += 1;
+            }
+        }
+        // 3回中1回でも成功すれば OK（RDRAND が使えることを確認）
+        // かつ最後に得た値がゼロでないことを確認
+        success_count > 0 && value != 0
     }
 
     /// Handle から EOF まで読み取る

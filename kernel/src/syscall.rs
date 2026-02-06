@@ -72,6 +72,8 @@ pub const SYS_GET_NET_INFO: u64 = 22;   // get_net_info(buf_ptr, buf_len) — �
 pub const SYS_PCI_CONFIG_READ: u64 = 23; // pci_config_read(bus, device, function, offset, size) — PCI Config 読み取り
 pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フレームバッファ情報取得
 pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
+pub const SYS_CLOCK_MONOTONIC: u64 = 26; // clock_monotonic() — 起動からの経過ミリ秒を返す
+pub const SYS_GETRANDOM: u64 = 27;       // getrandom(buf_ptr, len) — ランダムバイトを生成
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -277,6 +279,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_PCI_CONFIG_READ => sys_pci_config_read(arg1, arg2, arg3, arg4),
         SYS_GET_FB_INFO => sys_get_fb_info(arg1, arg2),
         SYS_MOUSE_READ => sys_mouse_read(arg1, arg2),
+        SYS_CLOCK_MONOTONIC => sys_clock_monotonic(),
+        SYS_GETRANDOM => sys_getrandom(arg1, arg2),
         // プロセス管理
         SYS_EXEC => sys_exec(arg1, arg2),
         SYS_SPAWN => sys_spawn(arg1, arg2),
@@ -1964,4 +1968,80 @@ fn write_json_string(writer: &mut SliceWriter<'_>, s: &str) -> core::fmt::Result
         }
     }
     Ok(())
+}
+
+// =================================================================
+// SYS_CLOCK_MONOTONIC: 起動からの経過時間（ミリ秒）
+// =================================================================
+
+/// SYS_CLOCK_MONOTONIC: 起動からの経過ミリ秒を返す
+///
+/// PIT (Programmable Interval Timer) のティックカウントをミリ秒に変換する。
+/// PIT のデフォルト周波数: 1193182 Hz / 65536 ≈ 18.2065 Hz
+/// 1 ティック ≈ 54.925 ms
+/// ms = ticks * 10000 / 182 （scheduler.rs の sleep_ms と逆算式）
+///
+/// 戻り値: 起動からの経過ミリ秒
+fn sys_clock_monotonic() -> Result<u64, SyscallError> {
+    let ticks = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    // ticks → ms 変換 (sleep_ms の逆: ms = ticks * 10000 / 182)
+    let ms = ticks * 10000 / 182;
+    Ok(ms)
+}
+
+// =================================================================
+// SYS_GETRANDOM: ランダムバイト生成
+// =================================================================
+
+/// SYS_GETRANDOM: RDRAND 命令でランダムバイトを生成
+///
+/// x86_64 の RDRAND 命令を使って暗号学的に安全なランダムバイトを生成する。
+/// RDRAND はハードウェア乱数生成器 (DRNG) を使うため、ソフトウェア PRNG より安全。
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ（書き込むバイト数）
+///
+/// 戻り値: 書き込んだバイト数
+fn sys_getrandom(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf_slice = user_slice_from_args(arg1, arg2)?;
+    let buf = buf_slice.as_mut_slice();
+    let len = buf.len();
+
+    // 8 バイトずつ RDRAND で生成し、バッファに書き込む
+    let mut offset = 0;
+    while offset < len {
+        let random_value: u64 = rdrand64()?;
+        let bytes = random_value.to_le_bytes();
+        let remaining = len - offset;
+        let to_copy = remaining.min(8);
+        buf[offset..offset + to_copy].copy_from_slice(&bytes[..to_copy]);
+        offset += to_copy;
+    }
+
+    Ok(len as u64)
+}
+
+/// RDRAND 命令で 64 ビットのランダム値を取得する。
+///
+/// RDRAND が失敗する場合（エントロピー枯渇など）は最大 10 回リトライする。
+/// それでも失敗した場合はエラーを返す。
+fn rdrand64() -> Result<u64, SyscallError> {
+    for _ in 0..10 {
+        let mut value: u64;
+        let success: u8;
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) value,
+                ok = out(reg_byte) success,
+            );
+        }
+        if success != 0 {
+            return Ok(value);
+        }
+    }
+    // RDRAND が 10 回連続で失敗した場合（通常は起こらない）
+    Err(SyscallError::NotSupported)
 }

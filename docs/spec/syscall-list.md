@@ -44,6 +44,13 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `25` `SYS_MOUSE_READ(buf_ptr, buf_len) -> n`
   - 更新があれば `MouseState` を書き込んでサイズを返す
   - 更新がなければ `0`
+- `26` `SYS_CLOCK_MONOTONIC() -> ms`
+  - 起動からの経過ミリ秒を返す（PIT ティックから変換）
+  - std::time::Instant の代替として使用可能
+- `27` `SYS_GETRANDOM(buf_ptr, len) -> n`
+  - RDRAND 命令（ハードウェア乱数生成器）でランダムバイトを生成
+  - HashMap の RandomState 等で使用される
+  - エラー: -41 (RDRAND 非対応 or エントロピー枯渇)
 
 ## プロセス管理 (30-39)
 

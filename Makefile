@@ -38,6 +38,7 @@ DISK_IMG = disk.img
 QEMU_COMMON = qemu-system-x86_64 \
 	-nodefaults \
 	-machine q35 \
+	-cpu max \
 	-vga std \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
@@ -98,6 +99,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-machine q35 \
+		-cpu max \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 		-drive format=raw,file=fat:rw:esp \
