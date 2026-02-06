@@ -84,8 +84,8 @@ pub fn recv(task_id: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
             }
         }
 
-        // 他のタスクに譲る
-        scheduler::sleep_ticks(1);
+        // 他のタスクに譲る（yield_now で即座に Ready に戻り、次のスケジューリングラウンドで再チェック）
+        scheduler::yield_now();
     }
 }
 
@@ -151,8 +151,8 @@ pub fn recv_typed<T: Copy + Send + 'static>(task_id: u64, timeout_ms: u64) -> Re
             }
         }
 
-        // 他のタスクに譲る
-        scheduler::sleep_ticks(1);
+        // 他のタスクに譲る（yield_now で即座に Ready に戻り、次のスケジューリングラウンドで再チェック）
+        scheduler::yield_now();
     }
 }
 
