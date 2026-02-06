@@ -1196,6 +1196,9 @@ impl Shell {
             // 11.5. 文字列置換ユーティリティのテスト
             run_test("textutil_replace", this.test_textutil_replace());
 
+            // 11.7. 文字列検索ユーティリティのテスト
+            run_test("textutil_contains", this.test_textutil_contains());
+
             // 11.6. exec のテスト（EXIT0.ELF を同期実行）
             run_test("exec_exit0", this.test_exec_exit0());
         };
@@ -1715,6 +1718,31 @@ impl Shell {
         }
         let (out, changed) = sabos_textutil::replace_literal("hello", "ll", "LL", false);
         changed && out == "heLLo"
+    }
+
+    /// textutil の contains_literal テスト
+    fn test_textutil_contains(&self) -> bool {
+        // 通常マッチ
+        if !sabos_textutil::contains_literal("hello world", "world", false) {
+            return false;
+        }
+        // マッチしないケース
+        if sabos_textutil::contains_literal("hello world", "xyz", false) {
+            return false;
+        }
+        // 大文字小文字無視
+        if !sabos_textutil::contains_literal("Hello World", "hello", true) {
+            return false;
+        }
+        // 大文字小文字区別（マッチしないはず）
+        if sabos_textutil::contains_literal("Hello World", "hello", false) {
+            return false;
+        }
+        // 空パターンは常にマッチ
+        if !sabos_textutil::contains_literal("anything", "", false) {
+            return false;
+        }
+        true
     }
 
     /// Handle から EOF まで読み取る

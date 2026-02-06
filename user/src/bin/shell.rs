@@ -27,7 +27,8 @@
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
-// - パイプ（|）: echo/cat/sed の簡易パイプライン
+// - grep [-i] [-v] [-c] PATTERN [FILE]: パターンに一致する行を出力
+// - パイプ（|）: echo/cat/sed/grep の簡易パイプライン
 // - selftest: カーネル selftest を実行
 // - halt: システム停止
 
@@ -48,7 +49,7 @@ mod json;
 #[path = "../syscall.rs"]
 mod syscall;
 
-use sabos_textutil::replace_literal;
+use sabos_textutil::{contains_literal, replace_literal};
 
 use alloc::format;
 use alloc::string::String;
@@ -231,6 +232,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "dns" => cmd_dns(args),
         "http" => cmd_http(args),
         "sed" => cmd_sed(args, state),
+        "grep" => cmd_grep(args, state),
         "gui" => cmd_gui(args),
         "rect" => cmd_rect(args),
         "selftest" => cmd_selftest(),
@@ -254,7 +256,7 @@ fn split_command(line: &str) -> (&str, &str) {
 
 /// パイプラインを実行（簡易版）
 ///
-/// 対応コマンド: echo / cat / sed
+/// 対応コマンド: echo / cat / sed / grep
 /// 入出力は UTF-8 テキスト前提で扱う。
 fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> {
     let mut parts: Vec<&str> = Vec::new();
@@ -276,7 +278,8 @@ fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> 
             "echo" => pipeline_echo(args),
             "cat" => pipeline_cat(args, state, input.as_deref())?,
             "sed" => pipeline_sed(args, state, input.as_deref())?,
-            _ => return Err("Error: pipeline supports only echo/cat/sed"),
+            "grep" => pipeline_grep(args, state, input.as_deref())?,
+            _ => return Err("Error: pipeline supports only echo/cat/sed/grep"),
         };
 
         if i + 1 == parts.len() {
@@ -460,7 +463,8 @@ fn cmd_help() {
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
     syscall::write_str("  sed [-n] s/OLD/NEW/[gp] <file> - Simple sed (literal)\n");
-    syscall::write_str("  pipe (|)          - echo/cat/sed pipeline\n");
+    syscall::write_str("  grep [-i] [-v] [-c] PATTERN [FILE] - Filter lines by pattern\n");
+    syscall::write_str("  pipe (|)          - echo/cat/sed/grep pipeline\n");
     syscall::write_str("  gui <subcmd>      - Send GUI IPC commands\n");
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
@@ -775,6 +779,182 @@ fn cmd_sed(args: &str, state: &ShellState) {
         }
     };
     syscall::write_str(out.as_str());
+}
+
+/// grep の引数をパースする
+///
+/// 書式: grep [-i] [-v] [-c] PATTERN [FILE]
+/// - -i: 大文字小文字を無視
+/// - -v: マッチしない行を出力
+/// - -c: マッチした行数を出力
+struct GrepOpts<'a> {
+    case_insensitive: bool,
+    invert: bool,
+    count_only: bool,
+    pattern: &'a str,
+    file: &'a str,
+}
+
+fn parse_grep_args(args: &str) -> Result<GrepOpts<'_>, &'static str> {
+    let mut case_insensitive = false;
+    let mut invert = false;
+    let mut count_only = false;
+    let mut rest = args;
+
+    // オプションを先に消化する
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with("-") {
+            let (opt, after) = split_command(rest);
+            match opt {
+                "-i" => case_insensitive = true,
+                "-v" => invert = true,
+                "-c" => count_only = true,
+                "-iv" | "-vi" => { case_insensitive = true; invert = true; }
+                "-ic" | "-ci" => { case_insensitive = true; count_only = true; }
+                "-vc" | "-cv" => { invert = true; count_only = true; }
+                "-ivc" | "-icv" | "-vic" | "-vci" | "-civ" | "-cvi" => {
+                    case_insensitive = true; invert = true; count_only = true;
+                }
+                _ => return Err("Error: unknown option"),
+            }
+            rest = after;
+        } else {
+            break;
+        }
+    }
+
+    // PATTERN と FILE を取得
+    let (pattern, file) = split_command(rest);
+    if pattern.is_empty() {
+        return Err("Usage: grep [-i] [-v] [-c] PATTERN [FILE]");
+    }
+
+    Ok(GrepOpts { case_insensitive, invert, count_only, pattern, file })
+}
+
+/// テキストに grep フィルタを適用する
+///
+/// 行ごとにパターンの含有を判定し、条件に合う行を出力する。
+/// -c 指定時はマッチ行数のみ返す。
+fn grep_apply(
+    text: &str,
+    pattern: &str,
+    case_insensitive: bool,
+    invert: bool,
+    count_only: bool,
+) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= text.len() {
+        let at_end = i == text.len();
+        let is_nl = !at_end && text.as_bytes()[i] == b'\n';
+        if at_end || is_nl {
+            let mut line = &text[start..i];
+            // CRLF の \r を除去
+            if let Some(b'\r') = line.as_bytes().last().copied() {
+                line = &line[..line.len().saturating_sub(1)];
+            }
+            // 空文字列の最後（EOF で行が空）はスキップ
+            if !(at_end && line.is_empty()) {
+                let matched = contains_literal(line, pattern, case_insensitive);
+                let should_print = if invert { !matched } else { matched };
+                if should_print {
+                    if count_only {
+                        count += 1;
+                    } else {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if count_only {
+        out.push_str(&format!("{}\n", count));
+    }
+    out
+}
+
+/// grep コマンド: パターンに一致する行を出力
+///
+/// 使い方:
+///   grep [-i] [-v] [-c] PATTERN FILE
+///
+/// - リテラル一致（正規表現ではない）
+/// - -i: 大文字小文字を無視
+/// - -v: マッチしない行を出力
+/// - -c: マッチした行数を出力
+fn cmd_grep(args: &str, state: &ShellState) {
+    let opts = match parse_grep_args(args) {
+        Ok(v) => v,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+    if opts.file.is_empty() {
+        syscall::write_str("Usage: grep [-i] [-v] [-c] PATTERN FILE\n");
+        return;
+    }
+
+    let handle = match open_file_from_args(state, opts.file) {
+        Ok(h) => h,
+        Err(msg) => {
+            syscall::write_str(msg);
+            syscall::write_str("\n");
+            return;
+        }
+    };
+
+    let data = match read_all_handle(&handle) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = syscall::handle_close(&handle);
+            syscall::write_str("Error: Failed to read file\n");
+            return;
+        }
+    };
+    let _ = syscall::handle_close(&handle);
+    let Ok(text) = core::str::from_utf8(&data) else {
+        syscall::write_str("Error: invalid UTF-8 in input\n");
+        return;
+    };
+
+    let out = grep_apply(text, opts.pattern, opts.case_insensitive, opts.invert, opts.count_only);
+    syscall::write_str(&out);
+}
+
+/// パイプライン用 grep
+fn pipeline_grep(args: &str, state: &ShellState, input: Option<&str>) -> Result<String, &'static str> {
+    let opts = parse_grep_args(args)?;
+
+    let owned = if !opts.file.is_empty() {
+        let handle = open_file_from_args(state, opts.file)?;
+        let data = read_all_handle(&handle).map_err(|_| "Error: Failed to read file")?;
+        let _ = syscall::handle_close(&handle);
+        let Ok(text) = core::str::from_utf8(&data) else {
+            return Err("Error: invalid UTF-8 in input");
+        };
+        Some(String::from(text))
+    } else {
+        None
+    };
+
+    let text = if let Some(ref owned_text) = owned {
+        owned_text.as_str()
+    } else if let Some(text) = input {
+        text
+    } else {
+        return Err("Usage: grep [-i] [-v] [-c] PATTERN [FILE]");
+    };
+
+    Ok(grep_apply(text, opts.pattern, opts.case_insensitive, opts.invert, opts.count_only))
 }
 
 /// write コマンド: ファイルを作成/上書き
