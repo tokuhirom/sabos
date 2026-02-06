@@ -74,6 +74,8 @@ pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フ
 pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
 pub const SYS_CLOCK_MONOTONIC: u64 = 26; // clock_monotonic() — 起動からの経過ミリ秒を返す
 pub const SYS_GETRANDOM: u64 = 27;       // getrandom(buf_ptr, len) — ランダムバイトを生成
+pub const SYS_MMAP: u64 = 28;            // mmap(addr_hint, len, prot, flags) — 匿名ページをマッピング
+pub const SYS_MUNMAP: u64 = 29;          // munmap(addr, len) — ページのマッピングを解除
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -281,6 +283,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_MOUSE_READ => sys_mouse_read(arg1, arg2),
         SYS_CLOCK_MONOTONIC => sys_clock_monotonic(),
         SYS_GETRANDOM => sys_getrandom(arg1, arg2),
+        SYS_MMAP => sys_mmap(arg1, arg2, arg3, arg4),
+        SYS_MUNMAP => sys_munmap(arg1, arg2),
         // プロセス管理
         SYS_EXEC => sys_exec(arg1, arg2),
         SYS_SPAWN => sys_spawn(arg1, arg2),
@@ -2044,4 +2048,229 @@ fn rdrand64() -> Result<u64, SyscallError> {
     }
     // RDRAND が 10 回連続で失敗した場合（通常は起こらない）
     Err(SyscallError::NotSupported)
+}
+
+// SYS_MMAP / SYS_MUNMAP: 匿名ページの動的マッピング/解除
+//
+// ユーザー空間から動的にメモリを確保するためのシステムコール。
+// POSIX の mmap(MAP_ANONYMOUS) に相当するが、ファイルマッピングは未対応。
+// std の GlobalAlloc や、ユーザー空間のヒープ拡張に使う。
+
+/// MMAP_PROT_READ: 読み取り可能
+const MMAP_PROT_READ: u64 = 0x1;
+/// MMAP_PROT_WRITE: 書き込み可能
+const MMAP_PROT_WRITE: u64 = 0x2;
+/// MMAP_FLAG_ANONYMOUS: 匿名マッピング（ファイルに紐付かない）
+const MMAP_FLAG_ANONYMOUS: u64 = 0x1;
+
+/// mmap 用の仮想アドレスの下限。
+/// ELF の LOAD セグメント、ユーザースタック (0x2000000)、
+/// およびカーネルのアイデンティティマッピング（物理 RAM 範囲）と
+/// 重ならないように、十分に高いアドレスから割り当てる。
+/// 0x4000_0000 (1 GiB) 以降をユーザーの mmap 領域とする。
+/// QEMU のデフォルト RAM は 128MiB なので 1GiB 以降は安全。
+const MMAP_VADDR_BASE: u64 = 0x4000_0000;
+/// mmap 領域の上限。
+const MMAP_VADDR_LIMIT: u64 = 0x80_0000_0000; // 512 GiB
+
+/// SYS_MMAP: ユーザー空間に匿名ページをマッピングする。
+///
+/// 引数:
+/// - arg1 (addr_hint): マッピング先仮想アドレスのヒント（0 ならカーネルが決定）
+/// - arg2 (len): マッピングサイズ（バイト、4KiB にアラインされる）
+/// - arg3 (prot): プロテクションフラグ（PROT_READ | PROT_WRITE）
+/// - arg4 (flags): マッピングフラグ（MAP_ANONYMOUS のみ対応）
+///
+/// 戻り値: マッピングされた仮想アドレス
+fn sys_mmap(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let addr_hint = arg1;
+    let len = arg2;
+    let prot = arg3;
+    let flags = arg4;
+
+    // len が 0 はエラー
+    if len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // 現状は匿名マッピングのみ対応
+    if (flags & MMAP_FLAG_ANONYMOUS) == 0 {
+        return Err(SyscallError::NotSupported);
+    }
+
+    // prot の検証（最低限 READ は必要）
+    if (prot & MMAP_PROT_READ) == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let writable = (prot & MMAP_PROT_WRITE) != 0;
+
+    // ページ数を計算（切り上げ）
+    let num_pages = ((len + 4095) / 4096) as usize;
+
+    // 現在のプロセスの L4 ページテーブルフレームを取得
+    let l4_frame = crate::scheduler::current_task_page_table_frame()
+        .ok_or(SyscallError::NotSupported)?; // カーネルタスクでは mmap 不可
+
+    // マッピング先の仮想アドレスを決定する
+    let virt_addr = if addr_hint != 0 {
+        // ユーザーが指定したアドレスを使う（4KiB アラインに切り上げ）
+        let aligned = (addr_hint + 4095) & !4095;
+        if aligned < MMAP_VADDR_BASE || aligned + (num_pages as u64 * 4096) > MMAP_VADDR_LIMIT {
+            return Err(SyscallError::InvalidAddress);
+        }
+        aligned
+    } else {
+        // カーネルが空き領域を探す
+        find_free_mmap_region(l4_frame, num_pages)?
+    };
+
+    // ページをマッピング
+    let allocated = crate::paging::map_anonymous_pages_in_process(
+        l4_frame,
+        x86_64::VirtAddr::new(virt_addr),
+        num_pages,
+        writable,
+    );
+
+    // 確保したフレームをプロセスの allocated_frames に追加
+    // （プロセス終了時に自動で解放される）
+    crate::scheduler::add_mmap_frames_to_current(&allocated);
+
+    Ok(virt_addr)
+}
+
+/// SYS_MUNMAP: ユーザー空間のページマッピングを解除する。
+///
+/// 引数:
+/// - arg1 (addr): マッピング解除する仮想アドレス（4KiB アライン必須）
+/// - arg2 (len): 解除するサイズ（バイト）
+///
+/// 戻り値: 0（成功）
+fn sys_munmap(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let addr = arg1;
+    let len = arg2;
+
+    // アドレスが 4KiB アラインされているか確認
+    if (addr & 0xFFF) != 0 {
+        return Err(SyscallError::MisalignedPointer);
+    }
+
+    if len == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // mmap 領域の範囲チェック
+    if addr < MMAP_VADDR_BASE || addr + len > MMAP_VADDR_LIMIT {
+        return Err(SyscallError::InvalidAddress);
+    }
+
+    let num_pages = ((len + 4095) / 4096) as usize;
+
+    let l4_frame = crate::scheduler::current_task_page_table_frame()
+        .ok_or(SyscallError::NotSupported)?;
+
+    // ページのマッピングを解除し、物理フレームを解放
+    let freed = crate::paging::unmap_pages_in_process(
+        l4_frame,
+        x86_64::VirtAddr::new(addr),
+        num_pages,
+    );
+
+    // プロセスの allocated_frames から削除
+    crate::scheduler::remove_mmap_frames_from_current(&freed);
+
+    Ok(0)
+}
+
+/// mmap 領域から空き仮想アドレスを探す。
+///
+/// MMAP_VADDR_BASE から MMAP_VADDR_LIMIT の間で、num_pages 分の連続した
+/// 未マッピング領域を探す。単純な線形探索（first-fit）。
+fn find_free_mmap_region(
+    process_l4_frame: x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>,
+    num_pages: usize,
+) -> Result<u64, SyscallError> {
+    let required_bytes = num_pages as u64 * 4096;
+
+    let process_l4: &x86_64::structures::paging::page_table::PageTable = unsafe {
+        &*(process_l4_frame.start_address().as_u64()
+            as *const x86_64::structures::paging::page_table::PageTable)
+    };
+
+    // MMAP_VADDR_BASE からページ単位で空きを探す
+    let mut candidate = MMAP_VADDR_BASE;
+
+    while candidate + required_bytes <= MMAP_VADDR_LIMIT {
+        let mut all_free = true;
+
+        for page_idx in 0..num_pages {
+            let addr = candidate + (page_idx as u64) * 4096;
+            if is_page_mapped(process_l4, addr) {
+                // この位置は使用中 → 次の候補に進む
+                candidate = addr + 4096;
+                all_free = false;
+                break;
+            }
+        }
+
+        if all_free {
+            return Ok(candidate);
+        }
+    }
+
+    // 空き領域が見つからなかった
+    Err(SyscallError::Other)
+}
+
+/// 指定した仮想アドレスがプロセスのページテーブルでマッピング済みかチェックする。
+fn is_page_mapped(
+    l4_table: &x86_64::structures::paging::page_table::PageTable,
+    virt_addr: u64,
+) -> bool {
+    use x86_64::structures::paging::PageTableFlags;
+
+    let l4_idx = ((virt_addr >> 39) & 0x1FF) as usize;
+    let l3_idx = ((virt_addr >> 30) & 0x1FF) as usize;
+    let l2_idx = ((virt_addr >> 21) & 0x1FF) as usize;
+    let l1_idx = ((virt_addr >> 12) & 0x1FF) as usize;
+
+    let l4_entry = &l4_table[l4_idx];
+    if l4_entry.is_unused() {
+        return false;
+    }
+
+    let l3_table: &x86_64::structures::paging::page_table::PageTable = unsafe {
+        &*(l4_entry.addr().as_u64()
+            as *const x86_64::structures::paging::page_table::PageTable)
+    };
+
+    let l3_entry = &l3_table[l3_idx];
+    if l3_entry.is_unused() {
+        return false;
+    }
+    if l3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return true; // 1GiB ページ: マッピング済み
+    }
+
+    let l2_table: &x86_64::structures::paging::page_table::PageTable = unsafe {
+        &*(l3_entry.addr().as_u64()
+            as *const x86_64::structures::paging::page_table::PageTable)
+    };
+
+    let l2_entry = &l2_table[l2_idx];
+    if l2_entry.is_unused() {
+        return false;
+    }
+    if l2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return true; // 2MiB ページ: マッピング済み
+    }
+
+    let l1_table: &x86_64::structures::paging::page_table::PageTable = unsafe {
+        &*(l2_entry.addr().as_u64()
+            as *const x86_64::structures::paging::page_table::PageTable)
+    };
+
+    let l1_entry = &l1_table[l1_idx];
+    !l1_entry.is_unused()
 }

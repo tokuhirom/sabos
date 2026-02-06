@@ -66,6 +66,8 @@ pub const SYS_GET_FB_INFO: u64 = 24;    // get_fb_info(buf_ptr, buf_len) — フ
 pub const SYS_MOUSE_READ: u64 = 25;     // mouse_read(buf_ptr, buf_len) — マウス状態取得
 pub const SYS_CLOCK_MONOTONIC: u64 = 26; // clock_monotonic() — 起動からの経過ミリ秒を返す
 pub const SYS_GETRANDOM: u64 = 27;       // getrandom(buf_ptr, len) — ランダムバイトを生成
+pub const SYS_MMAP: u64 = 28;            // mmap(addr_hint, len, prot, flags) — 匿名ページをマッピング
+pub const SYS_MUNMAP: u64 = 29;          // munmap(addr, len) — ページマッピングを解除
 
 // プロセス管理 (30-39)
 pub const SYS_EXEC: u64 = 30;    // exec(path_ptr, path_len) — プログラムを同期実行
@@ -1008,5 +1010,62 @@ pub fn getrandom(buf: &mut [u8]) -> Result<usize, SyscallResult> {
         Err(result)
     } else {
         Ok(result as usize)
+    }
+}
+
+/// mmap のプロテクションフラグ: 読み取り可能
+pub const MMAP_PROT_READ: u64 = 0x1;
+/// mmap のプロテクションフラグ: 書き込み可能
+pub const MMAP_PROT_WRITE: u64 = 0x2;
+/// mmap のフラグ: 匿名マッピング（ファイルに紐付かない）
+pub const MMAP_FLAG_ANONYMOUS: u64 = 0x1;
+
+/// 匿名メモリをマッピングする（mmap）。
+///
+/// ユーザー空間に新しいゼロ初期化済みページを動的に確保する。
+/// POSIX の mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0)
+/// に相当する。
+///
+/// # 引数
+/// - `addr_hint`: マッピング先アドレスのヒント（0 ならカーネルが決定）
+/// - `len`: 確保するバイト数（4KiB 単位にアラインされる）
+/// - `prot`: プロテクションフラグ（MMAP_PROT_READ | MMAP_PROT_WRITE）
+/// - `flags`: マッピングフラグ（MMAP_FLAG_ANONYMOUS）
+///
+/// # 戻り値
+/// - Ok(ptr): マッピングされたメモリの先頭アドレス
+/// - Err(errno): エラー時
+#[allow(dead_code)]
+pub fn mmap(addr_hint: u64, len: usize, prot: u64, flags: u64) -> Result<*mut u8, SyscallResult> {
+    let result = unsafe {
+        syscall4(SYS_MMAP, addr_hint, len as u64, prot, flags) as i64
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as *mut u8)
+    }
+}
+
+/// メモリマッピングを解除する（munmap）。
+///
+/// mmap で確保したメモリを解放する。
+///
+/// # 引数
+/// - `addr`: 解除する先頭アドレス（4KiB アライン必須）
+/// - `len`: 解除するバイト数
+///
+/// # 戻り値
+/// - Ok(0): 成功
+/// - Err(errno): エラー時
+#[allow(dead_code)]
+pub fn munmap(addr: *mut u8, len: usize) -> Result<u64, SyscallResult> {
+    let result = unsafe {
+        syscall2(SYS_MUNMAP, addr as u64, len as u64) as i64
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as u64)
     }
 }

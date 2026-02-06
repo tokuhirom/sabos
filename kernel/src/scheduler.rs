@@ -750,6 +750,39 @@ pub fn with_current_task<F: FnOnce(&Task)>(f: F) {
     f(task);
 }
 
+/// 現在のタスクの UserProcess に mmap で確保した物理フレームを追加する。
+/// プロセス終了時に destroy_user_process() がこれらのフレームも解放する。
+pub fn add_mmap_frames_to_current(frames: &[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>]) {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &mut sched.tasks[current];
+    if let Some(ref mut info) = task.user_process_info {
+        info.process.allocated_frames.extend_from_slice(frames);
+    }
+}
+
+/// 現在のタスクの UserProcess から munmap で解放するフレームを削除する。
+/// 指定した仮想アドレス範囲に対応するフレームを allocated_frames から除去する。
+pub fn remove_mmap_frames_from_current(frames_to_remove: &[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>]) {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &mut sched.tasks[current];
+    if let Some(ref mut info) = task.user_process_info {
+        info.process.allocated_frames.retain(|f| {
+            !frames_to_remove.iter().any(|r| r.start_address() == f.start_address())
+        });
+    }
+}
+
+/// 現在のタスクの CR3（ページテーブルフレーム）を取得する。
+/// ユーザープロセスの場合は Some(frame)、カーネルタスクの場合は None。
+pub fn current_task_page_table_frame() -> Option<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &sched.tasks[current];
+    task.user_process_info.as_ref().map(|info| info.process.page_table_frame)
+}
+
 /// 指定したタスクIDが存在するか確認する
 pub fn task_exists(task_id: u64) -> bool {
     let sched = SCHEDULER.lock();

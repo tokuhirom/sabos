@@ -1210,6 +1210,9 @@ impl Shell {
 
             // 11.10. getrandom のテスト
             run_test("getrandom", this.test_getrandom());
+
+            // 11.11. mmap のテスト（匿名ページの動的マッピング）
+            run_test("mmap", this.test_mmap());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1807,6 +1810,65 @@ impl Shell {
         // 3回中1回でも成功すれば OK（RDRAND が使えることを確認）
         // かつ最後に得た値がゼロでないことを確認
         success_count > 0 && value != 0
+    }
+
+    /// mmap のテスト（匿名ページの動的マッピング）
+    ///
+    /// カーネル空間から paging の map_anonymous_pages_in_process を直接テストする。
+    /// ELF プロセスのページテーブルを作成し、匿名ページをマッピングして
+    /// 読み書きが正常に行えることを確認する。
+    fn test_mmap(&self) -> bool {
+        use x86_64::VirtAddr;
+
+        // テスト用にプロセスページテーブルを作成
+        let l4_frame = crate::paging::create_process_page_table();
+
+        // 0x4000_0000 (1GiB) に 2 ページ（8KiB）をマッピング
+        // カーネルのアイデンティティマッピング（物理 RAM）と被らないように
+        // 高い仮想アドレスを使う
+        let virt_addr = VirtAddr::new(0x4000_0000);
+        let allocated = crate::paging::map_anonymous_pages_in_process(
+            l4_frame,
+            virt_addr,
+            2,   // 2 ページ
+            true, // 書き込み可能
+        );
+
+        // 2 フレームが確保されていること
+        if allocated.len() != 2 {
+            crate::paging::destroy_process_page_table(l4_frame);
+            return false;
+        }
+
+        // 確保したフレームがゼロ初期化されていることを確認
+        // （アイデンティティマッピングで物理アドレス = 仮想アドレスとしてアクセス）
+        let frame0_ptr = allocated[0].start_address().as_u64() as *const u8;
+        let all_zero = unsafe {
+            (0..4096).all(|i| *frame0_ptr.add(i) == 0)
+        };
+        if !all_zero {
+            crate::paging::destroy_process_page_table(l4_frame);
+            return false;
+        }
+
+        // フレームに書き込みができることを確認
+        let frame0_mut = allocated[0].start_address().as_u64() as *mut u8;
+        unsafe {
+            *frame0_mut = 0xAB;
+            *frame0_mut.add(1) = 0xCD;
+        }
+        let written_ok = unsafe {
+            *frame0_mut == 0xAB && *frame0_mut.add(1) == 0xCD
+        };
+
+        // munmap テスト: ページのマッピングを解除
+        let freed = crate::paging::unmap_pages_in_process(l4_frame, virt_addr, 2);
+        let unmap_ok = freed.len() == 2;
+
+        // クリーンアップ
+        crate::paging::destroy_process_page_table(l4_frame);
+
+        written_ok && unmap_ok
     }
 
     /// Handle から EOF まで読み取る
