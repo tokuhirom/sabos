@@ -5,6 +5,8 @@
 #![no_std]
 #![no_main]
 
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 

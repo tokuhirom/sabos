@@ -11,6 +11,8 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 

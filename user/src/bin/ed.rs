@@ -13,6 +13,8 @@ mod allocator;
 #[allow(dead_code)]
 #[path = "../fat32.rs"]
 mod fat32;
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 

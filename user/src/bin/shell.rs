@@ -50,6 +50,8 @@ mod fat32;
 mod gui_client;
 #[path = "../json.rs"]
 mod json;
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 
@@ -1345,41 +1347,25 @@ fn cmd_top() {
 
 /// top 用: メモリ情報を1行サマリーで表示
 ///
+/// println! マクロを活用して、フォーマット文字列で一発出力する。
 /// "Memory: {total} total / {alloc} allocated / {free} free ({kib} KiB free)"
 fn top_display_mem() {
     let mut buf = [0u8; FILE_BUFFER_SIZE];
     let result = syscall::get_mem_info(&mut buf);
     if result < 0 {
-        syscall::write_str("Memory: (error)\n");
+        println!("Memory: (error)");
         return;
     }
 
     let len = result as usize;
     if let Ok(s) = core::str::from_utf8(&buf[..len]) {
-        let total = json::json_find_u64(s, "total_frames");
-        let allocated = json::json_find_u64(s, "allocated_frames");
-        let free = json::json_find_u64(s, "free_frames");
-        let free_kib = json::json_find_u64(s, "free_kib");
+        let total = json::json_find_u64(s, "total_frames").unwrap_or(0);
+        let allocated = json::json_find_u64(s, "allocated_frames").unwrap_or(0);
+        let free = json::json_find_u64(s, "free_frames").unwrap_or(0);
+        let free_kib = json::json_find_u64(s, "free_kib").unwrap_or(0);
 
-        syscall::write_str("Memory: ");
-        if let Some(v) = total {
-            write_number(v);
-            syscall::write_str(" total / ");
-        }
-        if let Some(v) = allocated {
-            write_number(v);
-            syscall::write_str(" allocated / ");
-        }
-        if let Some(v) = free {
-            write_number(v);
-            syscall::write_str(" free");
-        }
-        if let Some(v) = free_kib {
-            syscall::write_str(" (");
-            write_number(v);
-            syscall::write_str(" KiB free)");
-        }
-        syscall::write_str("\n");
+        println!("Memory: {} total / {} allocated / {} free ({} KiB free)",
+            total, allocated, free, free_kib);
     }
 }
 

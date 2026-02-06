@@ -13,6 +13,8 @@ extern crate alloc;
 mod allocator;
 #[path = "../json.rs"]
 mod json;
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 

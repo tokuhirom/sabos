@@ -14,6 +14,8 @@ mod allocator;
 mod gui_client;
 #[path = "../json.rs"]
 mod json;
+#[path = "../print.rs"]
+mod print;
 #[path = "../syscall.rs"]
 mod syscall;
 
