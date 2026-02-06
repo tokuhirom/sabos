@@ -31,7 +31,7 @@ pub static WRITER: Mutex<Option<FramebufferWriter>> = Mutex::new(None);
 pub fn init_global_writer(info: FramebufferInfo) {
     let mut writer = FramebufferWriter::from_info(info);
     writer.clear();
-    writer.flush(); // バックバッファの内容を MMIO に転送して画面に反映
+    writer.flush_dirty(); // ダーティ領域（= 全画面）を MMIO に転送して画面に反映
     *WRITER.lock() = Some(writer);
 }
 
@@ -51,7 +51,7 @@ pub fn clear_global_screen() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         if let Some(writer) = WRITER.lock().as_mut() {
             writer.clear();
-            writer.flush();
+            writer.flush_dirty();
         }
     });
 }
@@ -101,6 +101,19 @@ fn pixel_format_to_u32(format: PixelFormat) -> u32 {
     }
 }
 
+/// ダーティ矩形。変更された領域の境界ボックスを追跡する。
+///
+/// 描画操作がバックバッファのどの領域を変更したかを記録し、
+/// flush 時にその領域だけを MMIO に転送することで転送量を最小化する。
+/// 座標は (x_min, y_min) が左上、(x_max, y_max) が右下（exclusive）。
+#[derive(Debug, Clone, Copy)]
+struct DirtyRect {
+    x_min: usize,
+    y_min: usize,
+    x_max: usize, // exclusive
+    y_max: usize, // exclusive
+}
+
 /// 描画エラー。
 /// ユーザー空間からの引数ミスを検出するために使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +139,8 @@ pub fn draw_pixel_global(x: usize, y: usize, r: u8, g: u8, b: u8) -> Result<(), 
         }
 
         writer.put_pixel(x, y, r, g, b);
-        writer.flush_rect(x, y, 1, 1);
+        writer.mark_dirty(x, y, 1, 1);
+        writer.flush_dirty();
         Ok(())
     })
 }
@@ -177,7 +191,8 @@ pub fn draw_rect_global(
             let dst = (yy * writer.stride + x) * bpp;
             writer.backbuf.copy_within(first_row_offset..first_row_offset + row_bytes, dst);
         }
-        writer.flush_rect(x, y, w, h);
+        writer.mark_dirty(x, y, w, h);
+        writer.flush_dirty();
         Ok(())
     })
 }
@@ -201,6 +216,13 @@ pub fn draw_line_global(
         if x0 >= writer.width || y0 >= writer.height || x1 >= writer.width || y1 >= writer.height {
             return Err(DrawError::OutOfBounds);
         }
+
+        // 直線の bounding box を事前計算してダーティ領域に使う。
+        // 以前は全画面 flush していたが、dirty rect で bounding box だけ転送する。
+        let bb_x = x0.min(x1);
+        let bb_y = y0.min(y1);
+        let bb_w = x0.max(x1) - bb_x + 1;
+        let bb_h = y0.max(y1) - bb_y + 1;
 
         // Bresenham
         let mut x0 = x0 as i32;
@@ -231,8 +253,9 @@ pub fn draw_line_global(
             }
         }
 
-        // 直線は範囲が不定なので全画面 flush
-        writer.flush();
+        // bounding box だけをダーティにして転送（以前の全画面 flush より高速）
+        writer.mark_dirty(bb_x, bb_y, bb_w, bb_h);
+        writer.flush_dirty();
         Ok(())
     })
 }
@@ -284,8 +307,9 @@ pub fn draw_blit_global(
             src_offset += row_bytes;
         }
 
-        // 変更された矩形領域だけを MMIO に転送（全画面 flush より高速）
-        writer.flush_rect(x, y, w, h);
+        // 変更された矩形領域をダーティとしてマークし、MMIO に転送
+        writer.mark_dirty(x, y, w, h);
+        writer.flush_dirty();
         Ok(())
     })
 }
@@ -323,7 +347,9 @@ pub fn draw_text_global(
         writer.cursor_x = old_x;
         writer.cursor_y = old_y;
 
-        writer.flush();
+        // 各 draw_char が mark_dirty しているので、まとめて flush_dirty で転送。
+        // 以前の全画面 flush() より効率的（テキスト領域の bounding box だけ転送）。
+        writer.flush_dirty();
         Ok(())
     })
 }
@@ -346,23 +372,13 @@ pub fn _print(args: fmt::Arguments) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         // フレームバッファに出力
         if let Some(writer) = WRITER.lock().as_mut() {
-            // テキスト描画前のカーソル位置を記録。
-            // スクロールが発生しなければ、変更された行だけ flush して高速化する。
-            let y_before = writer.cursor_y;
-
             writer.write_fmt(args).unwrap();
 
-            // スクロール発生チェック: スクロールするとカーソル Y が巻き戻るので
-            // y_after < y_before になる。その場合は全画面 flush が必要。
-            let y_after = writer.cursor_y;
-            if y_after < y_before {
-                // スクロールが発生した → 全画面 flush
-                writer.flush();
-            } else {
-                // スクロールなし → 変更された行だけ flush（高速）
-                let flush_h = y_after + CHAR_HEIGHT - y_before;
-                writer.flush_rect(0, y_before, writer.width, flush_h);
-            }
+            // draw_char / scroll_up が mark_dirty しているので、
+            // flush_dirty で変更領域の bounding box だけ MMIO に転送する。
+            // 以前は手動でスクロール判定して flush/flush_rect を切り替えていたが、
+            // dirty rect トラッキングにより自動的に最小限の領域が転送される。
+            writer.flush_dirty();
         }
         // シリアルにも出力（デュアル出力）
         // Exit Boot Services 後のデバッグに便利。
@@ -451,6 +467,9 @@ pub struct FramebufferWriter {
     fg_color: (u8, u8, u8),
     /// テキストの背景色 (R, G, B)
     bg_color: (u8, u8, u8),
+    /// ダーティ矩形。描画操作で変更された領域を追跡する。
+    /// flush_dirty() でこの領域だけを MMIO に転送し、None にリセットする。
+    dirty: Option<DirtyRect>,
 }
 
 // FramebufferWriter は *mut u8（フレームバッファの生ポインタ）を持つため、
@@ -483,6 +502,7 @@ impl FramebufferWriter {
             cursor_y: 0,
             fg_color: (255, 255, 255), // デフォルト白
             bg_color: (0, 0, 128),     // デフォルト紺
+            dirty: None,
         }
     }
 
@@ -490,6 +510,44 @@ impl FramebufferWriter {
     pub fn set_colors(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
         self.fg_color = fg;
         self.bg_color = bg;
+    }
+
+    /// 指定した矩形領域をダーティとしてマークする。
+    ///
+    /// 既存のダーティ矩形があれば、その境界ボックス（bounding box）を拡張する。
+    /// なければ新しいダーティ矩形を作成する。
+    /// 画面範囲外の座標は自動的にクリップされる。
+    fn mark_dirty(&mut self, x: usize, y: usize, w: usize, h: usize) {
+        let new = DirtyRect {
+            x_min: x,
+            y_min: y,
+            x_max: (x + w).min(self.width),
+            y_max: (y + h).min(self.height),
+        };
+        self.dirty = Some(match self.dirty {
+            Some(old) => DirtyRect {
+                x_min: old.x_min.min(new.x_min),
+                y_min: old.y_min.min(new.y_min),
+                x_max: old.x_max.max(new.x_max),
+                y_max: old.y_max.max(new.y_max),
+            },
+            None => new,
+        });
+    }
+
+    /// ダーティ矩形の領域だけを MMIO フレームバッファに転送し、ダーティ状態をリセットする。
+    ///
+    /// ダーティ矩形がなければ何もしない（不要な MMIO 転送を完全に回避）。
+    /// 複数の描画操作を行った後にまとめて呼ぶことで、
+    /// 変更された領域の bounding box だけが 1 回の転送で済む。
+    fn flush_dirty(&mut self) {
+        if let Some(dirty) = self.dirty.take() {
+            let w = dirty.x_max.saturating_sub(dirty.x_min);
+            let h = dirty.y_max.saturating_sub(dirty.y_min);
+            if w > 0 && h > 0 {
+                self.flush_rect(dirty.x_min, dirty.y_min, w, h);
+            }
+        }
     }
 
     /// 画面全体を背景色で塗りつぶす。
@@ -505,6 +563,7 @@ impl FramebufferWriter {
         }
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.mark_dirty(0, 0, self.width, self.height);
     }
 
     /// RGB 値をピクセルフォーマットに応じた 4 バイト配列に変換する。
@@ -539,24 +598,6 @@ impl FramebufferWriter {
         // バックバッファ (RAM) に書き込む。
         // 通常のメモリアクセスなので MMIO の write_volatile より桁違いに速い。
         self.backbuf[offset..offset + 4].copy_from_slice(&pixel);
-    }
-
-    /// バックバッファの内容を MMIO フレームバッファに一括転送する。
-    ///
-    /// 画面全体を転送するので、部分的な更新には flush_rect() を使う。
-    /// core::ptr::copy_nonoverlapping による一括コピーは、
-    /// ピクセルごとの write_volatile よりはるかに高速。
-    /// CPU のメモリバス幅を活かしてバースト転送できる。
-    fn flush(&self) {
-        let total_bytes = (self.height * self.stride * 4).min(self.fb_size);
-        let copy_len = total_bytes.min(self.backbuf.len());
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                self.backbuf.as_ptr(),
-                self.fb_ptr,
-                copy_len,
-            );
-        }
     }
 
     /// バックバッファの指定矩形領域だけを MMIO に転送する。
@@ -624,6 +665,8 @@ impl FramebufferWriter {
                 self.put_pixel(x + col, y + row, r, g, b);
             }
         }
+        // 文字 1 個分の矩形をダーティとしてマーク（put_pixel 64回分を 1 回で記録）
+        self.mark_dirty(x, y, CHAR_WIDTH, CHAR_HEIGHT);
     }
 
     /// 文字列を現在のカーソル位置から描画する。
@@ -657,6 +700,9 @@ impl FramebufferWriter {
         for chunk in self.backbuf[clear_start..total_bytes].chunks_exact_mut(4) {
             chunk.copy_from_slice(&pixel);
         }
+
+        // スクロールは画面全体に影響するので全画面をダーティにマーク
+        self.mark_dirty(0, 0, self.width, self.height);
     }
 
     /// カーソルが画面下端を超えていたらスクロールする。
@@ -677,6 +723,7 @@ impl FramebufferWriter {
                 self.put_pixel(self.cursor_x + col, self.cursor_y + row, r, g, b);
             }
         }
+        self.mark_dirty(self.cursor_x, self.cursor_y, CHAR_WIDTH, CHAR_HEIGHT);
     }
 
     /// 1文字を現在のカーソル位置に描画し、カーソルを進める。
