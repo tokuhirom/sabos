@@ -10,28 +10,22 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
+#[path = "../json.rs"]
+mod json;
+#[path = "../net.rs"]
+mod net;
 #[path = "../print.rs"]
 mod print;
 #[path = "../syscall.rs"]
 mod syscall;
-#[path = "../json.rs"]
-mod json;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 const HTTP_PORT: u16 = 8080;
-const IPC_BUF_SIZE: usize = 2048;
 const FILE_BUFFER_SIZE: usize = 4096;
 const MAX_REQUEST_SIZE: usize = 4096;
-
-// netd IPC
-const NETD_OPCODE_TCP_SEND: u32 = 3;
-const NETD_OPCODE_TCP_RECV: u32 = 4;
-const NETD_OPCODE_TCP_CLOSE: u32 = 5;
-const NETD_OPCODE_TCP_LISTEN: u32 = 6;
-const NETD_OPCODE_TCP_ACCEPT: u32 = 7;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -40,26 +34,29 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn httpd_main() -> ! {
-    let mut netd_id = resolve_task_id_by_name("NETD.ELF").unwrap_or(0);
+    // netd の初期化（見つかるまでリトライ）
+    loop {
+        if net::init_netd().is_ok() {
+            break;
+        }
+        syscall::sleep(500);
+    }
 
     loop {
-        if netd_id == 0 {
-            netd_id = resolve_task_id_by_name("NETD.ELF").unwrap_or(0);
-            if netd_id == 0 {
+        // リッスン開始
+        let listener = match net::TcpListener::bind(HTTP_PORT) {
+            Ok(l) => l,
+            Err(_) => {
                 syscall::sleep(500);
                 continue;
             }
-        }
+        };
 
-        if netd_tcp_listen(netd_id, HTTP_PORT).is_err() {
-            syscall::sleep(500);
-            continue;
-        }
-
+        // 接続を受け付けるループ
         loop {
-            match netd_tcp_accept(netd_id, 0) {
-                Ok(conn_id) => {
-                    handle_connection(netd_id, conn_id);
+            match listener.accept() {
+                Ok(stream) => {
+                    handle_connection(stream);
                 }
                 Err(_) => {
                     syscall::sleep(10);
@@ -69,12 +66,15 @@ fn httpd_main() -> ! {
     }
 }
 
-fn handle_connection(netd_id: u64, conn_id: u32) {
-    let req = match read_http_request(netd_id, conn_id) {
+/// HTTP 接続を処理する
+///
+/// TcpStream を受け取り、HTTP リクエストを読み込んでレスポンスを返す。
+/// stream は関数終了時に Drop で自動クローズされる。
+fn handle_connection(stream: net::TcpStream) {
+    let req = match read_http_request(&stream) {
         Ok(v) => v,
         Err(_) => {
-            send_simple_response(netd_id, conn_id, 400, "Bad Request", "bad request\n");
-            let _ = netd_tcp_close(netd_id, conn_id);
+            send_simple_response(&stream, 400, "Bad Request", "bad request\n");
             return;
         }
     };
@@ -82,8 +82,7 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
     let req_text = match core::str::from_utf8(&req) {
         Ok(v) => v,
         Err(_) => {
-            send_simple_response(netd_id, conn_id, 400, "Bad Request", "bad request\n");
-            let _ = netd_tcp_close(netd_id, conn_id);
+            send_simple_response(&stream, 400, "Bad Request", "bad request\n");
             return;
         }
     };
@@ -92,8 +91,7 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
     let first = match lines.next() {
         Some(v) => v,
         None => {
-            send_simple_response(netd_id, conn_id, 400, "Bad Request", "bad request\n");
-            let _ = netd_tcp_close(netd_id, conn_id);
+            send_simple_response(&stream, 400, "Bad Request", "bad request\n");
             return;
         }
     };
@@ -104,20 +102,17 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
     let version = parts.next().unwrap_or("");
 
     if method != "GET" {
-        send_simple_response(netd_id, conn_id, 405, "Method Not Allowed", "method not allowed\n");
-        let _ = netd_tcp_close(netd_id, conn_id);
+        send_simple_response(&stream, 405, "Method Not Allowed", "method not allowed\n");
         return;
     }
 
     if version != "HTTP/1.1" && version != "HTTP/1.0" {
-        send_simple_response(netd_id, conn_id, 400, "Bad Request", "bad request\n");
-        let _ = netd_tcp_close(netd_id, conn_id);
+        send_simple_response(&stream, 400, "Bad Request", "bad request\n");
         return;
     }
 
     if !path.starts_with('/') || path.contains("..") {
-        send_simple_response(netd_id, conn_id, 400, "Bad Request", "bad request\n");
-        let _ = netd_tcp_close(netd_id, conn_id);
+        send_simple_response(&stream, 400, "Bad Request", "bad request\n");
         return;
     }
 
@@ -126,13 +121,12 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
         let dir_path = if path == "/" { "/" } else { &path[..path.len() - 1] };
         match list_directory(dir_path, path) {
             Ok(html) => {
-                send_html_response(netd_id, conn_id, 200, "OK", &html);
+                send_html_response(&stream, 200, "OK", &html);
             }
             Err(_) => {
-                send_simple_response(netd_id, conn_id, 404, "Not Found", "not found\n");
+                send_simple_response(&stream, 404, "Not Found", "not found\n");
             }
         }
-        let _ = netd_tcp_close(netd_id, conn_id);
         return;
     }
 
@@ -143,13 +137,11 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
             // ファイルが見つからなければディレクトリとして試す
             match list_directory(path, path) {
                 Ok(html) => {
-                    send_html_response(netd_id, conn_id, 200, "OK", &html);
-                    let _ = netd_tcp_close(netd_id, conn_id);
+                    send_html_response(&stream, 200, "OK", &html);
                     return;
                 }
                 Err(_) => {
-                    send_simple_response(netd_id, conn_id, 404, "Not Found", "not found\n");
-                    let _ = netd_tcp_close(netd_id, conn_id);
+                    send_simple_response(&stream, 404, "Not Found", "not found\n");
                     return;
                 }
             }
@@ -168,16 +160,17 @@ fn handle_connection(netd_id: u64, conn_id: u32) {
     header.push_str("\r\n");
     header.push_str("Connection: close\r\n\r\n");
 
-    let _ = netd_tcp_send_all(netd_id, conn_id, header.as_bytes());
-    let _ = netd_tcp_send_all(netd_id, conn_id, &data);
-    let _ = netd_tcp_close(netd_id, conn_id);
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(&data);
+    // stream は Drop で自動クローズ
 }
 
-fn read_http_request(netd_id: u64, conn_id: u32) -> Result<Vec<u8>, ()> {
+/// HTTP リクエストを読み込む（ヘッダ終端 \r\n\r\n まで）
+fn read_http_request(stream: &net::TcpStream) -> Result<Vec<u8>, ()> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 256];
     loop {
-        let n = netd_tcp_recv(netd_id, conn_id, &mut tmp, 5000)?;
+        let n = stream.read(&mut tmp).map_err(|_| ())?;
         if n == 0 {
             return Err(());
         }
@@ -306,7 +299,7 @@ fn guess_content_type(path: &str) -> &'static str {
 }
 
 /// HTML レスポンスを送信する
-fn send_html_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, body: &str) {
+fn send_html_response(stream: &net::TcpStream, code: u32, reason: &str, body: &str) {
     let mut header = String::new();
     header.push_str("HTTP/1.1 ");
     header.push_str(&itoa(code as u64));
@@ -319,11 +312,11 @@ fn send_html_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, body:
     header.push_str("\r\n");
     header.push_str("Connection: close\r\n\r\n");
 
-    let _ = netd_tcp_send_all(netd_id, conn_id, header.as_bytes());
-    let _ = netd_tcp_send_all(netd_id, conn_id, body.as_bytes());
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
 }
 
-fn send_simple_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, body: &str) {
+fn send_simple_response(stream: &net::TcpStream, code: u32, reason: &str, body: &str) {
     let mut header = String::new();
     header.push_str("HTTP/1.1 ");
     header.push_str(&itoa(code as u64));
@@ -336,146 +329,8 @@ fn send_simple_response(netd_id: u64, conn_id: u32, code: u32, reason: &str, bod
     header.push_str("\r\n");
     header.push_str("Connection: close\r\n\r\n");
 
-    let _ = netd_tcp_send_all(netd_id, conn_id, header.as_bytes());
-    let _ = netd_tcp_send_all(netd_id, conn_id, body.as_bytes());
-}
-
-fn netd_tcp_listen(netd_id: u64, port: u16) -> Result<(), ()> {
-    let payload = port.to_le_bytes();
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_LISTEN, &payload, &mut [0u8; 32])?;
-    if status < 0 { Err(()) } else { Ok(()) }
-}
-
-fn netd_tcp_accept(netd_id: u64, timeout_ms: u64) -> Result<u32, ()> {
-    let payload = timeout_ms.to_le_bytes();
-    let mut resp = [0u8; 32];
-    let (status, len) = netd_request(netd_id, NETD_OPCODE_TCP_ACCEPT, &payload, &mut resp)?;
-    if status < 0 || len != 4 { Err(()) } else { Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]])) }
-}
-
-fn netd_tcp_send(netd_id: u64, conn_id: u32, data: &[u8]) -> Result<(), ()> {
-    let mut payload = [0u8; IPC_BUF_SIZE];
-    if 4 + data.len() > payload.len() {
-        return Err(());
-    }
-    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
-    payload[4..4 + data.len()].copy_from_slice(data);
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_SEND, &payload[..4 + data.len()], &mut [0u8; 32])?;
-    if status < 0 { Err(()) } else { Ok(()) }
-}
-
-fn netd_tcp_send_all(netd_id: u64, conn_id: u32, data: &[u8]) -> Result<(), ()> {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        let end = core::cmp::min(offset + 1024, data.len());
-        netd_tcp_send(netd_id, conn_id, &data[offset..end])?;
-        offset = end;
-    }
-    Ok(())
-}
-
-fn netd_tcp_recv(netd_id: u64, conn_id: u32, buf: &mut [u8], timeout_ms: u64) -> Result<usize, ()> {
-    let mut payload = [0u8; 16];
-    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
-    payload[4..8].copy_from_slice(&(buf.len() as u32).to_le_bytes());
-    payload[8..16].copy_from_slice(&timeout_ms.to_le_bytes());
-
-    let (status, len) = netd_request(netd_id, NETD_OPCODE_TCP_RECV, &payload, buf)?;
-    if status == -42 {
-        return Ok(0);
-    }
-    if status < 0 {
-        return Err(());
-    }
-    Ok(len)
-}
-
-fn netd_tcp_close(netd_id: u64, conn_id: u32) -> Result<(), ()> {
-    let payload = conn_id.to_le_bytes();
-    let (status, _) = netd_request(netd_id, NETD_OPCODE_TCP_CLOSE, &payload, &mut [0u8; 32])?;
-    if status < 0 { Err(()) } else { Ok(()) }
-}
-
-fn netd_request(
-    netd_id: u64,
-    opcode: u32,
-    payload: &[u8],
-    resp_buf: &mut [u8],
-) -> Result<(i32, usize), ()> {
-    if 8 + payload.len() > IPC_BUF_SIZE {
-        return Err(());
-    }
-    let mut req = [0u8; IPC_BUF_SIZE];
-    req[0..4].copy_from_slice(&opcode.to_le_bytes());
-    req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    req[8..8 + payload.len()].copy_from_slice(payload);
-
-    if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
-        return Err(());
-    }
-
-    let mut sender = 0u64;
-    let n = syscall::ipc_recv(&mut sender, resp_buf, 5000);
-    if n < 0 {
-        return Err(());
-    }
-    let n = n as usize;
-    if n < 12 {
-        return Err(());
-    }
-
-    let resp_opcode = u32::from_le_bytes([resp_buf[0], resp_buf[1], resp_buf[2], resp_buf[3]]);
-    if resp_opcode != opcode {
-        return Err(());
-    }
-    let status = i32::from_le_bytes([resp_buf[4], resp_buf[5], resp_buf[6], resp_buf[7]]);
-    let len = u32::from_le_bytes([resp_buf[8], resp_buf[9], resp_buf[10], resp_buf[11]]) as usize;
-    if 12 + len > n {
-        return Err(());
-    }
-    resp_buf.copy_within(12..12 + len, 0);
-    Ok((status, len))
-}
-
-/// タスク一覧から指定名のタスク ID を探す
-fn resolve_task_id_by_name(name: &str) -> Option<u64> {
-    let mut buf = [0u8; FILE_BUFFER_SIZE];
-    let result = syscall::get_task_list(&mut buf);
-    if result < 0 {
-        return None;
-    }
-    let len = result as usize;
-    let Ok(s) = core::str::from_utf8(&buf[..len]) else {
-        return None;
-    };
-
-    let (tasks_start, tasks_end) = json::json_find_array_bounds(s, "tasks")?;
-    let mut i = tasks_start;
-    let bytes = s.as_bytes();
-    while i < tasks_end {
-        while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
-            i += 1;
-        }
-        if i >= tasks_end || bytes[i] == b']' {
-            break;
-        }
-
-        let obj_end = json::find_matching_brace(s, i)?;
-        if obj_end > tasks_end {
-            break;
-        }
-
-        let obj = &s[i + 1..obj_end];
-        let id = json::json_find_u64(obj, "id");
-        let task_name = json::json_find_str(obj, "name");
-        if let (Some(id), Some(task_name)) = (id, task_name) {
-            if task_name == name {
-                return Some(id);
-            }
-        }
-        i = obj_end + 1;
-    }
-    None
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
 }
 
 fn itoa(mut n: u64) -> String {
