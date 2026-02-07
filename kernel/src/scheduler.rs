@@ -762,6 +762,43 @@ pub fn with_current_task<F: FnOnce(&Task)>(f: F) {
     f(task);
 }
 
+/// 現在のタスクの環境変数を取得する。
+///
+/// # 引数
+/// - `key`: 環境変数のキー
+///
+/// # 戻り値
+/// - Some(value): 環境変数が存在する場合、その値
+/// - None: 環境変数が存在しない場合
+pub fn get_env_var(key: &str) -> Option<String> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &sched.tasks[current];
+    task.env_vars.iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+}
+
+/// 現在のタスクの環境変数を設定する。
+///
+/// 既に同じキーの環境変数がある場合は上書きする。
+///
+/// # 引数
+/// - `key`: 環境変数のキー
+/// - `value`: 環境変数の値
+pub fn set_env_var(key: &str, value: &str) {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &mut sched.tasks[current];
+
+    // 既存のキーがあれば上書き
+    if let Some(entry) = task.env_vars.iter_mut().find(|(k, _)| k == key) {
+        entry.1 = String::from(value);
+    } else {
+        task.env_vars.push((String::from(key), String::from(value)));
+    }
+}
+
 /// 現在のタスクの UserProcess に mmap で確保した物理フレームを追加する。
 /// プロセス終了時に destroy_user_process() がこれらのフレームも解放する。
 pub fn add_mmap_frames_to_current(frames: &[x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>]) {

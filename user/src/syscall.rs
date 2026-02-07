@@ -81,6 +81,8 @@ pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
 pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 pub const SYS_KILL: u64 = 36;    // kill(task_id) — タスクを強制終了
+pub const SYS_GETENV: u64 = 37;  // getenv(key_ptr, key_len, val_buf_ptr, val_buf_len) — 環境変数取得
+pub const SYS_SETENV: u64 = 38;  // setenv(key_ptr, key_len, val_ptr, val_len) — 環境変数設定
 
 // システム制御 (50-59)
 pub const SYS_HALT: u64 = 50;        // halt() — システム停止
@@ -770,6 +772,57 @@ pub fn getpid() -> u64 {
 /// - 負の値（エラー時: 自分自身を kill、タスク不在、既に終了済み）
 pub fn kill(task_id: u64) -> SyscallResult {
     unsafe { syscall1(SYS_KILL, task_id) as i64 }
+}
+
+// =================================================================
+// 環境変数関連
+// =================================================================
+
+/// 環境変数を取得する
+///
+/// # 引数
+/// - `key`: 環境変数のキー
+/// - `buf`: 値を書き込むバッファ
+///
+/// # 戻り値
+/// - Ok(n): 値のバイト数（buf[..n] に書き込み済み）
+/// - Err(errno): エラー（-20: キーが存在しない、-4: バッファ不足）
+pub fn getenv(key: &str, buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let result = unsafe {
+        syscall4(
+            SYS_GETENV,
+            key.as_ptr() as u64,
+            key.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as usize)
+    }
+}
+
+/// 環境変数を設定する
+///
+/// # 引数
+/// - `key`: 環境変数のキー
+/// - `value`: 環境変数の値
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn setenv(key: &str, value: &str) -> SyscallResult {
+    unsafe {
+        syscall4(
+            SYS_SETENV,
+            key.as_ptr() as u64,
+            key.len() as u64,
+            value.as_ptr() as u64,
+            value.len() as u64,
+        ) as i64
+    }
 }
 
 // =================================================================

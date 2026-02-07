@@ -89,6 +89,8 @@ pub const SYS_SLEEP: u64 = 33;   // sleep(ms) — 指定ミリ秒スリープ
 pub const SYS_WAIT: u64 = 34;    // wait(task_id, timeout_ms) — 子プロセスの終了を待つ
 pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 pub const SYS_KILL: u64 = 36;    // kill(task_id) — タスクを強制終了
+pub const SYS_GETENV: u64 = 37;  // getenv(key_ptr, key_len, val_buf_ptr, val_buf_len) — 環境変数を取得
+pub const SYS_SETENV: u64 = 38;  // setenv(key_ptr, key_len, val_ptr, val_len) — 環境変数を設定
 
 // ネットワーク (40-49)
 pub const SYS_DNS_LOOKUP: u64 = 40;  // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
@@ -304,6 +306,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_WAIT => sys_wait(arg1, arg2),
         SYS_GETPID => sys_getpid(),
         SYS_KILL => sys_kill(arg1),
+        SYS_GETENV => sys_getenv(arg1, arg2, arg3, arg4),
+        SYS_SETENV => sys_setenv(arg1, arg2, arg3, arg4),
         // ネットワーク
         SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
         SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
@@ -1818,6 +1822,65 @@ fn sys_kill(arg1: u64) -> Result<u64, SyscallError> {
         Err("task already finished") => Err(SyscallError::PermissionDenied),
         Err(_) => Err(SyscallError::Other),
     }
+}
+
+// =================================================================
+// 環境変数関連システムコール
+// =================================================================
+
+/// SYS_GETENV: 環境変数を取得する
+///
+/// 引数:
+///   arg1 — key のポインタ（ユーザー空間）
+///   arg2 — key の長さ
+///   arg3 — value を書き込むバッファのポインタ
+///   arg4 — value バッファの長さ
+///
+/// 戻り値:
+///   value の長さ（成功時、バッファに書き込み済み）
+///   -20 (FILE_NOT_FOUND): 指定した key の環境変数が存在しない
+///   -4 (BUFFER_OVERFLOW): バッファが小さすぎる
+fn sys_getenv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // key を取得
+    let key_slice = user_slice_from_args(arg1, arg2)?;
+    let key = key_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 現在のタスクの環境変数から key を検索
+    let value = crate::scheduler::get_env_var(key)
+        .ok_or(SyscallError::FileNotFound)?;
+
+    // バッファに書き込む
+    let val_buf = user_slice_from_args(arg3, arg4)?;
+    if value.len() > val_buf.as_slice().len() {
+        return Err(SyscallError::BufferOverflow);
+    }
+
+    val_buf.as_mut_slice()[..value.len()].copy_from_slice(value.as_bytes());
+    Ok(value.len() as u64)
+}
+
+/// SYS_SETENV: 環境変数を設定する
+///
+/// 引数:
+///   arg1 — key のポインタ（ユーザー空間）
+///   arg2 — key の長さ
+///   arg3 — value のポインタ
+///   arg4 — value の長さ
+///
+/// 戻り値:
+///   0（成功時）
+fn sys_setenv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // key を取得
+    let key_slice = user_slice_from_args(arg1, arg2)?;
+    let key = key_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // value を取得
+    let val_slice = user_slice_from_args(arg3, arg4)?;
+    let value = val_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 現在のタスクの環境変数に設定
+    crate::scheduler::set_env_var(key, value);
+    Ok(0)
 }
 
 // =================================================================
