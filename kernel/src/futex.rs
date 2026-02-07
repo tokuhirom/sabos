@@ -33,12 +33,15 @@ pub const FUTEX_WAKE: u64 = 1;  // 待機中のタスクを起床
 static FUTEX_TABLE: Mutex<BTreeMap<(u64, u64), Vec<u64>>> =
     Mutex::new(BTreeMap::new());
 
-/// 現在の CR3 レジスタの値（物理アドレス）を取得する。
+/// 現在のタスクのアドレス空間 ID を取得する。
 /// Futex のキーとして使用し、プロセスごとにアドレス空間を区別する。
-fn current_cr3_addr() -> u64 {
-    use x86_64::registers::control::Cr3;
-    let (frame, _flags) = Cr3::read();
-    frame.start_address().as_u64()
+///
+/// ユーザープロセス（スレッド含む）の場合はタスクの CR3 フレームの物理アドレスを返す。
+/// カーネルタスクの場合はカーネル共通の CR3 を返す。
+/// CR3 レジスタの実際の値ではなく、タスクに登録された値を使うことで、
+/// 同じアドレス空間を共有するタスク間でキーが一致することを保証する。
+fn current_address_space_id() -> u64 {
+    crate::scheduler::current_task_cr3()
 }
 
 /// FUTEX_WAIT: アドレスの値が expected と一致したらスリープ
@@ -68,7 +71,7 @@ pub fn futex_wait(addr: u64, expected: u32, timeout_ms: u64) -> Result<u64, Sysc
     }
 
     let task_id = crate::scheduler::current_task_id();
-    let cr3 = current_cr3_addr();
+    let cr3 = current_address_space_id();
 
     // FUTEX_TABLE に自分のタスク ID を登録
     {
@@ -116,7 +119,7 @@ pub fn futex_wait(addr: u64, expected: u32, timeout_ms: u64) -> Result<u64, Sysc
 /// # 戻り値
 /// - Ok(n): 実際に起床したタスクの数
 pub fn futex_wake(addr: u64, count: u32) -> Result<u64, SyscallError> {
-    let cr3 = current_cr3_addr();
+    let cr3 = current_address_space_id();
     let mut woken = 0u64;
 
     // 待機者リストからタスクを取り出す

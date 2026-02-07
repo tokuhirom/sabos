@@ -860,6 +860,20 @@ pub fn remove_mmap_frames_from_current(frames_to_remove: &[x86_64::structures::p
     }
 }
 
+/// 現在のタスクの CR3 アドレスを取得する。
+/// Futex のキーとして使う。
+/// ユーザープロセスやスレッドはタスクの cr3 フィールドの値を返す。
+/// カーネルタスクは kernel_cr3() の値を返す。
+/// 同一アドレス空間のタスク（スレッド同士）は同じ値を返す。
+pub fn current_task_cr3() -> u64 {
+    let sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &sched.tasks[current];
+    task.cr3
+        .map(|f| f.start_address().as_u64())
+        .unwrap_or_else(|| crate::paging::kernel_cr3().as_u64())
+}
+
 /// 現在のタスクの CR3（ページテーブルフレーム）を取得する。
 /// ユーザープロセスの場合は Some(frame)、カーネルタスクの場合は None。
 pub fn current_task_page_table_frame() -> Option<x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>> {

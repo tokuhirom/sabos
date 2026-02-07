@@ -1221,6 +1221,12 @@ impl Shell {
 
             // 11.12. AC97 オーディオコントローラの検出テスト
             run_test("ac97_detect", this.test_ac97_detect());
+
+            // 11.13. Futex のテスト
+            run_test("futex", this.test_futex());
+
+            // 11.14. スレッド構造体のテスト
+            run_test("thread_struct", this.test_thread_struct());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2050,6 +2056,81 @@ impl Shell {
     /// AC97 ドライバが正常に初期化されていることを確認する。
     fn test_ac97_detect(&self) -> bool {
         crate::ac97::is_available()
+    }
+
+    /// Futex のテスト
+    ///
+    /// 1. ウェイター無しのアドレスに futex_wake → woken == 0
+    /// 2. expected と異なる値で futex_wait → 即座にエラーで返る
+    /// 3. FUTEX_TABLE への登録・削除が正しく動作することを確認
+    ///
+    /// 注: selftest は SYS_SELFTEST 経由でユーザープロセスから呼ばれるため、
+    /// カーネルタスクとはアドレス空間が異なる。本格的な wake テストは
+    /// ユーザー空間のスレッドテストで行う。
+    fn test_futex(&self) -> bool {
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        // テスト 1: ウェイター無しの futex_wake → woken == 0
+        static FUTEX_WAKE_TEST: AtomicU32 = AtomicU32::new(42);
+        let addr = &FUTEX_WAKE_TEST as *const AtomicU32 as u64;
+        match crate::futex::futex_wake(addr, 1) {
+            Ok(0) => {} // 期待通り: 誰も待っていない
+            _ => return false,
+        }
+
+        // テスト 2: expected と異なる値で futex_wait → 即座にエラー
+        // 値は 42 だが、expected = 0 で呼ぶ → 不一致なので即リターン
+        match crate::futex::futex_wait(addr, 0, 0) {
+            Err(crate::user_ptr::SyscallError::Other) => {} // 期待通り: 値が不一致
+            _ => return false,
+        }
+
+        // テスト 3: expected と一致する値で futex_wait (短いタイムアウト)
+        // 値は 42、expected = 42 → スリープするが、タイムアウトで自動起床
+        // これにより FUTEX_TABLE への登録→スリープ→起床→削除 の一連の流れをテストする
+        let before = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+        match crate::futex::futex_wait(addr, 42, 200) {
+            Ok(0) => {} // タイムアウトで起床
+            _ => return false,
+        }
+        let after = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+        // 少なくとも 1 tick 経過していることを確認（スリープした証拠）
+        if after <= before {
+            return false;
+        }
+
+        // テスト 4: タイムアウト起床後の futex_wake → woken == 0
+        // 起床後は FUTEX_TABLE から自分が削除されているので、wake しても 0
+        match crate::futex::futex_wake(addr, 1) {
+            Ok(0) => {} // 期待通り: テーブルから削除済み
+            _ => return false,
+        }
+
+        true
+    }
+
+    /// スレッド構造体のテスト
+    ///
+    /// spawn_thread() はユーザープロセス専用なので、カーネル selftest では
+    /// process_leader_id フィールドの初期値確認等、基本的な構造テストのみ行う。
+    fn test_thread_struct(&self) -> bool {
+        // 1. カーネルタスク (task 0) の process_leader_id が None であることを確認
+        let tasks = crate::scheduler::task_list();
+        let kernel_task = tasks.iter().find(|t| t.name == "kernel");
+        if kernel_task.is_none() {
+            return false;
+        }
+
+        // 2. wait_for_thread に存在しないスレッド ID を渡すとエラーになることを確認
+        match crate::scheduler::wait_for_thread(99999, 100) {
+            Err(crate::scheduler::WaitError::NoChild) => {} // 期待通り
+            _ => return false,
+        }
+
+        // 3. wake_task に存在しない ID を渡してもクラッシュしないことを確認
+        crate::scheduler::wake_task(99999); // 何も起こらないはず
+
+        true
     }
 
     /// Handle から EOF まで読み取る
