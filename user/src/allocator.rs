@@ -10,6 +10,7 @@
 
 use linked_list_allocator::LockedHeap;
 use core::alloc::Layout;
+use core::arch::asm;
 
 /// ヒープサイズ（1 MiB）
 /// 通常のユーザープロセス向け。GUI は allocator_gui.rs で別サイズを使う。
@@ -47,8 +48,44 @@ pub fn init() {
 }
 
 /// alloc の OOM ハンドラ
-/// メモリ確保に失敗したら無限ループで停止する。
+///
+/// メモリ確保に失敗したらエラーメッセージを出力してプロセスを終了する。
+/// 以前は loop {} で無限ループしていたが、何が起きたか分からず
+/// デバッグ困難だったため、メッセージ出力 + exit に変更した。
+///
+/// NOTE: allocator モジュールは各バイナリから mod allocator; で取り込まれるため
+/// crate::syscall を直接参照できない。そのためインラインアセンブリで
+/// 直接システムコールを発行する。
 #[alloc_error_handler]
-fn alloc_error(_layout: Layout) -> ! {
+fn alloc_error(layout: Layout) -> ! {
+    // エラーメッセージをコンソールに出力（SYS_WRITE = 1）
+    let msg = b"[OOM] alloc failed in user process\n";
+    unsafe {
+        asm!(
+            "int 0x80",
+            in("rax") 1u64,         // SYS_WRITE
+            in("rdi") msg.as_ptr(), // buf_ptr
+            in("rsi") msg.len(),    // buf_len
+            lateout("rax") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+
+    // サイズ情報も出力（固定文字列で十分。Layout の数値を動的に組み立てると
+    // alloc が必要になり再帰 OOM になるため、固定メッセージに留める）
+    let _ = layout;
+
+    // プロセスを終了（SYS_EXIT = 60）
+    unsafe {
+        asm!(
+            "int 0x80",
+            in("rax") 60u64, // SYS_EXIT
+            lateout("rax") _,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    // カーネルが制御を返さないのでここには到達しないが、型を満たすため
     loop {}
 }

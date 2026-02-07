@@ -46,8 +46,15 @@ pub struct MemoryRegion {
 ///
 /// バンプ方式と違ってフレームの解放・再利用が可能。
 pub struct BitmapFrameAllocator {
-    /// 使用可能な物理メモリ領域のリスト
+    /// 使用可能な物理メモリ領域のリスト（開始アドレス昇順でソート済み）
     regions: Vec<MemoryRegion>,
+    /// リージョンのプレフィックスサム（累積フレーム数）。
+    /// region_prefix_frames[i] = regions[0..i] の合計フレーム数。
+    /// 長さは regions.len() + 1 で、[0] = 0、[regions.len()] = total_frames。
+    ///
+    /// これにより index_to_phys / phys_to_index で二分探索が使えるようになり、
+    /// リージョン数 N に対して O(N) → O(log N) に高速化される。
+    region_prefix_frames: Vec<u64>,
     /// ビットマップ。1 ビット = 1 フレーム (0 = 空き, 1 = 使用中)。
     /// bitmap[i] の j ビット目が、フラットインデックス (i * 64 + j) に対応する。
     bitmap: Vec<u64>,
@@ -55,7 +62,7 @@ pub struct BitmapFrameAllocator {
     total_frames: u64,
     /// 現在使用中のフレーム数
     allocated_count: u64,
-    /// 無効な解放の回数（デバッグ用）
+    /// 無効な解放の回数（デバッグ用。本来 0 であるべき）
     invalid_dealloc_count: u64,
     /// 次に探索を開始するビットマップのインデックス（検索高速化のヒント）
     /// 直前の割り当て位置の近くから探すことで、毎回先頭から探す無駄を減らす。
@@ -67,6 +74,7 @@ impl BitmapFrameAllocator {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
+            region_prefix_frames: Vec::new(),
             bitmap: Vec::new(),
             total_frames: 0,
             allocated_count: 0,
@@ -77,15 +85,32 @@ impl BitmapFrameAllocator {
 
     /// UEFI メモリマップから取得した CONVENTIONAL 領域のリストで初期化する。
     /// ビットマップを作成し、全ビットを 0（空き）にする。
-    pub fn init(&mut self, regions: Vec<MemoryRegion>) {
+    pub fn init(&mut self, mut regions: Vec<MemoryRegion>) {
+        // リージョンを開始アドレス昇順にソートする。
+        // UEFI メモリマップは通常ソート済みだが、保証はないので明示的にソートする。
+        // phys_to_index() の二分探索に必要。
+        regions.sort_by_key(|r| r.start);
+
         // 全フレーム数を計算
         let total: u64 = regions.iter().map(|r| r.page_count).sum();
+
+        // プレフィックスサム（累積フレーム数）を構築する。
+        // prefix[0] = 0, prefix[i+1] = prefix[i] + regions[i].page_count
+        // これにより、フラットインデックスがどのリージョンに属するかを
+        // 二分探索で O(log N) で求められる。
+        let mut prefix = Vec::with_capacity(regions.len() + 1);
+        prefix.push(0u64);
+        for region in &regions {
+            let last = *prefix.last().unwrap();
+            prefix.push(last + region.page_count);
+        }
 
         // ビットマップのサイズ = ceil(total / 64)
         // 64 フレームごとに 1 つの u64 を使う
         let bitmap_size = ((total + 63) / 64) as usize;
 
         self.regions = regions;
+        self.region_prefix_frames = prefix;
         self.bitmap = vec![0u64; bitmap_size]; // 全ビット 0 = 全フレーム空き
         self.total_frames = total;
         self.allocated_count = 0;
@@ -115,39 +140,57 @@ impl BitmapFrameAllocator {
 
     /// フラットインデックスを物理アドレスに変換する。
     ///
-    /// 各リージョンのフレーム数を順番に足していき、
-    /// index がどのリージョンに属するか求めて物理アドレスを計算する。
+    /// プレフィックスサム配列を二分探索して、index がどのリージョンに属するか求める。
+    /// 以前は線形探索 O(N) だったが、二分探索で O(log N) に高速化した。
+    ///
+    /// 例: regions = [A(100フレーム), B(200フレーム), C(150フレーム)]
+    ///     prefix  = [0, 100, 300, 450]
+    ///     index=250 → prefix で 100 <= 250 < 300 → region B
+    ///     offset = 250 - 100 = 150 → B.start + 150 * 4096
     fn index_to_phys(&self, index: u64) -> Option<PhysAddr> {
-        let mut offset = index;
-        for region in &self.regions {
-            if offset < region.page_count {
-                // このリージョン内のフレーム
-                return Some(PhysAddr::new(region.start + offset * 4096));
-            }
-            offset -= region.page_count;
+        if index >= self.total_frames {
+            return None;
         }
-        // インデックスが範囲外
-        None
+
+        // partition_point は「条件を満たす最後の要素の次」を返す。
+        // prefix[i] <= index を満たす最大の i を求めたい。
+        // partition_point(|&p| p <= index) は、p <= index が true な最後の位置 + 1 を返す。
+        // つまりリージョンインデックスは partition_point - 1。
+        let pos = self.region_prefix_frames.partition_point(|&p| p <= index);
+        if pos == 0 {
+            return None;
+        }
+        let region_idx = pos - 1;
+        let region = &self.regions[region_idx];
+        let offset = index - self.region_prefix_frames[region_idx];
+        Some(PhysAddr::new(region.start + offset * 4096))
     }
 
     /// 物理アドレスをフラットインデックスに変換する。
     ///
-    /// 物理アドレスがどのリージョンに属するかを探し、
-    /// そのリージョン内でのオフセット + それ以前のリージョンの累計フレーム数 = インデックス。
+    /// リージョンが開始アドレス昇順でソート済みなので、二分探索で
+    /// 物理アドレスがどのリージョンに属するかを O(log N) で求める。
+    /// 以前は線形探索 O(N) だった。
     fn phys_to_index(&self, addr: PhysAddr) -> Option<u64> {
-        let addr = addr.as_u64();
-        let mut base_index: u64 = 0;
-        for region in &self.regions {
-            let region_end = region.start + region.page_count * 4096;
-            if addr >= region.start && addr < region_end {
-                // このリージョンに属するフレーム
-                let offset_in_region = (addr - region.start) / 4096;
-                return Some(base_index + offset_in_region);
-            }
-            base_index += region.page_count;
+        let addr_val = addr.as_u64();
+
+        // regions は start 昇順ソート済み。
+        // addr_val を含むリージョンを探す。
+        // partition_point(|r| r.start <= addr_val) は、
+        // start <= addr_val な最後のリージョンの次を返す。
+        let pos = self.regions.partition_point(|r| r.start <= addr_val);
+        if pos == 0 {
+            return None;
         }
-        // どのリージョンにも属さない
-        None
+        let region_idx = pos - 1;
+        let region = &self.regions[region_idx];
+        let region_end = region.start + region.page_count * 4096;
+        if addr_val >= region_end {
+            // このリージョンの範囲外（リージョン間のギャップ）
+            return None;
+        }
+        let offset_in_region = (addr_val - region.start) / 4096;
+        Some(self.region_prefix_frames[region_idx] + offset_in_region)
     }
 
     /// ビットマップの指定インデックスのビットが立っているか確認する。
@@ -219,17 +262,19 @@ impl BitmapFrameAllocator {
                     self.next_search_hint = word;
                 }
             } else {
-                // 二重解放や未割り当て解放を検出（panic せずカウント）
-                self.invalid_dealloc_count += 1;
-                crate::serial_println!(
-                    "[memory] WARNING: invalid dealloc (phys={:#x})",
-                    addr.as_u64()
+                // 二重解放や未割り当て解放はバグ。開発段階では即座に検出したいので panic する。
+                // 以前はカウントだけしてサイレントに継続していたが、
+                // バグを見逃すリスクが高いため panic に変更した。
+                panic!(
+                    "[memory] double-free or invalid dealloc detected (phys={:#x}, index={})",
+                    addr.as_u64(),
+                    index
                 );
             }
         } else {
-            self.invalid_dealloc_count += 1;
-            crate::serial_println!(
-                "[memory] WARNING: invalid dealloc (phys={:#x})",
+            // どのリージョンにも属さないアドレスの解放はバグ
+            panic!(
+                "[memory] dealloc of unknown physical address (phys={:#x})",
                 addr.as_u64()
             );
         }
