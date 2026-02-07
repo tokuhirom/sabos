@@ -18,6 +18,7 @@
 // 自動的にスタックを切り替える。
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use x86_64::structures::paging::{PhysFrame, Size4KiB};
@@ -144,6 +145,21 @@ pub fn destroy_user_process(process: UserProcess) {
 static mut SAVED_RSP: u64 = 0;
 static mut SAVED_RBP: u64 = 0;
 
+/// ユーザーモード遷移時にレジスタ経由で渡す argc/argv/envp の値。
+/// jump_to_usermode のアセンブリがこの値を rdi/rsi/rdx にセットしてから iretq する。
+/// System V ABI 互換のレジスタ渡し:
+///   rdi = argc（引数の数）
+///   rsi = argv（引数ポインタ配列のアドレス）
+///   rdx = envp（環境変数ポインタ配列のアドレス）
+///
+/// グローバル変数経由で渡す理由:
+///   jump_to_usermode は既に 4 引数を取っており（Microsoft x64 ABI の上限）、
+///   追加引数をスタック経由にすると ABI の複雑さが増す。
+///   シングルコア + 割り込み無効状態で使うので、グローバル変数で安全に渡せる。
+static mut USER_ENTRY_ARGC: u64 = 0;
+static mut USER_ENTRY_ARGV: u64 = 0;
+static mut USER_ENTRY_ENVP: u64 = 0;
+
 // =================================================================
 // iretq による Ring 3 への遷移（アセンブリ）
 // =================================================================
@@ -194,9 +210,22 @@ global_asm!(
     "push r8",     // RFLAGS (IF=1)
     "push rdx",    // CS = user_cs
     "push rcx",    // RIP = entry_addr
+
+    // System V ABI 互換のレジスタ渡し:
+    //   rdi = argc, rsi = argv, rdx = envp
+    // グローバル変数から値をロードする。
+    // これにより _start(argc, argv, envp) として引数を受け取れる。
+    // 既存の _start() は引数なし宣言なので、レジスタ値を単に無視する。
+    "mov rdi, [rip + {user_argc}]",
+    "mov rsi, [rip + {user_argv}]",
+    "mov rdx, [rip + {user_envp}]",
+
     "iretq",       // Ring 3 へ遷移！
     saved_rsp = sym SAVED_RSP,
     saved_rbp = sym SAVED_RBP,
+    user_argc = sym USER_ENTRY_ARGC,
+    user_argv = sym USER_ENTRY_ARGV,
+    user_envp = sym USER_ENTRY_ENVP,
 );
 
 unsafe extern "C" {
@@ -211,6 +240,21 @@ unsafe extern "C" {
         rflags: u64,
         user_stack_top: u64,
     );
+}
+
+/// ユーザーモード遷移前に argc/argv/envp のレジスタ値を設定する。
+///
+/// jump_to_usermode のアセンブリがこの値を rdi/rsi/rdx にセットする。
+/// 割り込み無効状態で呼ぶこと（シングルコアなのでグローバル変数で安全）。
+///
+/// # Safety
+/// 割り込み無効状態で呼ぶ必要がある。
+pub unsafe fn set_user_entry_args(argc: u64, argv: u64, envp: u64) {
+    unsafe {
+        USER_ENTRY_ARGC = argc;
+        USER_ENTRY_ARGV = argv;
+        USER_ENTRY_ENVP = envp;
+    }
 }
 
 /// ユーザーモードでプログラムを実行する（プロセスページテーブル + CR3 切り替え方式）。
@@ -461,6 +505,112 @@ pub fn get_user_elf_data() -> &'static [u8] {
     USER_ELF_DATA
 }
 
+/// ユーザースタック上に argc/argv/envp を配置するヘルパー関数。
+///
+/// スタックレイアウト（上位アドレスから下位アドレスへ）:
+/// ```text
+/// [High] 文字列データ ("arg0\0", "arg1\0", "KEY=VAL\0", ...)
+///        envp[N] = NULL
+///        envp[N-1] = pointer to env string
+///        ...
+///        envp[0] = pointer to first env string
+///        argv[argc] = NULL
+///        argv[argc-1] = pointer to last arg
+///        ...
+///        argv[0] = pointer to first arg (= program name)
+/// [Low]  ← adjusted user_stack_top (RSP)
+/// ```
+///
+/// # 引数
+/// - `stack_top`: ユーザースタックの最上位アドレス
+/// - `stack_frames`: スタック用の物理フレーム（アイデンティティマッピング経由で書き込む）
+/// - `stack_vaddr`: スタックの仮想アドレス開始位置
+/// - `args`: コマンドライン引数のスライス
+/// - `env_vars`: 環境変数の "KEY=VALUE" 形式スライス
+///
+/// # 戻り値
+/// (new_stack_top, argc, argv_addr, envp_addr)
+fn setup_user_stack_args(
+    stack_top: u64,
+    stack_frames: &[PhysFrame<Size4KiB>],
+    stack_vaddr: u64,
+    args: &[&str],
+    env_vars: &[String],
+) -> (u64, u64, u64, u64) {
+    // ステップ1: 文字列データをスタックの上位から書き込む
+    // カーソルは stack_top から下に向かって進む
+    let mut cursor = stack_top;
+
+    // 文字列をスタックに書き込み、仮想アドレスを記録するヘルパー
+    // アイデンティティマッピング経由で物理フレームに直接書き込む
+    let write_to_stack = |vaddr: u64, data: &[u8], frames: &[PhysFrame<Size4KiB>], base_vaddr: u64| {
+        for (i, &byte) in data.iter().enumerate() {
+            let target_vaddr = vaddr + i as u64;
+            let offset_from_base = (target_vaddr - base_vaddr) as usize;
+            let frame_idx = offset_from_base / 4096;
+            let offset_in_frame = offset_from_base % 4096;
+            if frame_idx < frames.len() {
+                let phys_ptr = (frames[frame_idx].start_address().as_u64() + offset_in_frame as u64) as *mut u8;
+                unsafe { *phys_ptr = byte; }
+            }
+        }
+    };
+
+    // 各引数の文字列データを書き込み、仮想アドレスを記録
+    let mut arg_addrs: Vec<u64> = Vec::with_capacity(args.len());
+    for arg in args.iter().rev() {
+        let len = arg.len() + 1; // null 終端分
+        cursor -= len as u64;
+        write_to_stack(cursor, arg.as_bytes(), stack_frames, stack_vaddr);
+        // null 終端を書き込む
+        write_to_stack(cursor + arg.len() as u64, &[0], stack_frames, stack_vaddr);
+        arg_addrs.push(cursor);
+    }
+    arg_addrs.reverse(); // 正しい順序に戻す
+
+    // 各環境変数の文字列データを書き込み
+    let mut env_addrs: Vec<u64> = Vec::with_capacity(env_vars.len());
+    for env in env_vars.iter().rev() {
+        let len = env.len() + 1; // null 終端分
+        cursor -= len as u64;
+        write_to_stack(cursor, env.as_bytes(), stack_frames, stack_vaddr);
+        write_to_stack(cursor + env.len() as u64, &[0], stack_frames, stack_vaddr);
+        env_addrs.push(cursor);
+    }
+    env_addrs.reverse();
+
+    // ステップ2: ポインタ配列を書き込む（8 バイトアラインメント）
+    cursor = cursor & !0x7; // 8 バイトアラインに切り下げ
+
+    // envp[N] = NULL
+    cursor -= 8;
+    write_to_stack(cursor, &0u64.to_le_bytes(), stack_frames, stack_vaddr);
+
+    // envp[0..N-1] = 各環境変数文字列のアドレス（逆順に積む）
+    for addr in env_addrs.iter().rev() {
+        cursor -= 8;
+        write_to_stack(cursor, &addr.to_le_bytes(), stack_frames, stack_vaddr);
+    }
+    let envp_addr = cursor;
+
+    // argv[argc] = NULL
+    cursor -= 8;
+    write_to_stack(cursor, &0u64.to_le_bytes(), stack_frames, stack_vaddr);
+
+    // argv[0..argc-1] = 各引数文字列のアドレス（逆順に積む）
+    for addr in arg_addrs.iter().rev() {
+        cursor -= 8;
+        write_to_stack(cursor, &addr.to_le_bytes(), stack_frames, stack_vaddr);
+    }
+    let argv_addr = cursor;
+
+    // 16 バイトアラインメントに揃える（System V ABI 要件）
+    cursor = cursor & !0xF;
+
+    let argc = args.len() as u64;
+    (cursor, argc, argv_addr, envp_addr)
+}
+
 /// ELF バイナリからユーザープロセスを作成する。
 ///
 /// 手順:
@@ -468,14 +618,25 @@ pub fn get_user_elf_data() -> &'static [u8] {
 ///   2. プロセスページテーブルを作成（カーネルマッピングをコピー）
 ///   3. 各 LOAD セグメントを物理フレームにロード
 ///   4. ユーザースタック用の物理フレームを確保してマッピング
+///   5. スタック上に argc/argv/envp を配置
 ///
-/// 返り値: (UserProcess, entry_point, user_stack_top)
+/// 返り値: (UserProcess, entry_point, user_stack_top, argc, argv_addr, envp_addr)
 ///   - UserProcess: プロセスの状態（ページテーブル、カーネルスタック、確保フレーム）
 ///   - entry_point: ELF のエントリポイント仮想アドレス
-///   - user_stack_top: ユーザースタックのトップアドレス
+///   - user_stack_top: ユーザースタックのトップアドレス（argc/argv/envp 配置後の調整済み RSP）
+///   - argc: 引数の数
+///   - argv_addr: argv 配列のユーザー空間アドレス
+///   - envp_addr: envp 配列のユーザー空間アドレス
+///
+/// # 引数
+/// - `elf_data`: ELF バイナリのデータ
+/// - `args`: コマンドライン引数（args[0] はプログラム名）
+/// - `env_vars`: 環境変数（"KEY=VALUE" 形式）
 pub fn create_elf_process(
     elf_data: &[u8],
-) -> Result<(UserProcess, u64, u64), &'static str> {
+    args: &[&str],
+    env_vars: &[String],
+) -> Result<(UserProcess, u64, u64, u64, u64, u64), &'static str> {
     // 1. ELF パース
     let elf_info = crate::elf::parse_elf(elf_data)?;
 
@@ -571,7 +732,20 @@ pub fn create_elf_process(
     // スタックフレームは新規確保なので重複の心配なし
     all_allocated_frames.extend_from_slice(&stack_frames);
 
-    // 5. カーネルスタックを確保（プロセスごとに独立）
+    // 5. ユーザースタック上に argc/argv/envp を配置する
+    //    スタックは高アドレスから低アドレスに伸びるので、
+    //    文字列データ → ポインタ配列 の順で上位から配置し、
+    //    最終的な RSP をそこに設定する。
+    let raw_stack_top = ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE as u64;
+    let (adjusted_stack_top, argc, argv_addr, envp_addr) = setup_user_stack_args(
+        raw_stack_top,
+        &stack_frames,
+        ELF_USER_STACK_VADDR,
+        args,
+        env_vars,
+    );
+
+    // 6. カーネルスタックを確保（プロセスごとに独立）
     let kernel_stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
 
     let process = UserProcess {
@@ -581,9 +755,8 @@ pub fn create_elf_process(
     };
 
     let entry_point = elf_info.entry_point;
-    let user_stack_top = ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE as u64;
 
-    Ok((process, entry_point, user_stack_top))
+    Ok((process, entry_point, adjusted_stack_top, argc, argv_addr, envp_addr))
 }
 
 /// ELF プロセスを Ring 3 で実行する。

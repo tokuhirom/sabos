@@ -293,7 +293,7 @@ fn main() -> Status {
                     kprintln!("Loaded INIT.ELF ({} bytes)", elf_data.len());
 
                     // init をバックグラウンドで起動
-                    match scheduler::spawn_user("init", &elf_data) {
+                    match scheduler::spawn_user("init", &elf_data, &[]) {
                         Ok(task_id) => {
                             framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
                             kprintln!("Init process started (task {})", task_id);

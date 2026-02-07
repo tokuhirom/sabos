@@ -14,6 +14,7 @@
 // x86_64-unknown-uefi ターゲットは Microsoft x64 ABI を使う。
 // callee-saved レジスタ: rbx, rbp, rdi, rsi, r12, r13, r14, r15
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -240,6 +241,12 @@ pub struct UserProcessInfo {
     /// 初回遷移済みフラグ。false なら user_task_trampoline で初めて Ring 3 に遷移する。
     /// true ならプリエンプション後の復帰（iretq で自然に戻る）。
     pub first_run_done: bool,
+    /// argc: コマンドライン引数の数
+    pub argc: u64,
+    /// argv: 引数ポインタ配列のユーザー空間アドレス
+    pub argv_addr: u64,
+    /// envp: 環境変数ポインタ配列のユーザー空間アドレス
+    pub envp_addr: u64,
 }
 
 /// カーネルタスク。
@@ -278,6 +285,9 @@ pub struct Task {
     pub exit_code: i32,
     /// wait() 済みかどうか（同じ終了を繰り返し返さないためのフラグ）
     pub reaped: bool,
+    /// プロセスの環境変数（KEY=VALUE のペア）。
+    /// spawn 時に親プロセスから継承され、SYS_SETENV で変更可能。
+    pub env_vars: Vec<(String, String)>,
 }
 
 // =================================================================
@@ -336,6 +346,7 @@ pub fn init() {
         parent_id: None,              // カーネルタスクに親はいない
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() は不要
+        env_vars: Vec::new(),         // カーネルタスクに環境変数はない
     });
     sched.current = 0;
 }
@@ -422,6 +433,7 @@ pub fn spawn(name: &'static str, entry: fn()) {
         parent_id: None,              // カーネルタスクに親はいない
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() は不要
+        env_vars: Vec::new(),         // カーネルタスクに環境変数はない
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -1139,8 +1151,8 @@ extern "C" fn user_task_exit_handler() {
 /// SYS_EXIT システムコールが呼ばれると exit_usermode() 経由でここに戻る。
 #[unsafe(no_mangle)]
 extern "C" fn user_task_entry_wrapper(task_id: u64) {
-    // タスク情報を取得
-    let (entry_point, user_stack_top, kernel_stack_ptr, kernel_stack_len) = {
+    // タスク情報を取得（argc/argv/envp も含む）
+    let (entry_point, user_stack_top, kernel_stack_ptr, kernel_stack_len, argc, argv_addr, envp_addr) = {
         let mut sched = SCHEDULER.lock();
         let task = sched.tasks.iter_mut().find(|t| t.id == task_id);
         match task {
@@ -1149,7 +1161,8 @@ extern "C" fn user_task_entry_wrapper(task_id: u64) {
                     info.first_run_done = true;
                     let ks_ptr = info.process.kernel_stack.as_ptr() as u64;
                     let ks_len = info.process.kernel_stack.len() as u64;
-                    (info.entry_point, info.user_stack_top, ks_ptr, ks_len)
+                    (info.entry_point, info.user_stack_top, ks_ptr, ks_len,
+                     info.argc, info.argv_addr, info.envp_addr)
                 } else {
                     // ユーザープロセス情報がない → エラー
                     crate::serial_println!("[scheduler] ERROR: task {} has no user_process_info", task_id);
@@ -1179,6 +1192,13 @@ extern "C" fn user_task_entry_wrapper(task_id: u64) {
     // RFLAGS: IF (Interrupt Flag, bit 9) を立てておく
     let rflags: u64 = 0x200;
 
+    // argc/argv/envp をグローバル変数に設定する。
+    // jump_to_usermode のアセンブリがこの値を rdi/rsi/rdx にセットする。
+    // 割り込みは sti で有効化済みだが、iretq 直前に設定するので競合しない。
+    unsafe {
+        crate::usermode::set_user_entry_args(argc, argv_addr, envp_addr);
+    }
+
     // Ring 3 に遷移する。
     // jump_to_usermode() は usermode.rs で定義されているアセンブリ関数。
     // SYS_EXIT → exit_usermode() で RSP/RBP が復元され、ここに戻る。
@@ -1199,12 +1219,39 @@ extern "C" fn user_task_entry_wrapper(task_id: u64) {
 /// # 引数
 /// - `name`: タスク名（ps コマンドで表示される）
 /// - `elf_data`: ELF バイナリのデータ
+/// - `args`: コマンドライン引数（args[0] はプログラム名）。空なら name を args[0] として使う。
 ///
 /// # 戻り値
 /// 成功時は Ok(タスクID)、失敗時は Err(エラーメッセージ)
-pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
-    // ELF からユーザープロセスを作成
-    let (process, entry_point, user_stack_top) = crate::usermode::create_elf_process(elf_data)?;
+pub fn spawn_user(name: &str, elf_data: &[u8], args: &[&str]) -> Result<u64, &'static str> {
+    // 親プロセスの環境変数を取得してクローンする
+    // スケジューラのロックを短く保つために、先にコピーを取得する
+    let parent_env_vars = {
+        let sched = SCHEDULER.lock();
+        if sched.tasks.is_empty() {
+            Vec::new()
+        } else {
+            sched.tasks[sched.current].env_vars.clone()
+        }
+    };
+
+    // 引数が空の場合、プログラム名を args[0] として使う
+    let default_args: Vec<&str>;
+    let actual_args = if args.is_empty() {
+        default_args = vec![name];
+        &default_args[..]
+    } else {
+        args
+    };
+
+    // 環境変数を "KEY=VALUE" 形式の String Vec に変換
+    let env_strings: Vec<String> = parent_env_vars.iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+
+    // ELF からユーザープロセスを作成（スタック上に argc/argv/envp を配置）
+    let (process, entry_point, user_stack_top, argc, argv_addr, envp_addr) =
+        crate::usermode::create_elf_process(elf_data, actual_args, &env_strings)?;
 
     // プロセスの CR3（ページテーブル）を取得
     let cr3 = process.page_table_frame;
@@ -1271,6 +1318,9 @@ pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
         entry_point,
         user_stack_top,
         first_run_done: false,
+        argc,
+        argv_addr,
+        envp_addr,
     };
 
     sched.tasks.push(Task {
@@ -1285,6 +1335,7 @@ pub fn spawn_user(name: &str, elf_data: &[u8]) -> Result<u64, &'static str> {
         parent_id,                    // 親タスクの ID（spawn 元）
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() が呼ばれるまで未回収
+        env_vars: parent_env_vars,    // 親プロセスの環境変数を継承
     });
 
     crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);

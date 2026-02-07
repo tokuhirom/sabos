@@ -383,10 +383,10 @@ impl Shell {
             fa.free_frames()
         };
 
-        // ELF プロセスを作成
+        // ELF プロセスを作成（引数なし・環境変数なし）
         kprintln!("Creating ELF process...");
-        let (process, entry_point, user_stack_top) =
-            match crate::usermode::create_elf_process(elf_data) {
+        let (process, entry_point, user_stack_top, _argc, _argv, _envp) =
+            match crate::usermode::create_elf_process(elf_data, &[], &[]) {
                 Ok(result) => result,
                 Err(e) => {
                     framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -822,9 +822,9 @@ impl Shell {
             fa.free_frames()
         };
 
-        // ELF プロセスを作成
-        let (process, entry_point, user_stack_top) =
-            match crate::usermode::create_elf_process(&elf_data) {
+        // ELF プロセスを作成（引数なし・環境変数なし）
+        let (process, entry_point, user_stack_top, _argc, _argv, _envp) =
+            match crate::usermode::create_elf_process(&elf_data, &[], &[]) {
                 Ok(result) => result,
                 Err(e) => {
                     framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -899,7 +899,7 @@ impl Shell {
             .unwrap_or(filename);
 
         // ユーザープロセスとして spawn
-        match scheduler::spawn_user(process_name, &elf_data) {
+        match scheduler::spawn_user(process_name, &elf_data, &[]) {
             Ok(task_id) => {
                 framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
                 kprintln!("Process '{}' spawned as task {} (background)", process_name, task_id);

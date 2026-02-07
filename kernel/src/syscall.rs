@@ -1659,7 +1659,7 @@ fn exec_by_path(path: &str) -> Result<(), SyscallError> {
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data) {
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &[path]) {
         Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }
@@ -1703,6 +1703,9 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
         path.rsplit('/').next().unwrap_or(path)
     );
 
+    // パスもコピーしておく（ユーザー空間の文字列は spawn 後に無効になる可能性がある）
+    let path_owned = String::from(path);
+
     // FAT32 からファイルを読み込む
     let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
@@ -1712,7 +1715,7 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data) {
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &[&path_owned]) {
         Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }
