@@ -1244,6 +1244,12 @@ impl Shell {
 
             // 13.9. fs_stat syscall のテスト
             run_test("syscall_fs_stat", this.test_syscall_fs_stat());
+
+            // 13.10. ハンドル経由のファイル書き込みテスト
+            run_test("handle_write", this.test_handle_write());
+
+            // 13.11. ハンドル経由のシークテスト
+            run_test("handle_seek", this.test_handle_seek());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1703,6 +1709,144 @@ impl Shell {
         let _ = crate::handle::close(&handle);
 
         hello.starts_with(b"Hello from FAT32!")
+    }
+
+    /// ハンドル経由のファイル書き込みテスト
+    ///
+    /// 1. WRITE 権限付きで新規ファイルを open
+    /// 2. "hello" を書き込み
+    /// 3. close（FAT32 にフラッシュ）
+    /// 4. READ で再度 open
+    /// 5. 読み返して "hello" であることを確認
+    /// 6. close
+    /// 7. クリーンアップ（ファイル削除）
+    fn test_handle_write(&self) -> bool {
+        use crate::handle::{HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_RIGHT_STAT, HANDLE_RIGHT_SEEK};
+
+        let test_path = "/HWTEST.TXT";
+        let test_data = b"hello";
+        let write_rights = HANDLE_RIGHT_WRITE | HANDLE_RIGHT_READ | HANDLE_RIGHT_STAT | HANDLE_RIGHT_SEEK;
+
+        // 1. WRITE 権限付きで新規ファイルを open
+        let handle = match crate::syscall::open_path_to_handle(test_path, write_rights) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+
+        // 2. "hello" を書き込み
+        if crate::handle::write(&handle, test_data).is_err() {
+            let _ = crate::handle::close(&handle);
+            return false;
+        }
+
+        // 3. close（FAT32 にフラッシュ）
+        if crate::handle::close(&handle).is_err() {
+            return false;
+        }
+
+        // 4. READ で再度 open
+        let handle = match crate::syscall::open_path_to_handle(test_path, HANDLE_RIGHT_READ) {
+            Ok(h) => h,
+            Err(_) => {
+                // クリーンアップ
+                let mut fat32 = crate::fat32::Fat32::new().unwrap();
+                let _ = fat32.delete_file(test_path);
+                return false;
+            }
+        };
+
+        // 5. 読み返して "hello" であることを確認
+        let data = match self.read_all_handle(&handle) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                let mut fat32 = crate::fat32::Fat32::new().unwrap();
+                let _ = fat32.delete_file(test_path);
+                return false;
+            }
+        };
+        let _ = crate::handle::close(&handle);
+
+        // 7. クリーンアップ
+        let mut fat32 = crate::fat32::Fat32::new().unwrap();
+        let _ = fat32.delete_file(test_path);
+
+        data == test_data
+    }
+
+    /// ハンドル経由のシークテスト
+    ///
+    /// 1. HELLO.TXT を READ + SEEK + STAT 権限で open
+    /// 2. stat でサイズ取得
+    /// 3. 先頭数バイト読む
+    /// 4. SEEK_SET で先頭に戻す
+    /// 5. 再度読んで同じ内容であることを確認
+    /// 6. close
+    fn test_handle_seek(&self) -> bool {
+        use crate::handle::{HANDLE_RIGHT_READ, HANDLE_RIGHT_SEEK, HANDLE_RIGHT_STAT, SEEK_SET};
+
+        let rights = HANDLE_RIGHT_READ | HANDLE_RIGHT_SEEK | HANDLE_RIGHT_STAT;
+
+        // 1. HELLO.TXT を open
+        let handle = match crate::syscall::open_path_to_handle("HELLO.TXT", rights) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+
+        // 2. stat でサイズ取得
+        let stat = match crate::handle::stat(&handle) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+        if stat.size == 0 {
+            let _ = crate::handle::close(&handle);
+            return false;
+        }
+
+        // 3. 先頭数バイト読む
+        let mut buf1 = [0u8; 8];
+        let n1 = match crate::handle::read(&handle, &mut buf1) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+        if n1 == 0 {
+            let _ = crate::handle::close(&handle);
+            return false;
+        }
+
+        // 4. SEEK_SET で先頭に戻す
+        let new_pos = match crate::handle::seek(&handle, 0, SEEK_SET) {
+            Ok(p) => p,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+        if new_pos != 0 {
+            let _ = crate::handle::close(&handle);
+            return false;
+        }
+
+        // 5. 再度読んで同じ内容であることを確認
+        let mut buf2 = [0u8; 8];
+        let n2 = match crate::handle::read(&handle, &mut buf2) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = crate::handle::close(&handle);
+                return false;
+            }
+        };
+
+        let _ = crate::handle::close(&handle);
+
+        // 同じ長さ・同じ内容であること
+        n1 == n2 && buf1[..n1] == buf2[..n2]
     }
 
     /// ブロックデバイス syscalls のテスト
