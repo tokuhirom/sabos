@@ -112,6 +112,8 @@ struct HandleEntry {
     data: Vec<u8>,
     /// 現在のファイルポジション（File の場合）
     pos: usize,
+    /// 書き込みがあったかどうか（close 時に FAT32 に書き戻す）
+    dirty: bool,
 }
 
 lazy_static! {
@@ -155,6 +157,7 @@ pub fn create_handle_with_path(data: Vec<u8>, rights: u32, path: String) -> Hand
         path,
         data,
         pos: 0,
+        dirty: false,
     };
 
     insert_entry(entry, token)
@@ -177,6 +180,7 @@ pub fn create_directory_handle(path: String, rights: u32) -> Handle {
         path,
         data: Vec::new(),
         pos: 0,
+        dirty: false,
     };
 
     insert_entry(entry, token)
@@ -249,6 +253,9 @@ pub fn read(handle: &Handle, buf: &mut [u8]) -> Result<usize, SyscallError> {
 
 /// Handle に書き込む
 ///
+/// インメモリの data バッファに書き込み、dirty フラグを立てる。
+/// 実際の FAT32 への書き戻しは close() 時に行う（write-back 方式）。
+///
 /// # 引数
 /// - `handle`: 書き込み先のハンドル
 /// - `buf`: 書き込むデータ
@@ -259,13 +266,36 @@ pub fn read(handle: &Handle, buf: &mut [u8]) -> Result<usize, SyscallError> {
 /// # エラー
 /// - `InvalidHandle`: ハンドルが無効
 /// - `PermissionDenied`: WRITE 権限がない
-/// - `NotSupported`: 現在は未対応
-pub fn write(_handle: &Handle, _buf: &[u8]) -> Result<usize, SyscallError> {
-    // TODO: 書き込みサポート
-    Err(SyscallError::NotSupported)
+/// - `NotSupported`: ファイル以外への書き込み
+pub fn write(handle: &Handle, buf: &[u8]) -> Result<usize, SyscallError> {
+    let mut table = HANDLE_TABLE.lock();
+    let entry = get_entry_mut(&mut table, handle)?;
+
+    // WRITE 権限チェック
+    if (entry.rights & HANDLE_RIGHT_WRITE) == 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // ファイルのみ書き込み可能
+    if entry.kind != HandleKind::File {
+        return Err(SyscallError::NotSupported);
+    }
+
+    // pos 位置に書き込み（必要なら data を拡張）
+    let end = entry.pos + buf.len();
+    if end > entry.data.len() {
+        entry.data.resize(end, 0);
+    }
+    entry.data[entry.pos..end].copy_from_slice(buf);
+    entry.pos = end;
+    entry.dirty = true;
+    Ok(buf.len())
 }
 
 /// Handle を閉じる
+///
+/// dirty フラグが立っているファイルは FAT32 に書き戻してから解放する。
+/// 書き戻しは delete + create のパターン（既存の sys_file_write と同じ方式）。
 ///
 /// # 引数
 /// - `handle`: 閉じるハンドル
@@ -277,9 +307,26 @@ pub fn write(_handle: &Handle, _buf: &[u8]) -> Result<usize, SyscallError> {
 /// - `InvalidHandle`: ハンドルが無効
 pub fn close(handle: &Handle) -> Result<(), SyscallError> {
     let mut table = HANDLE_TABLE.lock();
-    let _ = get_entry(&table, handle)?;
+    let entry = get_entry(&table, handle)?;
 
-    // token が一致したら解放
+    // dirty なファイルを FAT32 に書き戻す
+    let needs_flush = entry.dirty && !entry.path.is_empty();
+    if needs_flush {
+        let path = entry.path.clone();
+        let data = entry.data.clone();
+        // テーブルからエントリを削除してからロックを解放
+        // （FAT32 操作中にデッドロックしないように）
+        table[handle.id as usize] = None;
+        drop(table);
+
+        // FAT32 に書き戻し: 既存ファイルを削除してから新規作成
+        let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+        let _ = fat32.delete_file(&path); // 既存ファイルがなくてもエラーにしない
+        fat32.create_file(&path, &data).map_err(|_| SyscallError::Other)?;
+        return Ok(());
+    }
+
+    // dirty でなければそのまま解放
     table[handle.id as usize] = None;
     Ok(())
 }
@@ -324,6 +371,7 @@ pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, Sysca
         path: entry.path.clone(),
         data: entry.data.clone(),
         pos: entry.pos,
+        dirty: false,
     };
 
     drop(table); // ロックを解放してから insert_entry を呼ぶ

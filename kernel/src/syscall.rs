@@ -741,11 +741,9 @@ fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallEr
     // Handle の書き込み先
     let handle_ptr = user_ptr_from_arg::<Handle>(arg3)?;
 
-    if (rights & HANDLE_RIGHT_WRITE) != 0 {
-        if path.starts_with("/proc") {
-            return Err(SyscallError::ReadOnly);
-        }
-        return Err(SyscallError::NotSupported);
+    // /proc 配下は書き込み禁止
+    if (rights & HANDLE_RIGHT_WRITE) != 0 && path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
     }
 
     let handle = open_path_to_handle(path, rights)?;
@@ -1346,8 +1344,9 @@ fn procfs_read_to_vec(path: &str) -> Result<Vec<u8>, SyscallError> {
 /// パスから Handle を作成する
 pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::handle::Handle, SyscallError> {
     use crate::handle::{
-        create_directory_handle, create_handle, HANDLE_RIGHT_ENUM, HANDLE_RIGHT_LOOKUP,
+        create_directory_handle, create_handle_with_path, HANDLE_RIGHT_ENUM, HANDLE_RIGHT_LOOKUP,
         HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_RIGHTS_DIRECTORY_READ, HANDLE_RIGHTS_FILE_READ,
+        HANDLE_RIGHTS_FILE_RW,
     };
 
     // /proc ディレクトリは一覧のみ許可
@@ -1369,7 +1368,7 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
             return Err(SyscallError::ReadOnly);
         }
         let data = procfs_read_to_vec(path)?;
-        return Ok(create_handle(data, file_rights));
+        return Ok(create_handle_with_path(data, file_rights, String::from(path)));
     }
 
     // ルートディレクトリは特別扱い
@@ -1381,31 +1380,50 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
         return Ok(create_directory_handle(String::from("/"), dir_rights));
     }
 
+    // WRITE 権限付きの場合: 新規ファイル作成も許可する
+    let has_write = (rights & HANDLE_RIGHT_WRITE) != 0;
+
     // FAT32 からエントリを取得して種別判定
     let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let entry = fat32.find_entry(path).map_err(|_| SyscallError::FileNotFound)?;
+    let find_result = fat32.find_entry(path);
 
-    // ATTR_DIRECTORY = 0x10
-    const ATTR_DIRECTORY: u8 = 0x10;
-    if (entry.attr & ATTR_DIRECTORY) != 0 {
-        let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
-        if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
-            return Err(SyscallError::InvalidArgument);
+    match find_result {
+        Ok(entry) => {
+            // ATTR_DIRECTORY = 0x10
+            const ATTR_DIRECTORY: u8 = 0x10;
+            if (entry.attr & ATTR_DIRECTORY) != 0 {
+                // ディレクトリは書き込みオープン不可
+                if has_write {
+                    return Err(SyscallError::NotSupported);
+                }
+                let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+                if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                return Ok(create_directory_handle(String::from(path), dir_rights));
+            }
+
+            // 既存ファイル: データを読み込んでハンドル作成
+            let file_rights = if rights == 0 {
+                if has_write { HANDLE_RIGHTS_FILE_RW } else { HANDLE_RIGHTS_FILE_READ }
+            } else {
+                rights
+            };
+            let data = fat32.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+            Ok(create_handle_with_path(data, file_rights, String::from(path)))
         }
-        return Ok(create_directory_handle(String::from(path), dir_rights));
+        Err(_) => {
+            // ファイルが見つからない場合
+            if has_write {
+                // WRITE 権限付きなら新規ファイルとして空データでハンドル作成
+                let file_rights = if rights == 0 { HANDLE_RIGHTS_FILE_RW } else { rights };
+                Ok(create_handle_with_path(Vec::new(), file_rights, String::from(path)))
+            } else {
+                // WRITE なしならファイル未発見エラー
+                Err(SyscallError::FileNotFound)
+            }
+        }
     }
-
-    // ファイルは読み取りのみ許可（書き込みは未対応）
-    let file_rights = if rights == 0 { HANDLE_RIGHTS_FILE_READ } else { rights };
-    if (file_rights & HANDLE_RIGHT_READ) == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    if (file_rights & HANDLE_RIGHT_WRITE) != 0 {
-        return Err(SyscallError::NotSupported);
-    }
-
-    let data = fat32.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
-    Ok(create_handle(data, file_rights))
 }
 
 /// メモリ情報をテキスト形式で書き込む（SYS_GET_MEM_INFO 用）
