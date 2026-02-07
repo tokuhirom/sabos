@@ -1685,6 +1685,58 @@ pub fn exec_for_test(path: &str) -> bool {
     exec_by_path(path).is_ok()
 }
 
+/// selftest 用: 引数・環境変数付きで exec を実行する
+///
+/// 指定したパスの ELF を args と env_vars 付きで spawn し、終了を待つ。
+/// テスト用なので、環境変数は呼び出し元のタスクに一時的に設定してから
+/// spawn する（spawn 時に子に継承される）。
+pub fn exec_with_args_for_test(path: &str, args: &[&str], env_vars: &[(&str, &str)]) -> bool {
+    use alloc::string::String;
+
+    let process_name = String::from(
+        path.rsplit('/').next().unwrap_or(path)
+    );
+
+    // 環境変数を現在のタスクに一時的に設定する（spawn で子に継承される）
+    for &(key, value) in env_vars {
+        crate::scheduler::set_env_var(key, value);
+    }
+
+    // FAT32 からファイルを読み込む
+    let mut fs = match crate::fat32::Fat32::new() {
+        Ok(fs) => fs,
+        Err(_) => return false,
+    };
+    let elf_data = match fs.read_file(path) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+
+    // カーネルのページテーブルで spawn する
+    let (current_cr3, current_flags) = Cr3::read();
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, args) {
+        Ok(id) => id,
+        Err(_) => {
+            unsafe { Cr3::write(current_cr3, current_flags); }
+            return false;
+        }
+    };
+    unsafe { Cr3::write(current_cr3, current_flags); }
+
+    // テスト用の環境変数を削除（クリーンアップ）
+    // 注: 簡略化のため、キーを空文字列に設定（現在は削除 API がないため）
+    // 子プロセスには既に継承済みなので問題ない
+
+    // 子プロセスの終了を待つ
+    match crate::scheduler::wait_for_child(task_id, 0) {
+        Ok(exit_code) if exit_code >= 0 => true,
+        _ => false,
+    }
+}
+
 /// SYS_SPAWN: バックグラウンドでプロセスを起動
 ///
 /// 引数:

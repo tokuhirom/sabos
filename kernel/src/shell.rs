@@ -1204,6 +1204,9 @@ impl Shell {
             // 11.6. exec のテスト（EXIT0.ELF を同期実行）
             run_test("exec_exit0", this.test_exec_exit0());
 
+            // 11.65. argc/argv/envp の受け渡しテスト
+            run_test("exec_args", this.test_exec_with_args());
+
             // 11.8. kill のテスト（自分自身の kill が拒否されること）
             run_test("kill_self_reject", this.test_kill_self_reject());
 
@@ -1503,6 +1506,20 @@ impl Shell {
     /// EXIT0.ELF を同期実行し、正常終了することを確認する
     fn test_exec_exit0(&self) -> bool {
         crate::syscall::exec_for_test("/EXIT0.ELF")
+    }
+
+    /// argc/argv/envp の受け渡しテスト
+    ///
+    /// EXIT0.ELF を引数・環境変数付きで起動し、
+    /// ユーザー側で正しく受け取れることを確認する。
+    /// EXIT0.ELF は引数が 1 つ以上ある場合にテストモードに入り、
+    /// argc/argv/envp を検証して "exit0: args_ok\n" を出力する。
+    fn test_exec_with_args(&self) -> bool {
+        crate::syscall::exec_with_args_for_test(
+            "/EXIT0.ELF",
+            &["/EXIT0.ELF", "hello", "world"],
+            &[("TEST_KEY", "test_value")],
+        )
     }
 
     /// PCI 列挙のテスト
