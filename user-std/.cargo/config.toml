@@ -1,0 +1,9 @@
+[build]
+target = "../x86_64-sabos.json"
+
+[target.x86_64-sabos]
+rustflags = ["-C", "link-arg=-Tlinker.ld", "-C", "relocation-model=static"]
+
+[unstable]
+build-std = ["core", "alloc", "std", "panic_abort", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
