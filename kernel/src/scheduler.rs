@@ -657,6 +657,36 @@ pub fn preempt() {
     }
 }
 
+/// 現在のタスクを Sleeping 状態にする（yield は呼び出し元が行う）。
+///
+/// futex_wait() のように「Sleeping に設定してから追加処理して yield」
+/// というパターンで使う。単純なスリープは sleep_ticks() を使うこと。
+///
+/// # 引数
+/// - `wake_at`: 起床するタイマーティック数（TIMER_TICK_COUNT がこの値以上になったら Ready に戻る）。
+///              u64::MAX を指定すると、wake_task() で明示的に起こされるまで無期限待ち。
+pub fn set_current_sleeping(wake_at: u64) {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    sched.tasks[current].state = TaskState::Sleeping(wake_at);
+}
+
+/// 指定したタスクを起床させる（Sleeping → Ready）。
+///
+/// futex_wake やスレッド join の通知で使用する。
+/// タスクが Sleeping 状態でなければ何もしない。
+///
+/// # 引数
+/// - `task_id`: 起床させるタスクの ID
+pub fn wake_task(task_id: u64) {
+    let mut sched = SCHEDULER.lock();
+    if let Some(task) = sched.tasks.iter_mut().find(|t| t.id == task_id) {
+        if matches!(task.state, TaskState::Sleeping(_)) {
+            task.state = TaskState::Ready;
+        }
+    }
+}
+
 /// 現在のタスクを指定ティック数だけスリープさせる。
 ///
 /// PIT は約 18.2 Hz で発火するので、1 ティック ≈ 55ms。

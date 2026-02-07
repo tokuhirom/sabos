@@ -135,6 +135,14 @@ pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, 
 // サウンド (100-109)
 pub const SYS_SOUND_PLAY: u64 = 100;  // sound_play(freq_hz, duration_ms) — 正弦波ビープ音再生
 
+// スレッド (110-119)
+pub const SYS_THREAD_CREATE: u64 = 110; // thread_create(entry_ptr, stack_ptr, arg) -> thread_id
+pub const SYS_THREAD_EXIT: u64 = 111;   // thread_exit(exit_code) — スレッド終了
+pub const SYS_THREAD_JOIN: u64 = 112;   // thread_join(thread_id, timeout_ms) -> exit_code
+
+// Futex (120-129)
+pub const SYS_FUTEX: u64 = 120;         // futex(addr, op, val, timeout_ms) — Futex 操作
+
 // =================================================================
 // アセンブリエントリポイント
 // =================================================================
@@ -337,6 +345,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
         // サウンド
         SYS_SOUND_PLAY => sys_sound_play(arg1, arg2),
+        // Futex
+        SYS_FUTEX => sys_futex(arg1, arg2, arg3, arg4),
         // システム制御
         SYS_DRAW_PIXEL => sys_draw_pixel(arg1, arg2, arg3),
         SYS_DRAW_RECT => sys_draw_rect(arg1, arg2, arg3, arg4),
@@ -2634,5 +2644,33 @@ fn sys_sound_play(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
             Ok(0)
         }
         None => Err(SyscallError::NotSupported),
+    }
+}
+
+/// SYS_FUTEX: Futex 操作（ユーザー空間同期プリミティブの基盤）
+///
+/// 引数:
+///   arg1 — ユーザー空間の AtomicU32 のアドレス
+///   arg2 — 操作コード（0: FUTEX_WAIT, 1: FUTEX_WAKE）
+///   arg3 — WAIT 時: expected 値 / WAKE 時: 起床させる最大タスク数
+///   arg4 — WAIT 時: タイムアウト (ms, 0 = 無期限) / WAKE 時: 未使用
+///
+/// 戻り値:
+///   WAIT: 0（起床した）/ エラー（値が不一致で即リターン）
+///   WAKE: 起床したタスクの数
+fn sys_futex(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let addr = arg1;
+    let op = arg2;
+    let val = arg3 as u32;
+
+    match op {
+        crate::futex::FUTEX_WAIT => {
+            let timeout_ms = arg4;
+            crate::futex::futex_wait(addr, val, timeout_ms)
+        }
+        crate::futex::FUTEX_WAKE => {
+            crate::futex::futex_wake(addr, val)
+        }
+        _ => Err(SyscallError::InvalidArgument),
     }
 }

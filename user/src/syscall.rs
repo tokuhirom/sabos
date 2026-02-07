@@ -117,6 +117,14 @@ pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, 
 // サウンド (100-109)
 pub const SYS_SOUND_PLAY: u64 = 100;  // sound_play(freq_hz, duration_ms) — 正弦波ビープ音再生
 
+// スレッド (110-119)
+pub const SYS_THREAD_CREATE: u64 = 110; // thread_create(entry_ptr, stack_ptr, arg) -> thread_id
+pub const SYS_THREAD_EXIT: u64 = 111;   // thread_exit(exit_code) — スレッド終了
+pub const SYS_THREAD_JOIN: u64 = 112;   // thread_join(thread_id, timeout_ms) -> exit_code
+
+// Futex (120-129)
+pub const SYS_FUTEX: u64 = 120;         // futex(addr, op, val, timeout_ms) — Futex 操作
+
 // =================================================================
 // Handle 構造体と権限ビット（Capability-based security）
 // =================================================================
@@ -1273,4 +1281,85 @@ pub fn munmap(addr: *mut u8, len: usize) -> Result<u64, SyscallResult> {
 /// - 負の値（エラー時: 引数範囲外、AC97 未検出）
 pub fn sound_play(freq_hz: u32, duration_ms: u32) -> SyscallResult {
     unsafe { syscall2(SYS_SOUND_PLAY, freq_hz as u64, duration_ms as u64) as i64 }
+}
+
+// =================================================================
+// Futex 関連
+// =================================================================
+
+/// Futex 操作コード: 値が一致したらスリープ
+pub const FUTEX_WAIT: u64 = 0;
+/// Futex 操作コード: 待機中のタスクを起床
+pub const FUTEX_WAKE: u64 = 1;
+
+/// FUTEX_WAIT: ユーザー空間アドレスの値が expected と一致したらスリープ
+///
+/// # 引数
+/// - `addr`: AtomicU32 のアドレス
+/// - `expected`: 期待する値（一致したらスリープ）
+/// - `timeout_ms`: タイムアウト (ms)。0 なら無期限待ち。
+///
+/// # 戻り値
+/// - 0（起床した）
+/// - 負の値（値が不一致で即リターン、等）
+pub fn futex_wait(addr: *const u32, expected: u32, timeout_ms: u64) -> SyscallResult {
+    unsafe {
+        syscall4(SYS_FUTEX, addr as u64, FUTEX_WAIT, expected as u64, timeout_ms) as i64
+    }
+}
+
+/// FUTEX_WAKE: ユーザー空間アドレスで待機中のタスクを最大 count 個起床させる
+///
+/// # 引数
+/// - `addr`: AtomicU32 のアドレス
+/// - `count`: 起床させる最大タスク数
+///
+/// # 戻り値
+/// - 起床したタスクの数
+/// - 負の値（エラー時）
+pub fn futex_wake(addr: *const u32, count: u32) -> SyscallResult {
+    unsafe {
+        syscall4(SYS_FUTEX, addr as u64, FUTEX_WAKE, count as u64, 0) as i64
+    }
+}
+
+// =================================================================
+// スレッド関連
+// =================================================================
+
+/// スレッドを作成する
+///
+/// # 引数
+/// - `entry_ptr`: スレッドのエントリポイント関数ポインタ
+/// - `stack_ptr`: スレッド用スタックのトップアドレス（mmap で確保済み）
+/// - `arg`: スレッドに渡す引数（rdi レジスタにセット）
+///
+/// # 戻り値
+/// - スレッドのタスク ID（成功時）
+/// - 負の値（エラー時）
+pub fn thread_create(entry_ptr: u64, stack_ptr: u64, arg: u64) -> SyscallResult {
+    unsafe { syscall3(SYS_THREAD_CREATE, entry_ptr, stack_ptr, arg) as i64 }
+}
+
+/// 現在のスレッドを終了する
+///
+/// # 引数
+/// - `exit_code`: 終了コード
+pub fn thread_exit(exit_code: i32) -> ! {
+    unsafe { syscall1(SYS_THREAD_EXIT, exit_code as u64); }
+    // 戻ることはないが、コンパイラを満足させるためにループ
+    loop {}
+}
+
+/// スレッドの終了を待つ
+///
+/// # 引数
+/// - `thread_id`: 待つスレッドのタスク ID
+/// - `timeout_ms`: タイムアウト (ms)。0 なら無期限待ち。
+///
+/// # 戻り値
+/// - 終了コード（成功時）
+/// - 負の値（エラー時）
+pub fn thread_join(thread_id: u64, timeout_ms: u64) -> SyscallResult {
+    unsafe { syscall2(SYS_THREAD_JOIN, thread_id, timeout_ms) as i64 }
 }

@@ -11,6 +11,7 @@ mod console;
 mod elf;
 mod fat32;
 mod framebuffer;
+mod futex;
 mod gdt;
 mod handle;
 mod interrupts;
