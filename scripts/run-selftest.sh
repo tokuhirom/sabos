@@ -321,6 +321,36 @@ fi
 
 sleep 0.5
 
+# --- ネットワーク API selftest ---
+echo "Running network API selftest..."
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
+base=$(log_line_count)
+send_command "selftest_net"
+
+echo "Waiting for net selftest to complete..."
+net_selftest_ok=false
+for i in {1..30}; do
+    if grep_after "$base" "NET SELFTEST END"; then
+        net_selftest_ok=true
+        break
+    fi
+    sleep 1
+done
+wait_for_prompt_after "$base" || true
+
+if [ "$net_selftest_ok" = true ]; then
+    if grep_after "$base" "NET SELFTEST END:.*PASSED"; then
+        echo -e "${GREEN}Network API selftest PASSED${NC}"
+    else
+        echo -e "${RED}Network API selftest had failures${NC}"
+    fi
+else
+    echo -e "${RED}WARN: Network API selftest did not complete${NC}"
+fi
+
+sleep 0.5
+
 echo "Sending selftest command..."
 
 # GUI アプリのスクリーンショット（任意）

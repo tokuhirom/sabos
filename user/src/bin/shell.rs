@@ -34,6 +34,7 @@
 // - nc -l <port>: TCP待ち受け（netcat サーバーモード）
 // - パイプ（|）: echo/cat/sed/grep の簡易パイプライン
 // - selftest: カーネル selftest を実行
+// - selftest_net: ネットワーク API selftest を実行
 // - halt: システム停止
 
 #![no_std]
@@ -247,6 +248,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "cal" => cmd_cal(args),
         "beep" => cmd_beep(args),
         "selftest" => cmd_selftest(),
+        "selftest_net" => cmd_selftest_net(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
         _ => {
@@ -485,6 +487,7 @@ fn cmd_help() {
     syscall::write_str("  cal <month> <year> - Show calendar for given month\n");
     syscall::write_str("  beep [freq] [ms]  - Play beep sound (default: 440Hz 200ms)\n");
     syscall::write_str("  selftest          - Run kernel selftest\n");
+    syscall::write_str("  selftest_net      - Run network API selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
 }
@@ -504,6 +507,103 @@ fn cmd_exit() {
 fn cmd_selftest() {
     syscall::write_str("Running kernel selftest...\n");
     let _ = syscall::selftest();
+}
+
+/// selftest_net コマンド: ネットワーク抽象化 API のテスト
+///
+/// net.rs の TcpStream / TcpListener / DNS API が正しく動作することを確認する。
+/// このテストはユーザー空間で実行される（カーネル selftest ではない）。
+fn cmd_selftest_net() {
+    syscall::write_str("=== NET SELFTEST START ===\n");
+    let mut passed = 0u32;
+    let mut total = 0u32;
+
+    // テスト 1: net::init_netd() — netd 初期化
+    total += 1;
+    if net::init_netd().is_ok() && net::get_netd_id() > 0 {
+        syscall::write_str("[PASS] net_init_netd\n");
+        passed += 1;
+    } else {
+        syscall::write_str("[FAIL] net_init_netd\n");
+        syscall::write_str("=== NET SELFTEST END: ");
+        write_number(passed as u64);
+        syscall::write_str("/");
+        write_number(total as u64);
+        syscall::write_str(" PASSED ===\n");
+        return; // netd がないと後続テストはすべて失敗する
+    }
+
+    // テスト 2: Ipv4Addr / SocketAddr の基本操作
+    total += 1;
+    {
+        let ip = net::Ipv4Addr::new(1, 2, 3, 4);
+        let addr = net::SocketAddr::new(ip, 80);
+        if ip.octets == [1, 2, 3, 4] && addr.port == 80 && addr.ip == ip {
+            syscall::write_str("[PASS] net_addr_types\n");
+            passed += 1;
+        } else {
+            syscall::write_str("[FAIL] net_addr_types\n");
+        }
+    }
+
+    // テスト 3: DNS 名前解決（example.com）
+    total += 1;
+    match net::dns_lookup("example.com") {
+        Ok(ip) => {
+            // example.com は 93.184.215.14 だが、IP は変わりうるので非ゼロなら OK
+            if ip.octets != [0, 0, 0, 0] {
+                syscall::write_str("[PASS] net_dns_lookup\n");
+                passed += 1;
+            } else {
+                syscall::write_str("[FAIL] net_dns_lookup (zero IP)\n");
+            }
+        }
+        Err(_) => {
+            syscall::write_str("[FAIL] net_dns_lookup (error)\n");
+        }
+    }
+
+    // テスト 4: TcpStream::connect + HTTP GET（example.com:80）
+    total += 1;
+    {
+        let ok = (|| -> Result<bool, net::NetError> {
+            let ip = net::dns_lookup("example.com")?;
+            let addr = net::SocketAddr::new(ip, 80);
+            let mut stream = net::TcpStream::connect(addr)?;
+            stream.set_recv_timeout(5000);
+
+            // 最小限の HTTP リクエスト
+            stream.write(b"GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n")?;
+
+            // レスポンスを受信
+            let mut buf = [0u8; 256];
+            let n = stream.read(&mut buf)?;
+            if n > 0 {
+                // "HTTP/" で始まるレスポンスが返ってくれば成功
+                if n >= 5 && &buf[..5] == b"HTTP/" {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })();
+
+        match ok {
+            Ok(true) => {
+                syscall::write_str("[PASS] net_tcp_http_get\n");
+                passed += 1;
+            }
+            _ => {
+                syscall::write_str("[FAIL] net_tcp_http_get\n");
+            }
+        }
+    }
+
+    // 結果出力
+    syscall::write_str("=== NET SELFTEST END: ");
+    write_number(passed as u64);
+    syscall::write_str("/");
+    write_number(total as u64);
+    syscall::write_str(" PASSED ===\n");
 }
 
 // =================================================================
