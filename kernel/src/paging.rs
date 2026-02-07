@@ -1520,14 +1520,29 @@ pub fn map_user_pages_in_process(
         // このプロセス用に既にマッピング済みのフレームがあるかチェック。
         // 同じページに複数の LOAD セグメントがまたがる場合、2回目以降は
         // 既存フレームを返す（データの上書きを避けるため）。
-        // ただし、カーネルのアイデンティティマッピングのフレーム（分岐コピー後に
-        // 残っている元のマッピング）は新しいフレームで置き換える。
+        // ただし、カーネルのアイデンティティマッピングのフレーム（分岐コピー後や
+        // huge page split 後に残っている元のマッピング）は新しいフレームで置き換える。
         if !l1_entry.is_unused() {
             // 既にプロセス専用のフレームが設定されているか確認する。
-            // allocated_frames に含まれていれば、前のセグメントで設定したものなので再利用。
+            // 物理アドレスが allocated_frames に含まれ、かつ L1 エントリに
+            // USER_ACCESSIBLE が設定されている場合のみ、前のセグメントで
+            // 設定したものと判定する。
+            //
+            // USER_ACCESSIBLE のチェックが必要な理由:
+            // 2MiB huge page を split すると、L1 エントリにアイデンティティ
+            // マッピング（物理アドレス == 仮想アドレス）が設定される。
+            // これらのエントリには USER_ACCESSIBLE がない。
+            // もしバディアロケータが別のページのデータ用に、この
+            // アイデンティティマッピングと同じ物理アドレスのフレームを
+            // 返していた場合、物理アドレスだけで判定すると誤って
+            // 「自分のフレーム」と判定してしまう。
+            // USER_ACCESSIBLE も確認することで、split 由来の
+            // カーネルマッピングと自分が設定したマッピングを区別する。
             let existing_phys = l1_entry.addr();
-            let is_our_frame = allocated_frames.iter().any(|f: &PhysFrame<Size4KiB>| f.start_address() == existing_phys)
-                || previously_allocated.iter().any(|f| f.start_address() == existing_phys);
+            let existing_has_user = l1_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE);
+            let is_our_frame = existing_has_user
+                && (allocated_frames.iter().any(|f: &PhysFrame<Size4KiB>| f.start_address() == existing_phys)
+                    || previously_allocated.iter().any(|f| f.start_address() == existing_phys));
             if is_our_frame {
                 // 前のセグメントで確保済み → フレームは再利用するが、
                 // フラグはマージする（W^X: 複数セグメントが同一ページを共有する場合、
@@ -1898,3 +1913,4 @@ pub fn unmap_pages_in_process(
 
     freed_frames
 }
+

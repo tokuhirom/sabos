@@ -1,17 +1,27 @@
-// memory.rs — 物理フレームアロケータ（ビットマップ方式）
+// memory.rs — 物理フレームアロケータ（バディ方式）
 //
-// OS がページテーブルを操作するには、新しいページテーブル用の物理フレーム（4KiB）を
-// 確保できる仕組みが必要。ここではビットマップアロケータを実装する。
+// バディアロケータは物理メモリを2のべき乗サイズのブロックで管理する。
+// ブロックを分割（split）して小さな割り当てに対応し、
+// 解放時に隣接ブロック（バディ）と合体（coalesce）して断片化を防ぐ。
 //
-// ビットマップアロケータは各フレームに 1 ビットを割り当てて、
-// 0 = 空き、1 = 使用中 として管理する。
-// バンプ方式と違ってフレームの解放（再利用）ができる。
+// 以前のビットマップアロケータは1フレーム単位でしか割り当てできなかったが、
+// バディアロケータは連続した物理フレームの割り当てが可能。
+// DMA バッファや大きなページテーブルの確保に必要。
 //
-// ビットマップは Vec<u64> で保持し、1 つの u64 で 64 フレーム分を管理する。
-// 全フレーム数が N の場合、ビットマップのサイズは ceil(N / 64) 個の u64。
+// 仕組み:
+//   - order 0 = 1フレーム (4 KiB), order k = 2^k フレーム
+//   - 各 order ごとにフリーリスト（空きブロックのリスト）を持つ
+//   - 割り当て: 要求 order 以上のフリーリストからブロックを取り出し、
+//     必要に応じて分割して残りを低い order のフリーリストに戻す
+//   - 解放: ブロックをフリーリストに戻し、バディ（隣接する同サイズブロック）
+//     が空いていれば合体して上の order に昇格。再帰的に繰り返す
+//
+// 物理メモリは複数の非連続な CONVENTIONAL 領域から構成されるため、
+// 各リージョンごとに独立したバディアロケータを持つ設計にしている。
+// バディの合体は同一リージョン内でのみ行われる。
 //
 // UEFI のメモリマップから CONVENTIONAL 領域（OS が自由に使える RAM）を
-// 収集し、フラットなインデックスに変換してビットマップで管理する。
+// 収集し、リージョンごとにバディアロケータを初期化する。
 // 1MiB 以下の低メモリ領域はレガシーハードウェアが使う可能性があるためスキップする。
 
 use alloc::vec;
@@ -32,91 +42,419 @@ pub struct MemoryRegion {
     pub page_count: u64,
 }
 
-/// ビットマップ方式の物理フレームアロケータ。
+/// バディアロケータの最大 order。
+/// order 0 = 1 フレーム (4 KiB)、order 10 = 1024 フレーム (4 MiB)。
+/// MAX_ORDER = 10 なら最大ブロックは 2^10 * 4 KiB = 4 MiB。
+const MAX_ORDER: usize = 10;
+
+// =================================================================
+// RegionBuddyAllocator — 1つの物理メモリ領域に対するバディアロケータ
+// =================================================================
+
+/// 1つの物理メモリ領域に対するバディアロケータ。
 ///
-/// 仕組み:
-///   1. CONVENTIONAL 領域のリストを保持
-///   2. 全領域のフレームをフラットなインデックスで管理
-///      例: region0 が 100 フレーム、region1 が 200 フレームなら
-///          index 0〜99 = region0、index 100〜299 = region1
-///   3. ビットマップ (Vec<u64>) の各ビットが 1 フレームに対応
-///      0 = 空き、1 = 使用中
-///   4. allocate_frame(): 最初の空きビット (0) を探してセット (1) にする
-///   5. deallocate_frame(): 指定フレームのビットをクリア (0) にする
+/// 物理メモリは複数の非連続な CONVENTIONAL 領域から成るため、
+/// リージョンごとに独立したバディアロケータを持つ。
+/// バディの合体は同一リージョン内でのみ行う（異なるリージョンにまたがれない）。
 ///
-/// バンプ方式と違ってフレームの解放・再利用が可能。
-pub struct BitmapFrameAllocator {
-    /// 使用可能な物理メモリ領域のリスト（開始アドレス昇順でソート済み）
-    regions: Vec<MemoryRegion>,
-    /// リージョンのプレフィックスサム（累積フレーム数）。
-    /// region_prefix_frames[i] = regions[0..i] の合計フレーム数。
-    /// 長さは regions.len() + 1 で、[0] = 0、[regions.len()] = total_frames。
-    ///
-    /// これにより index_to_phys / phys_to_index で二分探索が使えるようになり、
-    /// リージョン数 N に対して O(N) → O(log N) に高速化される。
-    region_prefix_frames: Vec<u64>,
-    /// ビットマップ。1 ビット = 1 フレーム (0 = 空き, 1 = 使用中)。
-    /// bitmap[i] の j ビット目が、フラットインデックス (i * 64 + j) に対応する。
+/// データ構造:
+///   - free_lists[k]: order k (= 2^k フレーム) の空きブロックの物理アドレスリスト
+///   - bitmap: 1ビット/フレーム (0 = 空き, 1 = 使用中)
+///     統計、二重解放検出、reserve_range 後のフリーリスト再構築に使用
+struct RegionBuddyAllocator {
+    /// 物理開始アドレス（4KiB アライン済み）
+    start: u64,
+    /// この領域の 4KiB ページ数
+    page_count: u64,
+    /// order ごとのフリーリスト。
+    /// free_lists[k] は order k（= 2^k フレーム）の空きブロックの物理アドレスリスト。
+    /// Linux カーネルでは空きページ自体にリンクリストを埋め込むが、
+    /// SABOS では分かりやすさを重視して Vec を使う。
+    free_lists: [Vec<u64>; MAX_ORDER + 1],
+    /// ビットマップ。1ビット = 1フレーム (0 = 空き, 1 = 使用中)。
+    /// フリーリストとは独立にフレームの割り当て状態を追跡する。
+    /// 用途:
+    ///   - 統計情報（allocated_count の計算）
+    ///   - 二重解放の検出
+    ///   - reserve_range() 後のフリーリスト再構築
     bitmap: Vec<u64>,
+}
+
+impl RegionBuddyAllocator {
+    /// 新しいリージョンバディアロケータを作成する。
+    /// 全フレームを空きとして初期化し、フリーリストを構築する。
+    fn new(start: u64, page_count: u64) -> Self {
+        let bitmap_size = ((page_count + 63) / 64) as usize;
+        let mut alloc = Self {
+            start,
+            page_count,
+            // 各 order のフリーリストを空の Vec で初期化
+            free_lists: core::array::from_fn(|_| Vec::new()),
+            // 全ビット 0 = 全フレーム空き
+            bitmap: vec![0u64; bitmap_size],
+        };
+        // ビットマップ（全て空き）からフリーリストを構築
+        alloc.build_free_lists();
+        alloc
+    }
+
+    // =================================================================
+    // フリーリスト構築
+    // =================================================================
+
+    /// ビットマップの状態に基づいてフリーリストを（再）構築する。
+    ///
+    /// ビットマップの空きフレームを走査し、アライメント制約を守りながら
+    /// 最大サイズのバディブロックにまとめてフリーリストに登録する。
+    ///
+    /// 例: 7 ページのリージョン（全て空き）→
+    ///   - offset 0: order 2 (4ページ、4ページアライン)
+    ///   - offset 4: order 1 (2ページ、2ページアライン)
+    ///   - offset 6: order 0 (1ページ)
+    ///
+    /// init 時と reserve_range() 後に呼ばれる。
+    /// 通常の allocate/deallocate ではフリーリストを差分更新するので、
+    /// この関数は呼ばれない。
+    fn build_free_lists(&mut self) {
+        // 既存のフリーリストをクリア
+        for list in &mut self.free_lists {
+            list.clear();
+        }
+
+        // ビットマップを走査して空きブロックをフリーリストに登録
+        let mut offset: u64 = 0;
+        while offset < self.page_count {
+            if self.is_frame_allocated(offset) {
+                offset += 1;
+                continue;
+            }
+
+            // この位置から始まる最大のバディブロックの order を求める
+            let order = self.max_free_order_at(offset);
+            let block_phys = self.start + offset * 4096;
+            self.free_lists[order].push(block_phys);
+            offset += 1u64 << order;
+        }
+
+        // フリーリストを反転して、pop() が最小アドレスのブロックを返すようにする。
+        // build_free_lists はオフセット昇順でブロックを push するので、
+        // 反転しないと pop() は最大アドレス（末尾）を返す。
+        // 低アドレスから優先的に割り当てることで、以前のビットマップアロケータと
+        // 同様の割り当てパターンになり、既存コードとの互換性を保つ。
+        for list in &mut self.free_lists {
+            list.reverse();
+        }
+    }
+
+    /// 指定オフセットから始まる最大の空きバディブロックの order を求める。
+    ///
+    /// 3つの条件を同時に満たす最大の order を返す:
+    ///   1. アライメント: offset が 2^order ページにアライン
+    ///   2. サイズ: offset + 2^order <= page_count（リージョン内に収まる）
+    ///   3. 全フレーム空き: ブロック内の全フレームが未割り当て
+    ///
+    /// 効率化: order を1つ上げるとき、追加で必要な上半分（2^order フレーム）
+    /// だけをチェックする。下半分は前の order で確認済み。
+    fn max_free_order_at(&self, offset: u64) -> usize {
+        let mut order = 0;
+        while order < MAX_ORDER {
+            let next_order = order + 1;
+            let next_size = 1u64 << next_order;
+
+            // アライメントチェック: offset が 2^next_order にアラインされているか
+            if offset % next_size != 0 {
+                break;
+            }
+
+            // 境界チェック: リージョン内に収まるか
+            if offset + next_size > self.page_count {
+                break;
+            }
+
+            // 上半分の全フレームが空きか確認
+            // （下半分は order で確認済みなので再チェック不要）
+            let half = 1u64 << order;
+            if !self.is_range_free(offset + half, half) {
+                break;
+            }
+
+            order = next_order;
+        }
+        order
+    }
+
+    // =================================================================
+    // アドレス判定
+    // =================================================================
+
+    /// 指定物理アドレスがこのリージョンに含まれるか判定する。
+    fn contains(&self, addr: u64) -> bool {
+        addr >= self.start && addr < self.start + self.page_count * 4096
+    }
+
+    // =================================================================
+    // ビットマップ操作
+    // =================================================================
+
+    /// 指定オフセットのフレームが使用中（ビット 1）かチェック。
+    fn is_frame_allocated(&self, page_offset: u64) -> bool {
+        let word = (page_offset / 64) as usize;
+        let bit = (page_offset % 64) as u32;
+        if word >= self.bitmap.len() {
+            return true; // 範囲外は使用中扱い
+        }
+        (self.bitmap[word] >> bit) & 1 == 1
+    }
+
+    /// 指定オフセットのフレームを使用中にマーク（ビットを 1 にセット）。
+    fn set_frame_allocated(&mut self, page_offset: u64) {
+        let word = (page_offset / 64) as usize;
+        let bit = (page_offset % 64) as u32;
+        if word < self.bitmap.len() {
+            self.bitmap[word] |= 1u64 << bit;
+        }
+    }
+
+    /// 指定オフセットのフレームを空きにマーク（ビットを 0 にクリア）。
+    fn set_frame_free(&mut self, page_offset: u64) {
+        let word = (page_offset / 64) as usize;
+        let bit = (page_offset % 64) as u32;
+        if word < self.bitmap.len() {
+            self.bitmap[word] &= !(1u64 << bit);
+        }
+    }
+
+    /// 指定範囲の全フレームが空き（ビット 0）かチェック。
+    ///
+    /// ワード単位（64フレーム = 1 u64）で一括チェックすることで、
+    /// 大きな範囲でも高速に判定する。
+    fn is_range_free(&self, start_offset: u64, count: u64) -> bool {
+        let end = start_offset + count;
+        let mut offset = start_offset;
+
+        // ワードアラインまで個別チェック
+        while offset < end && offset % 64 != 0 {
+            if self.is_frame_allocated(offset) {
+                return false;
+            }
+            offset += 1;
+        }
+
+        // ワード単位で一括チェック（64フレーム分を 1 回の比較で判定）
+        while offset + 64 <= end {
+            let word_idx = (offset / 64) as usize;
+            if word_idx < self.bitmap.len() && self.bitmap[word_idx] != 0 {
+                return false;
+            }
+            offset += 64;
+        }
+
+        // 残りを個別チェック
+        while offset < end {
+            if self.is_frame_allocated(offset) {
+                return false;
+            }
+            offset += 1;
+        }
+
+        true
+    }
+
+    /// 範囲のフレームをビットマップで使用中にマーク。
+    fn mark_range_allocated(&mut self, start_offset: u64, count: u64) {
+        for i in 0..count {
+            self.set_frame_allocated(start_offset + i);
+        }
+    }
+
+    /// 範囲のフレームをビットマップで空きにマーク。
+    fn mark_range_free(&mut self, start_offset: u64, count: u64) {
+        for i in 0..count {
+            self.set_frame_free(start_offset + i);
+        }
+    }
+
+    // =================================================================
+    // バディ割り当て・解放
+    // =================================================================
+
+    /// 指定 order のブロックを割り当てる。
+    ///
+    /// アルゴリズム:
+    ///   1. 要求 order 以上で空きがある最小の order j を探す
+    ///   2. free_lists[j] からブロックを取り出す
+    ///   3. j > order なら分割: 上半分を free_lists[j-1] に戻し、下半分をキープ
+    ///      これを order まで繰り返す
+    ///   4. ビットマップを更新して物理アドレスを返す
+    ///
+    /// 返り値は割り当てたブロックの物理アドレス。None なら空きなし。
+    fn allocate(&mut self, order: usize) -> Option<u64> {
+        // 要求 order 以上で空きがある最小の order j を探す
+        let mut j = order;
+        while j <= MAX_ORDER {
+            if !self.free_lists[j].is_empty() {
+                break;
+            }
+            j += 1;
+        }
+
+        if j > MAX_ORDER {
+            return None; // このリージョンに十分な空きがない
+        }
+
+        // フリーリストからブロックを取り出す
+        let block_addr = self.free_lists[j].pop().unwrap();
+
+        // 要求 order まで分割する
+        // order j のブロックを半分に分割: 下半分をキープ、上半分をフリーリストへ
+        // これを order j-1, j-2, ... order まで繰り返す
+        while j > order {
+            j -= 1;
+            // 上半分のバディの物理アドレス = ブロック先頭 + 半分のサイズ
+            let buddy_addr = block_addr + ((1u64 << j) * 4096);
+            self.free_lists[j].push(buddy_addr);
+        }
+
+        // ビットマップを更新（割り当てたフレームを使用中にマーク）
+        let page_offset = (block_addr - self.start) / 4096;
+        let frame_count = 1u64 << order;
+        self.mark_range_allocated(page_offset, frame_count);
+
+        Some(block_addr)
+    }
+
+    /// 指定 order のブロックを解放し、バディと合体を試みる。
+    ///
+    /// アルゴリズム:
+    ///   1. ビットマップをクリア（空きにする）
+    ///   2. バディを計算: offset XOR 2^order
+    ///   3. バディが free_lists[order] にいれば取り出して合体、order+1 で繰り返し
+    ///   4. 合体できなくなったら free_lists[current_order] に追加
+    ///
+    /// 返り値: true = 正常解放、false = 無効な解放（二重解放など）
+    fn deallocate(&mut self, addr: u64, order: usize) -> bool {
+        let page_offset = (addr - self.start) / 4096;
+
+        // 二重解放チェック（先頭フレームが使用中であることを確認）
+        if !self.is_frame_allocated(page_offset) {
+            return false;
+        }
+
+        // ビットマップをクリア（空きにする）
+        let frame_count = 1u64 << order;
+        self.mark_range_free(page_offset, frame_count);
+
+        // バディとの合体を試みる
+        // current_offset: 現在のブロックのページオフセット
+        // current_order: 現在のブロックの order
+        let mut current_offset = page_offset;
+        let mut current_order = order;
+
+        while current_order < MAX_ORDER {
+            let block_size = 1u64 << current_order;
+
+            // バディのオフセットを計算（XOR で求まる）
+            // 例: order 0 で offset=4 → バディは 4 XOR 1 = 5
+            //     order 1 で offset=4 → バディは 4 XOR 2 = 6
+            //     order 2 で offset=0 → バディは 0 XOR 4 = 4
+            let buddy_offset = current_offset ^ block_size;
+
+            // バディがリージョン内に収まるか確認
+            if buddy_offset + block_size > self.page_count {
+                break;
+            }
+
+            // バディがフリーリストに存在するか確認し、あれば取り出す
+            // （線形探索だが、フリーリストは通常短いので実用上問題ない）
+            let buddy_addr = self.start + buddy_offset * 4096;
+            if let Some(pos) = self.free_lists[current_order]
+                .iter()
+                .position(|&a| a == buddy_addr)
+            {
+                // バディを取り出して合体
+                self.free_lists[current_order].swap_remove(pos);
+                // 合体後のブロックは小さい方のオフセットから始まる
+                current_offset = current_offset.min(buddy_offset);
+                current_order += 1;
+            } else {
+                // バディが空いていない（または別の order で分割されている）
+                // → 合体終了
+                break;
+            }
+        }
+
+        // 最終的なブロック（合体済み or 合体なし）をフリーリストに追加
+        let block_addr = self.start + current_offset * 4096;
+        self.free_lists[current_order].push(block_addr);
+
+        true
+    }
+}
+
+// =================================================================
+// BuddyFrameAllocator — 公開インターフェース
+// =================================================================
+
+/// バディ方式の物理フレームアロケータ。
+///
+/// 以前のビットマップアロケータからの改善点:
+///   - 連続した物理フレームの割り当てが可能（order 指定）
+///   - 解放時にバディと合体して断片化を自動的に軽減
+///   - 分割・合体により、メモリ効率が向上
+///
+/// 各 CONVENTIONAL リージョンごとに独立したバディアロケータを持つ。
+/// リージョンは開始アドレス昇順でソートされている。
+pub struct BuddyFrameAllocator {
+    /// リージョンごとのバディアロケータ（開始アドレス昇順）
+    region_allocators: Vec<RegionBuddyAllocator>,
     /// 全フレーム数
     total_frames: u64,
     /// 現在使用中のフレーム数
     allocated_count: u64,
-    /// 無効な解放の回数（デバッグ用。本来 0 であるべき）
+    /// 無効な解放の回数（デバッグ用。panic するので本来 0 であるべき）
     invalid_dealloc_count: u64,
-    /// 次に探索を開始するビットマップのインデックス（検索高速化のヒント）
-    /// 直前の割り当て位置の近くから探すことで、毎回先頭から探す無駄を減らす。
-    next_search_hint: usize,
 }
 
-impl BitmapFrameAllocator {
+impl BuddyFrameAllocator {
     /// 空のアロケータを作成する。init() で領域を設定するまで何も割り当てられない。
     pub fn new() -> Self {
         Self {
-            regions: Vec::new(),
-            region_prefix_frames: Vec::new(),
-            bitmap: Vec::new(),
+            region_allocators: Vec::new(),
             total_frames: 0,
             allocated_count: 0,
             invalid_dealloc_count: 0,
-            next_search_hint: 0,
         }
     }
 
     /// UEFI メモリマップから取得した CONVENTIONAL 領域のリストで初期化する。
-    /// ビットマップを作成し、全ビットを 0（空き）にする。
+    ///
+    /// 各リージョンごとにバディアロケータを作成し、
+    /// 全メモリを空きとしてフリーリストを構築する。
+    /// リージョンは開始アドレス昇順にソートされる。
     pub fn init(&mut self, mut regions: Vec<MemoryRegion>) {
         // リージョンを開始アドレス昇順にソートする。
         // UEFI メモリマップは通常ソート済みだが、保証はないので明示的にソートする。
-        // phys_to_index() の二分探索に必要。
+        // find_region_index() の二分探索に必要。
         regions.sort_by_key(|r| r.start);
 
         // 全フレーム数を計算
         let total: u64 = regions.iter().map(|r| r.page_count).sum();
 
-        // プレフィックスサム（累積フレーム数）を構築する。
-        // prefix[0] = 0, prefix[i+1] = prefix[i] + regions[i].page_count
-        // これにより、フラットインデックスがどのリージョンに属するかを
-        // 二分探索で O(log N) で求められる。
-        let mut prefix = Vec::with_capacity(regions.len() + 1);
-        prefix.push(0u64);
-        for region in &regions {
-            let last = *prefix.last().unwrap();
-            prefix.push(last + region.page_count);
-        }
+        // 各リージョンにバディアロケータを作成
+        let region_allocators: Vec<RegionBuddyAllocator> = regions
+            .into_iter()
+            .map(|r| RegionBuddyAllocator::new(r.start, r.page_count))
+            .collect();
 
-        // ビットマップのサイズ = ceil(total / 64)
-        // 64 フレームごとに 1 つの u64 を使う
-        let bitmap_size = ((total + 63) / 64) as usize;
-
-        self.regions = regions;
-        self.region_prefix_frames = prefix;
-        self.bitmap = vec![0u64; bitmap_size]; // 全ビット 0 = 全フレーム空き
+        self.region_allocators = region_allocators;
         self.total_frames = total;
         self.allocated_count = 0;
         self.invalid_dealloc_count = 0;
-        self.next_search_hint = 0;
     }
+
+    // =================================================================
+    // 統計情報（既存 API 互換）
+    // =================================================================
 
     /// 使用可能な全フレーム数を返す。
     pub fn total_frames(&self) -> u64 {
@@ -138,145 +476,111 @@ impl BitmapFrameAllocator {
         self.total_frames - self.allocated_count
     }
 
-    /// フラットインデックスを物理アドレスに変換する。
+    // =================================================================
+    // 割り当て・解放
+    // =================================================================
+
+    /// 指定 order の連続フレームを割り当てる。
     ///
-    /// プレフィックスサム配列を二分探索して、index がどのリージョンに属するか求める。
-    /// 以前は線形探索 O(N) だったが、二分探索で O(log N) に高速化した。
+    /// order 0 = 1フレーム (4 KiB), order k = 2^k フレーム。
+    /// 各リージョンを順番に試し、最初に空きが見つかったリージョンから割り当てる。
     ///
-    /// 例: regions = [A(100フレーム), B(200フレーム), C(150フレーム)]
-    ///     prefix  = [0, 100, 300, 450]
-    ///     index=250 → prefix で 100 <= 250 < 300 → region B
-    ///     offset = 250 - 100 = 150 → B.start + 150 * 4096
-    fn index_to_phys(&self, index: u64) -> Option<PhysAddr> {
-        if index >= self.total_frames {
-            return None;
+    /// 返り値は割り当てたブロックの先頭フレーム。None なら空きなし。
+    pub fn allocate_order(&mut self, order: usize) -> Option<PhysFrame<Size4KiB>> {
+        for region in &mut self.region_allocators {
+            if let Some(addr) = region.allocate(order) {
+                self.allocated_count += 1u64 << order;
+                return Some(PhysFrame::containing_address(PhysAddr::new(addr)));
+            }
         }
-
-        // partition_point は「条件を満たす最後の要素の次」を返す。
-        // prefix[i] <= index を満たす最大の i を求めたい。
-        // partition_point(|&p| p <= index) は、p <= index が true な最後の位置 + 1 を返す。
-        // つまりリージョンインデックスは partition_point - 1。
-        let pos = self.region_prefix_frames.partition_point(|&p| p <= index);
-        if pos == 0 {
-            return None;
-        }
-        let region_idx = pos - 1;
-        let region = &self.regions[region_idx];
-        let offset = index - self.region_prefix_frames[region_idx];
-        Some(PhysAddr::new(region.start + offset * 4096))
+        None
     }
 
-    /// 物理アドレスをフラットインデックスに変換する。
+    /// 指定 order の連続フレームを解放する。
     ///
-    /// リージョンが開始アドレス昇順でソート済みなので、二分探索で
-    /// 物理アドレスがどのリージョンに属するかを O(log N) で求める。
-    /// 以前は線形探索 O(N) だった。
-    fn phys_to_index(&self, addr: PhysAddr) -> Option<u64> {
-        let addr_val = addr.as_u64();
+    /// # Safety
+    /// 解放するフレームが実際に指定 order で割り当て済みであること。
+    /// 解放後にそのフレームを参照しているマッピングがないこと。
+    pub unsafe fn deallocate_order(&mut self, frame: PhysFrame<Size4KiB>, order: usize) {
+        let addr = frame.start_address().as_u64();
 
-        // regions は start 昇順ソート済み。
-        // addr_val を含むリージョンを探す。
-        // partition_point(|r| r.start <= addr_val) は、
-        // start <= addr_val な最後のリージョンの次を返す。
-        let pos = self.regions.partition_point(|r| r.start <= addr_val);
-        if pos == 0 {
-            return None;
-        }
-        let region_idx = pos - 1;
-        let region = &self.regions[region_idx];
-        let region_end = region.start + region.page_count * 4096;
-        if addr_val >= region_end {
-            // このリージョンの範囲外（リージョン間のギャップ）
-            return None;
-        }
-        let offset_in_region = (addr_val - region.start) / 4096;
-        Some(self.region_prefix_frames[region_idx] + offset_in_region)
-    }
-
-    /// ビットマップの指定インデックスのビットが立っているか確認する。
-    fn is_allocated(&self, index: u64) -> bool {
-        let word = (index / 64) as usize;
-        let bit = (index % 64) as u32;
-        if word >= self.bitmap.len() {
-            return true; // 範囲外は使用中扱い
-        }
-        (self.bitmap[word] >> bit) & 1 == 1
-    }
-
-    /// ビットマップの指定インデックスのビットをクリアする（空きにする）。
-    fn set_free(&mut self, index: u64) {
-        let word = (index / 64) as usize;
-        let bit = (index % 64) as u32;
-        if word < self.bitmap.len() {
-            self.bitmap[word] &= !(1u64 << bit);
-        }
-    }
-
-    /// ビットマップの指定インデックスのビットをセットする（使用中にする）。
-    fn set_allocated(&mut self, index: u64) {
-        let word = (index / 64) as usize;
-        let bit = (index % 64) as u32;
-        if word < self.bitmap.len() {
-            self.bitmap[word] |= 1u64 << bit;
-        }
-    }
-
-    /// 指定範囲のフレームを予約済みにする。
-    pub fn reserve_range(&mut self, start: u64, size: u64) {
-        if size == 0 {
-            return;
-        }
-
-        let start = start & !0xfff;
-        let end = (start + size + 0xfff) & !0xfff;
-        let mut addr = start;
-        while addr < end {
-            let phys = PhysAddr::new(addr);
-            if let Some(index) = self.phys_to_index(phys) {
-                if !self.is_allocated(index) {
-                    self.set_allocated(index);
-                    self.allocated_count += 1;
+        // リージョンを二分探索で特定（開始アドレス昇順ソート済み）
+        let pos = self.region_allocators.partition_point(|r| r.start <= addr);
+        if pos > 0 {
+            let idx = pos - 1;
+            if self.region_allocators[idx].contains(addr) {
+                if self.region_allocators[idx].deallocate(addr, order) {
+                    self.allocated_count -= 1u64 << order;
+                    return;
+                } else {
+                    // 二重解放や未割り当て解放はバグ
+                    panic!(
+                        "[memory] double-free or invalid dealloc detected (phys={:#x})",
+                        addr
+                    );
                 }
             }
-            addr += 4096;
         }
+
+        // どのリージョンにも属さないアドレスの解放はバグ
+        panic!(
+            "[memory] dealloc of unknown physical address (phys={:#x})",
+            addr
+        );
     }
 
-    /// 物理フレームを解放する。
-    ///
-    /// 指定されたフレームの物理アドレスに対応するビットマップのビットをクリアして、
-    /// そのフレームを再利用可能にする。
+    /// 物理フレーム1つを解放する（order 0 の deallocate_order のラッパー）。
     ///
     /// # Safety
     /// 解放するフレームが実際に割り当て済みであること。
     /// 解放後にそのフレームを参照しているマッピングがないこと。
     pub unsafe fn deallocate_frame(&mut self, frame: PhysFrame<Size4KiB>) {
-        let addr = frame.start_address();
-        if let Some(index) = self.phys_to_index(addr) {
-            if self.is_allocated(index) {
-                self.set_free(index);
-                self.allocated_count -= 1;
-                // ヒントを更新: 解放したフレームの近くから次の検索を始める
-                let word = (index / 64) as usize;
-                if word < self.next_search_hint {
-                    self.next_search_hint = word;
+        unsafe { self.deallocate_order(frame, 0); }
+    }
+
+    /// 指定範囲のフレームを予約済みにする（ヒープ領域の確保など）。
+    ///
+    /// ビットマップでフレームを使用中にマークした後、
+    /// 影響を受けたリージョンのフリーリストを再構築する。
+    /// ブート時に1回だけ呼ばれる想定。
+    pub fn reserve_range(&mut self, start: u64, size: u64) {
+        if size == 0 {
+            return;
+        }
+
+        // ページ境界にアライン
+        let start_aligned = start & !0xfff;
+        let end_aligned = (start + size + 0xfff) & !0xfff;
+
+        // 影響を受けたリージョンを追跡（フリーリスト再構築用）
+        let mut affected = vec![false; self.region_allocators.len()];
+        let mut addr = start_aligned;
+
+        while addr < end_aligned {
+            // リージョンを二分探索で特定
+            let pos = self.region_allocators.partition_point(|r| r.start <= addr);
+            if pos > 0 {
+                let idx = pos - 1;
+                let region = &mut self.region_allocators[idx];
+                if region.contains(addr) {
+                    let page_offset = (addr - region.start) / 4096;
+                    if !region.is_frame_allocated(page_offset) {
+                        region.set_frame_allocated(page_offset);
+                        self.allocated_count += 1;
+                    }
+                    affected[idx] = true;
                 }
-            } else {
-                // 二重解放や未割り当て解放はバグ。開発段階では即座に検出したいので panic する。
-                // 以前はカウントだけしてサイレントに継続していたが、
-                // バグを見逃すリスクが高いため panic に変更した。
-                panic!(
-                    "[memory] double-free or invalid dealloc detected (phys={:#x}, index={})",
-                    addr.as_u64(),
-                    index
-                );
             }
-        } else {
-            // どのリージョンにも属さないアドレスの解放はバグ
-            panic!(
-                "[memory] dealloc of unknown physical address (phys={:#x})",
-                addr.as_u64()
-            );
+            addr += 4096;
+        }
+
+        // 影響を受けたリージョンのフリーリストを再構築する。
+        // reserve_range によってビットマップが変わったので、
+        // フリーリストをビットマップと整合させる必要がある。
+        for (idx, was_affected) in affected.iter().enumerate() {
+            if *was_affected {
+                self.region_allocators[idx].build_free_lists();
+            }
         }
     }
 }
@@ -284,56 +588,14 @@ impl BitmapFrameAllocator {
 /// FrameAllocator トレイトの実装。
 /// x86_64 crate のページテーブル操作（map_to 等）がこのトレイトを要求する。
 ///
+/// allocate_frame() は order 0（1フレーム = 4 KiB）の割り当てとして実装。
+///
 /// # Safety
 /// このアロケータは同じフレームを二度返さないことを保証する
-/// （ビットマップで使用中フラグを管理しているため）。
-unsafe impl FrameAllocator<Size4KiB> for BitmapFrameAllocator {
+/// （ビットマップ + フリーリストで使用中フラグを管理しているため）。
+unsafe impl FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        let bitmap_len = self.bitmap.len();
-        if bitmap_len == 0 {
-            return None;
-        }
-
-        // next_search_hint から始めて、空きビットを探す。
-        // 一周しても見つからなければ None を返す。
-        //
-        // 各 u64 が 0xFFFF_FFFF_FFFF_FFFF（全ビット 1）なら全フレーム使用中なので
-        // スキップできる。これにより大量の使用中フレームを一気に飛ばせる。
-        for i in 0..bitmap_len {
-            let word_index = (self.next_search_hint + i) % bitmap_len;
-            let word = self.bitmap[word_index];
-
-            // 全ビットが 1 なら、この 64 フレームはすべて使用中 → スキップ
-            if word == u64::MAX {
-                continue;
-            }
-
-            // 空きビット（0）を探す。
-            // !word で反転して trailing_zeros で最初の 1（= 元の最初の 0）の位置を求める。
-            let bit = (!word).trailing_zeros();
-
-            // ビットマップの範囲内か確認
-            let flat_index = word_index as u64 * 64 + bit as u64;
-            if flat_index >= self.total_frames {
-                // ビットマップの最後の word で、total_frames を超えた部分
-                continue;
-            }
-
-            // ビットをセットして使用中にする
-            self.bitmap[word_index] |= 1u64 << bit;
-            self.allocated_count += 1;
-
-            // ヒントを更新: 次回はこの word から探す
-            self.next_search_hint = word_index;
-
-            // フラットインデックスを物理アドレスに変換
-            if let Some(phys_addr) = self.index_to_phys(flat_index) {
-                return Some(PhysFrame::containing_address(phys_addr));
-            }
-        }
-
-        // すべてのフレームが使用中
-        None
+        self.allocate_order(0)
     }
 }
 
@@ -341,8 +603,8 @@ lazy_static! {
     /// グローバルフレームアロケータ。
     /// ページテーブル操作時にフレームを確保するために使う。
     /// ロック順序: PAGE_TABLE → FRAME_ALLOCATOR（デッドロック防止のため必ず守ること）
-    pub static ref FRAME_ALLOCATOR: Mutex<BitmapFrameAllocator> =
-        Mutex::new(BitmapFrameAllocator::new());
+    pub static ref FRAME_ALLOCATOR: Mutex<BuddyFrameAllocator> =
+        Mutex::new(BuddyFrameAllocator::new());
 }
 
 /// フレームアロケータを初期化する。
