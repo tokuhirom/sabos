@@ -153,14 +153,16 @@ PAL の `unsupported` モジュールをベースに、対応可能なものだ�
 
 ### Phase 6: ネットワークの std 対応
 
-- [ ] **ソケット抽象化**
+- [x] **ソケット抽象化**
   - 難易度: ★★★☆☆
-  - 現在の netd IPC ベースの TCP を `std::net::TcpStream` 互換にラップ
-  - UDP 対応も追加
+  - `user/src/net.rs` に TcpStream / TcpListener / DNS API を実装
+  - shell.rs / httpd.rs / telnetd.rs から重複コード ~380 行を削除
+  - Drop で自動クローズ（RAII パターン）、低レベル raw API も提供
+  - UDP 対応は未実装（将来の課題）
 
-- [ ] **DNS リゾルバの std 対応**
+- [x] **DNS リゾルバの std 対応**
   - 難易度: ★★☆☆☆
-  - `std::net::ToSocketAddrs` を実装
+  - `net::dns_lookup()` で名前解決。`std::net::ToSocketAddrs` は将来課題
 
 ### Phase 7: カスタムターゲットと `-Zbuild-std`
 
