@@ -347,6 +347,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_SOUND_PLAY => sys_sound_play(arg1, arg2),
         // スレッド
         SYS_THREAD_CREATE => sys_thread_create(arg1, arg2, arg3),
+        SYS_THREAD_EXIT => sys_thread_exit(arg1),
+        SYS_THREAD_JOIN => sys_thread_join(arg1, arg2),
         // Futex
         SYS_FUTEX => sys_futex(arg1, arg2, arg3, arg4),
         // システム制御
@@ -2666,6 +2668,41 @@ fn sys_thread_create(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErro
     match crate::scheduler::spawn_thread(entry_point, stack_top, arg) {
         Ok(thread_id) => Ok(thread_id),
         Err(_e) => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// SYS_THREAD_EXIT: 現在のスレッドを終了する
+///
+/// 引数:
+///   arg1 — 終了コード
+///
+/// スレッドの終了処理。プロセスリーダーの exit とは異なり、
+/// アドレス空間（CR3）の破棄は行わない。
+fn sys_thread_exit(arg1: u64) -> Result<u64, SyscallError> {
+    let exit_code = arg1 as i32;
+    crate::scheduler::set_exit_code(exit_code);
+    // exit_usermode() でカーネルモードに戻り、
+    // thread_exit_handler または user_task_exit_handler に流れる
+    crate::usermode::exit_usermode();
+}
+
+/// SYS_THREAD_JOIN: スレッドの終了を待つ
+///
+/// 引数:
+///   arg1 — 待つスレッドのタスク ID
+///   arg2 — タイムアウト (ms)。0 なら無期限待ち。
+///
+/// 戻り値:
+///   スレッドの終了コード
+fn sys_thread_join(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let thread_id = arg1;
+    let timeout_ms = arg2;
+
+    match crate::scheduler::wait_for_thread(thread_id, timeout_ms) {
+        Ok(exit_code) => Ok(exit_code as u64),
+        Err(crate::scheduler::WaitError::NoChild) => Err(SyscallError::InvalidArgument),
+        Err(crate::scheduler::WaitError::NotChild) => Err(SyscallError::PermissionDenied),
+        Err(crate::scheduler::WaitError::Timeout) => Err(SyscallError::Timeout),
     }
 }
 

@@ -984,6 +984,87 @@ pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitE
     }
 }
 
+/// スレッドの終了を待つ。
+///
+/// wait_for_child() に似ているが、同じプロセスグループ内のスレッドを待つ。
+/// プロセスリーダーまたは同じリーダーに属するスレッドから呼べる。
+///
+/// # 引数
+/// - `thread_id`: 待つスレッドのタスク ID
+/// - `timeout_ms`: タイムアウト (ms)。0 なら無期限待ち
+///
+/// # 戻り値
+/// - Ok(exit_code): スレッドの終了コード
+/// - Err(WaitError): エラー
+pub fn wait_for_thread(thread_id: u64, timeout_ms: u64) -> Result<i32, WaitError> {
+    let my_id = current_task_id();
+    let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+
+    loop {
+        {
+            let mut sched = SCHEDULER.lock();
+
+            // 自分のリーダー ID を決定
+            let my_leader = {
+                let my_task = sched.tasks.iter().find(|t| t.id == my_id);
+                match my_task {
+                    Some(t) => t.process_leader_id.unwrap_or(t.id),
+                    None => return Err(WaitError::NoChild),
+                }
+            };
+
+            // 指定スレッドを探す
+            let thread = sched.tasks.iter_mut().find(|t| t.id == thread_id);
+            match thread {
+                None => return Err(WaitError::NoChild),
+                Some(t) => {
+                    // 同じプロセスグループか確認
+                    let thread_leader = t.process_leader_id;
+                    if thread_leader != Some(my_leader) {
+                        return Err(WaitError::NotChild);
+                    }
+                    if t.state == TaskState::Finished && !t.reaped {
+                        let exit_code = t.exit_code;
+                        t.reaped = true;
+                        return Ok(exit_code);
+                    }
+                    if t.state == TaskState::Finished && t.reaped {
+                        return Err(WaitError::NoChild);
+                    }
+                }
+            }
+        }
+
+        // タイムアウトチェック
+        if timeout_ms > 0 {
+            let now = crate::interrupts::TIMER_TICK_COUNT.load(Ordering::Relaxed);
+            let elapsed_ms = now.saturating_sub(start_tick) * 55;
+            if elapsed_ms >= timeout_ms {
+                return Err(WaitError::Timeout);
+            }
+        }
+
+        yield_now();
+    }
+}
+
+/// プロセスリーダーが終了するとき、そのグループの全スレッドを終了させる。
+///
+/// リーダーがアドレス空間を所有しているため、リーダー終了時に
+/// 所属スレッドも全て終了させないとダングリングポインタになる。
+pub fn kill_all_threads_of_leader(leader_id: u64) {
+    let mut sched = SCHEDULER.lock();
+    for task in sched.tasks.iter_mut() {
+        if task.process_leader_id == Some(leader_id)
+            && task.state != TaskState::Finished
+        {
+            crate::serial_println!("[scheduler] killing thread {} (leader {} exiting)", task.id, leader_id);
+            task.state = TaskState::Finished;
+            task.exit_code = -1; // 強制終了
+        }
+    }
+}
+
 /// プロセスの終了コードを設定する（SYS_EXIT から呼ばれる）
 /// 将来的に exit(code) システムコールで使用される
 #[allow(dead_code)]
@@ -1190,16 +1271,30 @@ global_asm!(
 /// ユーザータスクのエントリ関数が return した後に呼ばれるハンドラ。
 /// SYS_EXIT でプロセスが終了した場合もここに来る。
 /// 現在のタスクを Finished に設定して、他のタスクに切り替える。
+///
+/// プロセスリーダー（process_leader_id が None のユーザープロセス）が終了する場合、
+/// そのグループに属するスレッドを全て終了させてからアドレス空間を破棄する。
 #[unsafe(no_mangle)]
 extern "C" fn user_task_exit_handler() {
-    let (user_process_info, task_id) = {
+    let (user_process_info, task_id, is_leader) = {
         let mut sched = SCHEDULER.lock();
         let current = sched.current;
         sched.tasks[current].state = TaskState::Finished;
         let task_id = sched.tasks[current].id;
+        // プロセスリーダーかどうか判定:
+        // process_leader_id が None で、user_process_info を持つ = プロセスリーダー
+        let is_leader = sched.tasks[current].process_leader_id.is_none()
+            && sched.tasks[current].user_process_info.is_some();
         // ユーザープロセス情報を取り出す（プロセス破棄のため）
-        (sched.tasks[current].user_process_info.take(), task_id)
+        (sched.tasks[current].user_process_info.take(), task_id, is_leader)
     };
+
+    // プロセスリーダーなら、所属スレッドを全て Finished にする。
+    // リーダーがアドレス空間を所有しているため、リーダー終了前に
+    // スレッドを停止しないとダングリングポインタになる。
+    if is_leader {
+        kill_all_threads_of_leader(task_id);
+    }
 
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
