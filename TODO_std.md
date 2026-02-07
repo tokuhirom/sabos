@@ -166,19 +166,45 @@ PAL の `unsupported` モジュールをベースに、対応可能なものだ�
 
 ### Phase 7: カスタムターゲットと `-Zbuild-std`
 
-- [ ] **`x86_64-sabos.json` カスタムターゲット定義**
+- [x] **`x86_64-sabos.json` カスタムターゲット定義**
   - 難易度: ★★★☆☆
   - `x86_64-unknown-none` をベースに `os = "sabos"` を設定
   - リンカスクリプト、ABI の設定
 
-- [ ] **PAL 実装 (`sys/pal/sabos/`)**
+- [x] **PAL 実装 (`sys/pal/sabos/`)**
   - 難易度: ★★★★★
   - Phase 1〜6 で実装した syscall を PAL のインターフェースに接続
   - `unsupported` モジュールをベースに、対応可能なものだけ実装
 
-- [ ] **`-Zbuild-std` でのビルド確認**
+- [x] **`-Zbuild-std` でのビルド確認**
   - 難易度: ★★★☆☆
   - `cargo build -Zbuild-std=std,core,alloc` でビルドが通ることを確認
+
+#### Phase 7 残作業（暫定対応・手抜き箇所）
+
+- [ ] **SYS_MMAP が exec で起動したプロセスからハングする問題の修正**
+  - 難易度: ★★★★☆
+  - 現象: `SYS_MMAP` を exec/spawn で起動したプロセスから呼ぶと制御が返らない
+  - シェルプロセス自身からの mmap selftest は PASS する
+  - 原因: exec されたプロセスのページテーブル or アドレス空間設定に問題がある可能性
+  - これが直れば `println!` / `Vec` / `String` 等の std 機能がフルに使える
+
+- [ ] **`println!` マクロを std 経由で動かす**
+  - 難易度: ★★☆☆☆（SYS_MMAP 修正後）
+  - 現状: `raw_write()` で直接 SYS_WRITE を呼ぶワークアラウンドを使用
+  - std の `println!` は `stdout()` → `OnceLock::get_or_init()` → ヒープ確保（SYS_MMAP）が必要
+  - SYS_MMAP が修正されれば自動的に動くはず
+
+- [ ] **`Vec` / `String` / `format!` を使ったテストの追加**
+  - 難易度: ★☆☆☆☆（SYS_MMAP 修正後）
+  - ヒープアロケーションを伴う std 機能の動作確認
+  - `user-std/src/main.rs` に `Vec::push` や `String::from` のテストを追加
+
+- [ ] **debug ビルドの OOM 問題の改善**
+  - 難易度: ★★★☆☆
+  - 現状: debug ビルドの ELF が 6.4MB で、カーネルヒープ (16MB) 上に Vec で読むと OOM
+  - 原因: カーネルの ELF ローダーが `Vec<u8>` でファイル全体をヒープに読み込むため
+  - 対策案: ストリーミング読み込み、またはカーネルヒープサイズ増加
 
 ## 先行事例
 
