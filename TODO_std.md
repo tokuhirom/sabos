@@ -182,23 +182,16 @@ PAL の `unsupported` モジュールをベースに、対応可能なものだ�
 
 #### Phase 7 残作業（暫定対応・手抜き箇所）
 
-- [ ] **SYS_MMAP が exec で起動したプロセスからハングする問題の修正**
-  - 難易度: ★★★★☆
-  - 現象: `SYS_MMAP` を exec/spawn で起動したプロセスから呼ぶと制御が返らない
-  - シェルプロセス自身からの mmap selftest は PASS する
-  - 原因: exec されたプロセスのページテーブル or アドレス空間設定に問題がある可能性
-  - これが直れば `println!` / `Vec` / `String` 等の std 機能がフルに使える
+- [x] **SYS_MMAP が exec で起動したプロセスからハングする問題の修正**
+  - 原因: MMAP_VADDR_BASE (0x4000_0000) が UEFI の 1GiB ヒュージページ identity mapping と衝突
+  - 修正: mmap 領域を L4[2] (0x100_0000_0000 = 1TiB) に移動して衝突回避
 
-- [ ] **`println!` マクロを std 経由で動かす**
-  - 難易度: ★★☆☆☆（SYS_MMAP 修正後）
-  - 現状: `raw_write()` で直接 SYS_WRITE を呼ぶワークアラウンドを使用
-  - std の `println!` は `stdout()` → `OnceLock::get_or_init()` → ヒープ確保（SYS_MMAP）が必要
-  - SYS_MMAP が修正されれば自動的に動くはず
+- [x] **`println!` マクロを std 経由で動かす**
+  - SYS_MMAP 修正により println! が正常動作するようになった
+  - raw_write() ワークアラウンドを削除し、println! のみで出力
 
-- [ ] **`Vec` / `String` / `format!` を使ったテストの追加**
-  - 難易度: ★☆☆☆☆（SYS_MMAP 修正後）
-  - ヒープアロケーションを伴う std 機能の動作確認
-  - `user-std/src/main.rs` に `Vec::push` や `String::from` のテストを追加
+- [x] **`Vec` / `String` / `format!` を使ったテストの追加**
+  - user-std/src/main.rs で String::from, Vec::collect, iter().sum() の動作確認済み
 
 - [ ] **debug ビルドの OOM 問題の改善**
   - 難易度: ★★★☆☆
