@@ -2,7 +2,7 @@
 # Make の子プロセスには渡さないようにする
 unexport RUSTUP_TOOLCHAIN
 
-.PHONY: build build-user run run-gui screenshot clean disk-img test
+.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img test
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -19,6 +19,7 @@ TELNETD_ELF = user/target/x86_64-unknown-none/debug/telnetd
 TSH_ELF = user/target/x86_64-unknown-none/debug/tsh
 EXIT0_ELF = user/target/x86_64-unknown-none/debug/exit0
 TERM_ELF = user/target/x86_64-unknown-none/debug/term
+HELLO_STD_ELF = user-std/target/x86_64-sabos/release/sabos-user-std
 ESP_DIR = esp/EFI/BOOT
 
 # OVMF ファームウェアの検出（Ubuntu: /usr/share/OVMF/）
@@ -64,6 +65,17 @@ build: build-user
 build-user:
 	cd user && cargo build
 
+# sysroot にSABOS 用パッチを適用する（idempotent）
+patch-sysroot:
+	bash scripts/patch-rust-sysroot.sh
+
+# std 対応ユーザープログラムのビルド（要: patch-sysroot 済み）
+# RUSTUP_TOOLCHAIN=nightly と -Zjson-target-spec が必要。
+# release ビルドにすることでバイナリサイズを大幅に削減する（6.4MB → 29KB）。
+# debug ビルドではカーネルヒープの OOM が発生するため release 必須。
+build-user-std:
+	cd user-std && RUSTUP_TOOLCHAIN=nightly cargo -Zjson-target-spec build --release
+
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
 
@@ -90,6 +102,11 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(TSH_ELF) ::TSH.ELF
 	mcopy -i $(DISK_IMG) $(EXIT0_ELF) ::EXIT0.ELF
 	mcopy -i $(DISK_IMG) $(TERM_ELF) ::TERM.ELF
+	@# std 対応バイナリがビルド済みならディスクに追加
+	@if [ -f "$(HELLO_STD_ELF)" ]; then \
+		mcopy -i $(DISK_IMG) $(HELLO_STD_ELF) ::HELLOSTD.ELF; \
+		echo "Added HELLOSTD.ELF to disk image"; \
+	fi
 	@echo "Disk image created: $(DISK_IMG)"
 
 run: build $(ESP_DIR) $(DISK_IMG)
@@ -136,6 +153,7 @@ screenshot: build $(ESP_DIR) $(DISK_IMG)
 clean:
 	cd kernel && cargo clean
 	cd user && cargo clean
+	cd user-std && cargo clean
 	rm -rf esp
 	rm -f $(DISK_IMG)
 
