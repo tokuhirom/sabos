@@ -345,6 +345,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
         // サウンド
         SYS_SOUND_PLAY => sys_sound_play(arg1, arg2),
+        // スレッド
+        SYS_THREAD_CREATE => sys_thread_create(arg1, arg2, arg3),
         // Futex
         SYS_FUTEX => sys_futex(arg1, arg2, arg3, arg4),
         // システム制御
@@ -2644,6 +2646,26 @@ fn sys_sound_play(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
             Ok(0)
         }
         None => Err(SyscallError::NotSupported),
+    }
+}
+
+/// SYS_THREAD_CREATE: 同一プロセス内で新しいスレッドを作成する
+///
+/// 引数:
+///   arg1 — スレッドのエントリポイント（ユーザー空間アドレス）
+///   arg2 — スレッド用ユーザースタックのトップ（mmap で確保済み）
+///   arg3 — スレッドに渡す引数（rdi レジスタにセット）
+///
+/// 戻り値:
+///   スレッドのタスク ID
+fn sys_thread_create(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let entry_point = arg1;
+    let stack_top = arg2;
+    let arg = arg3;
+
+    match crate::scheduler::spawn_thread(entry_point, stack_top, arg) {
+        Ok(thread_id) => Ok(thread_id),
+        Err(_e) => Err(SyscallError::InvalidArgument),
     }
 }
 

@@ -288,6 +288,11 @@ pub struct Task {
     /// プロセスの環境変数（KEY=VALUE のペア）。
     /// spawn 時に親プロセスから継承され、SYS_SETENV で変更可能。
     pub env_vars: Vec<(String, String)>,
+    /// スレッドが属するプロセスリーダーのタスク ID。
+    /// プロセスリーダー（メインスレッド）は None。
+    /// spawn_thread() で作られたスレッドは Some(leader_id)。
+    /// スレッドはリーダーと同じ CR3（アドレス空間）を共有する。
+    pub process_leader_id: Option<u64>,
 }
 
 // =================================================================
@@ -347,6 +352,7 @@ pub fn init() {
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() は不要
         env_vars: Vec::new(),         // カーネルタスクに環境変数はない
+        process_leader_id: None,      // カーネルタスクはプロセスリーダーではない
     });
     sched.current = 0;
 }
@@ -434,6 +440,7 @@ pub fn spawn(name: &'static str, entry: fn()) {
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() は不要
         env_vars: Vec::new(),         // カーネルタスクに環境変数はない
+        process_leader_id: None,      // カーネルタスクはスレッドではない
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -1403,9 +1410,251 @@ pub fn spawn_user(name: &str, elf_data: &[u8], args: &[&str]) -> Result<u64, &'s
         exit_code: 0,                 // 初期値
         reaped: false,                // wait() が呼ばれるまで未回収
         env_vars: parent_env_vars,    // 親プロセスの環境変数を継承
+        process_leader_id: None,      // プロセスリーダー（メインスレッド）
     });
 
     crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);
 
     Ok(id)
 }
+
+// =================================================================
+// スレッド生成
+// =================================================================
+//
+// 同一プロセス内でスレッドを作成する。
+// スレッドは親プロセスと同じ CR3（ページテーブル）を共有し、
+// 同一アドレス空間で実行される。
+// 独自のカーネルスタックとタスクスタックを持つが、
+// ユーザー空間のヒープやコード領域は親と共有する。
+
+// スレッド用トランポリン（アセンブリ）
+//
+// user_task_trampoline と同じ構造だが、
+// thread_entry_wrapper(task_id) を呼び出す。
+//
+// レジスタの初期値:
+//   r12 = thread_entry_wrapper 関数のアドレス
+//   r13 = タスク ID
+global_asm!(
+    "thread_task_trampoline:",
+    "sti",            // 割り込みを有効化
+    "sub rsp, 40",    // シャドウスペース + アライメント
+    "mov rcx, r13",   // 第1引数 = task_id
+    "call r12",       // thread_entry_wrapper(task_id)
+    "add rsp, 40",
+    "sub rsp, 40",
+    "call {exit}",
+    "ud2",
+    exit = sym thread_exit_handler,
+);
+
+/// スレッド用の情報を一時的に保持する構造体。
+/// spawn_thread() でスレッド情報を保存し、thread_entry_wrapper() で取り出す。
+struct ThreadEntryInfo {
+    /// スレッドのエントリポイント（ユーザー空間アドレス）
+    entry_point: u64,
+    /// スレッドに渡す引数
+    arg: u64,
+    /// ユーザースタックのトップアドレス
+    user_stack_top: u64,
+    /// カーネルスタックのポインタ
+    kernel_stack_ptr: u64,
+    /// カーネルスタックの長さ
+    kernel_stack_len: u64,
+}
+
+/// スレッドの一時情報を保持する。
+/// spawn_thread() → thread_entry_wrapper() 間でデータを受け渡す。
+/// 割り込み無効 + シングルコアなので Mutex で保護すれば安全。
+static THREAD_ENTRY_INFOS: Mutex<Vec<(u64, ThreadEntryInfo)>> = Mutex::new(Vec::new());
+
+/// スレッドのエントリラッパー。
+/// thread_task_trampoline から呼ばれ、スレッド情報を取り出して Ring 3 に遷移する。
+///
+/// スレッドは独自のカーネルスタックを持つので、TSS rsp0 を設定してから
+/// iretq で Ring 3 に遷移する。
+#[unsafe(no_mangle)]
+extern "C" fn thread_entry_wrapper(task_id: u64) {
+    // スレッド情報を取り出す
+    let info = {
+        let mut infos = THREAD_ENTRY_INFOS.lock();
+        let idx = infos.iter().position(|(id, _)| *id == task_id);
+        match idx {
+            Some(i) => infos.remove(i).1,
+            None => {
+                crate::serial_println!("[scheduler] ERROR: thread {} has no entry info", task_id);
+                return;
+            }
+        }
+    };
+
+    // カーネルスタックのトップアドレスを計算
+    let kernel_stack_top = info.kernel_stack_ptr + info.kernel_stack_len;
+
+    // TSS rsp0 にカーネルスタックのトップを設定する。
+    // Ring 3 で int 0x80 が発生したとき、CPU は TSS rsp0 のアドレスに
+    // スタックを切り替える。
+    unsafe {
+        crate::gdt::set_tss_rsp0(VirtAddr::new(kernel_stack_top));
+    }
+
+    // セグメントセレクタを取得
+    let user_cs = crate::gdt::user_code_selector().0 as u64;
+
+    // RFLAGS: IF (Interrupt Flag, bit 9) を立てておく
+    let rflags: u64 = 0x200;
+
+    // スレッドの引数を rdi にセットするため、
+    // set_user_entry_args を使って argc に arg を設定する。
+    // argv と envp は 0 にする（スレッドには不要）。
+    unsafe {
+        crate::usermode::set_user_entry_args(info.arg, 0, 0);
+    }
+
+    // Ring 3 に遷移する。
+    // SYS_EXIT → exit_usermode() で RSP/RBP が復元され、ここに戻る。
+    // SYS_THREAD_EXIT でもここに戻る。
+    unsafe {
+        crate::usermode::jump_to_usermode(info.entry_point, user_cs, rflags, info.user_stack_top);
+    }
+
+    // ここに到達 = exit_usermode() 経由で Ring 3 から戻ってきた
+    // thread_task_trampoline に戻り、thread_exit_handler が呼ばれる
+}
+
+/// スレッドが終了したときに呼ばれるハンドラ。
+/// user_task_exit_handler と異なり、アドレス空間（CR3）はリーダーが管理するため
+/// destroy_user_process は呼ばない。
+#[unsafe(no_mangle)]
+extern "C" fn thread_exit_handler() {
+    let task_id = {
+        let mut sched = SCHEDULER.lock();
+        let current = sched.current;
+        sched.tasks[current].state = TaskState::Finished;
+        sched.tasks[current].id
+    };
+    // キーボードフォーカスを持っていたら自動解放する
+    crate::console::release_keyboard(task_id);
+    // 他のタスクに切り替える
+    yield_now();
+    // ここに戻ることはないはず（Finished タスクはスケジュールされない）
+    loop {
+        x86_64::instructions::hlt();
+    }
+}
+
+/// 現在のプロセス内で新しいスレッドを作成する。
+///
+/// 親プロセスの CR3（ページテーブル）を共有し、同一アドレス空間で実行する。
+/// スレッドは独自のカーネルスタックを持つが、ユーザー空間のヒープ等は共有。
+///
+/// # 引数
+/// - `entry_point`: スレッドのエントリポイント（ユーザー空間アドレス）
+/// - `user_stack_top`: スレッド用のユーザースタックトップ（ユーザーが mmap で確保済み）
+/// - `arg`: スレッドに渡す引数（rdi レジスタにセット）
+///
+/// # 戻り値
+/// Ok(thread_id) または Err
+pub fn spawn_thread(entry_point: u64, user_stack_top: u64, arg: u64) -> Result<u64, &'static str> {
+    // カーネルスタック確保（Ring 3 → Ring 0 遷移用）
+    let kernel_stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
+    let ks_ptr = kernel_stack.as_ptr() as u64;
+    let ks_len = kernel_stack.len() as u64;
+
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+
+    // 現在のタスクの CR3 を取得（ユーザープロセスのみスレッド作成可能）
+    let cr3 = sched.tasks[current].cr3
+        .ok_or("only user processes can create threads")?;
+
+    // リーダー ID を決定（自分がスレッドなら自分のリーダーを、そうでなければ自分を）
+    let leader_id = sched.tasks[current].process_leader_id
+        .unwrap_or(sched.tasks[current].id);
+
+    let id = sched.next_id;
+    sched.next_id += 1;
+
+    // タスク用スタック確保（カーネルモードでの実行用）
+    let stack = vec![0u8; TASK_STACK_SIZE].into_boxed_slice();
+    let stack_bottom = stack.as_ptr() as u64;
+    let stack_top = (stack_bottom + TASK_STACK_SIZE as u64) & !0xF;
+
+    // 初期スタックの設定（thread_task_trampoline 用）
+    // r12 = thread_entry_wrapper のアドレス
+    // r13 = task_id
+    unsafe extern "C" {
+        fn thread_task_trampoline();
+    }
+    let trampoline_addr = thread_task_trampoline as *const () as u64;
+    let entry_wrapper_addr = thread_entry_wrapper as *const () as u64;
+
+    unsafe {
+        let ptr = stack_top as *mut u64;
+        *ptr.sub(1) = 0;                      // パディング
+        *ptr.sub(2) = trampoline_addr;         // ret 先 → thread_task_trampoline
+        *ptr.sub(3) = 0;                      // rbp
+        *ptr.sub(4) = 0;                      // rbx
+        *ptr.sub(5) = 0;                      // rdi
+        *ptr.sub(6) = 0;                      // rsi
+        *ptr.sub(7) = entry_wrapper_addr;      // r12 = スレッドエントリラッパー
+        *ptr.sub(8) = id;                     // r13 = task_id
+        *ptr.sub(9) = 0;                      // r14
+        *ptr.sub(10) = 0;                     // r15
+    }
+
+    let initial_rsp = stack_top - 80;
+
+    // borrow checker 対策: push 前に必要な値を取り出す
+    let parent_task_id = sched.tasks[current].id;
+    let parent_env_vars = sched.tasks[current].env_vars.clone();
+
+    sched.tasks.push(Task {
+        id,
+        name: format!("thread-{}", id),
+        state: TaskState::Ready,
+        context: Context { rsp: initial_rsp },
+        _stack: Some(stack),
+        cr3: Some(cr3),         // 親と同じ CR3 を共有！
+        user_process_info: None, // スレッドは UserProcess を所有しない
+        is_user: true,
+        parent_id: Some(parent_task_id),
+        exit_code: 0,
+        reaped: false,
+        env_vars: parent_env_vars,
+        process_leader_id: Some(leader_id),  // スレッドグループのリーダー
+    });
+
+    // カーネルスタックの所有権をリーダープロセスに移管する。
+    // スレッド自身は user_process_info を持たないので、
+    // リーダーの allocated_frames にカーネルスタック用のメモリを追加することで
+    // リーダー終了時にまとめて解放される。
+    // ただし、カーネルスタックは Box で確保しているのでここでは leak して
+    // スレッド情報テーブルに保持する（thread_entry_wrapper で使用するため）。
+
+    drop(sched); // ロック解放
+
+    // スレッド情報を登録（thread_entry_wrapper が取り出す）
+    {
+        let mut infos = THREAD_ENTRY_INFOS.lock();
+        infos.push((id, ThreadEntryInfo {
+            entry_point,
+            arg,
+            user_stack_top,
+            kernel_stack_ptr: ks_ptr,
+            kernel_stack_len: ks_len,
+        }));
+    }
+
+    // カーネルスタックを leak して永続化（スレッド終了まで有効である必要がある）
+    // TODO: スレッド終了時にカーネルスタックを回収する仕組み
+    core::mem::forget(kernel_stack);
+
+    crate::serial_println!("[scheduler] spawned thread {} (entry: {:#x}, leader: {})", id, entry_point, leader_id);
+
+    Ok(id)
+}
+
+/// カーネルスタックサイズ（ユーザーモード遷移用）
+const KERNEL_STACK_SIZE: usize = 4096 * 4;
