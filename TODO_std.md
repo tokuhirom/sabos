@@ -1,250 +1,122 @@
 # TODO: Rust std ライブラリ対応ロードマップ
 
 SABOS のユーザープログラムで `std` クレートを使えるようにするための TODO リスト。
-`std` 環境が使えれば `alloc::format!` の代わりに `println!`、`alloc::string::String` の代わりに `std::string::String`、
-そして外部の std 対応クレートが利用可能になり、開発効率が大幅に上がる。
+Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動くようになった。
+今後は PAL の各モジュールを充実させ、外部クレートが使えるレベルを目指す。
 
-## 背景: Rust std が OS に要求するもの
+## 現在の状況
 
-Rust の std ライブラリは Platform Abstraction Layer (PAL) を通じて OS 機能にアクセスする。
-PAL は `library/std/src/sys/pal/<os>/` に配置され、以下のモジュールを実装する必要がある：
+**方法 C（カスタムターゲット JSON + `-Zbuild-std`）を採用**し、以下が動作している:
 
-| PAL モジュール | 必要な OS 機能 | SABOS の対応状況 |
-|---------------|---------------|-----------------|
-| **alloc** | ヒープメモリ確保 (mmap/brk 相当) | △ 静的バンプアロケータのみ |
-| **stdio** | stdout/stderr/stdin | ✅ SYS_READ/SYS_WRITE |
-| **args** | コマンドライン引数 | ❌ 未実装 |
-| **env** | 環境変数 | ❌ 未実装 |
-| **fs** | ファイル操作 (open/read/write/close/stat) | △ read は実装済み、write/stat 未実装 |
-| **io** | I/O エラー型、ヘルパー | △ 基盤はある |
-| **net** | ソケット (TCP/UDP) | △ TCP のみ（netd 経由） |
-| **os** | OS 固有の型・定数 | ❌ 未実装 |
-| **path** | パス操作 | ❌ 未実装（OS 依存のセパレータ等） |
-| **pipe** | パイプ | ❌ 未実装 |
-| **process** | プロセス生成・終了 | △ spawn/exec/exit あり |
-| **thread** | スレッド生成・join | ❌ 未実装（プロセスベースのみ） |
-| **time** | 時刻取得 (clock_gettime 相当) | ❌ 未実装 |
-| **rand** | 乱数ソース | ❌ 未実装 |
-| **mutex/condvar/rwlock** | 同期プリミティブ | ❌ 未実装 |
+- `x86_64-sabos.json` カスタムターゲット（`os = "sabos"`）
+- sysroot パッチ方式で PAL を追加（`scripts/patch-rust-sysroot.sh`）
+- `user-std/` クレートで `fn main()` + `println!` + `String` + `Vec` が動作
+- release ビルド（`opt-level = "z"`, LTO, strip）で 29KB の ELF を生成
 
-## 実装アプローチ
+### PAL 実装状況
 
-### 方法 A: rustc をフォークして `target_os = "sabos"` の PAL を追加
+| PAL モジュール | 状態 | 実装内容 |
+|---------------|------|---------|
+| **pal/sabos** | ✅ 実装済み | `_start` → `main()` → `exit()` のエントリポイント |
+| **alloc** | ✅ 実装済み | SYS_MMAP/SYS_MUNMAP ベースの GlobalAlloc |
+| **stdio** | ✅ 実装済み | SYS_WRITE/SYS_READ ベースの Stdout/Stdin |
+| **random** | ✅ 実装済み | SYS_GETRANDOM ベースの fill_bytes |
+| **thread_local** | ✅ 設定済み | `no_threads` モード（Cell ベース） |
+| **args** | ❌ unsupported | `std::env::args()` は空を返す |
+| **env** | ❌ unsupported | `std::env::var()` はエラーを返す |
+| **fs** | ❌ unsupported | `std::fs::*` はエラーを返す |
+| **net** | ❌ unsupported | `std::net::*` はエラーを返す |
+| **os** | △ 最小限 | `exit()` と `getpid()` のみ実装 |
+| **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
+| **time** | ❌ unsupported | `std::time::*` はエラーを返す |
+| **process** | ❌ unsupported | `std::process::Command` はエラーを返す |
+| **sync** | ✅ 設定済み | `no_threads` モード（シングルスレッド用） |
 
-Redox OS が採用している方法。rustc のソースに SABOS 用の PAL を追加し、`-Zbuild-std` でビルドする。
+## TODO リスト
 
-**メリット:** 正攻法、std の全機能が使える
-**デメリット:** rustc フォークのメンテナンスコストが高い
+### 完了済み
 
-### 方法 B: `x86_64-unknown-none` のまま、std 互換レイヤーを自前で提供
+- [x] **Phase 1: `println!` マクロの提供** — std の println! が PAL 経由で動作
+- [x] **Phase 2: ファイルシステムの基盤** — SYS_HANDLE_WRITE / SYS_HANDLE_SEEK / SYS_FS_STAT 実装済み（no_std バイナリから利用可能）
+- [x] **Phase 3: 時刻・乱数** — SYS_CLOCK_MONOTONIC / SYS_GETRANDOM 実装済み
+- [x] **Phase 4: 動的メモリ管理** — SYS_MMAP / SYS_MUNMAP 実装済み
+- [x] **Phase 5: 同期プリミティブ** — SYS_FUTEX_WAIT / SYS_FUTEX_WAKE 実装済み
+- [x] **Phase 6: ネットワーク抽象化** — user/src/net.rs に TcpStream / TcpListener / DNS
+- [x] **Phase 7: カスタムターゲットと `-Zbuild-std`** — 基本動作確認済み
 
-`no_std` のまま、必要な std の型・トレイトだけを re-export するクレートを作る。
+### Phase 8: PAL の充実（次のステップ）
 
-**メリット:** フォーク不要、段階的に進められる
-**デメリット:** 外部クレートの `use std::*` がそのままでは動かない
+既にカーネル側に syscall が存在するが、PAL に接続されていないものを繋ぐ。
 
-### 方法 C: カスタムターゲット JSON + `-Zbuild-std`
+- [ ] **PAL fs の実装**
+  - 難易度: ★★★☆☆
+  - SYS_HANDLE_OPEN / SYS_HANDLE_READ / SYS_HANDLE_WRITE / SYS_HANDLE_CLOSE を
+    PAL の `fs::File` に接続
+  - `std::fs::read_to_string()` / `std::fs::write()` が使えるようになる
 
-`x86_64-sabos.json` というカスタムターゲットを定義し、`-Zbuild-std` で std を再ビルド。
-PAL の `unsupported` モジュールをベースに、対応可能なものだけ実装する。
+- [ ] **PAL time の実装**
+  - 難易度: ★★☆☆☆
+  - SYS_CLOCK_MONOTONIC を PAL の `time::Instant` に接続
+  - `std::time::Instant::now()` / `elapsed()` が使えるようになる
 
-**メリット:** フォーク不要、nightly の `-Zbuild-std` を使える
-**デメリット:** unstable 機能に依存、PAL の組み込みが難しい場合がある
+- [ ] **PAL os の充実**
+  - 難易度: ★★☆☆☆
+  - `std::process::exit()` は実装済み
+  - `std::env::current_dir()` 等を追加
 
-### 推奨: 方法 B → 方法 C の段階的移行
+- [ ] **PAL net の実装**
+  - 難易度: ★★★★☆
+  - netd 経由の TCP を PAL の `net::TcpStream` に接続
+  - `std::net::TcpStream::connect()` が使えるようになる
+  - IPC ベースの netd 通信を PAL 内部に隠蔽する必要がある
 
-1. まずは方法 B で `sabos-std` クレートを作り、`println!` や `String` を使えるようにする
-2. カーネル側のシステムコールを充実させる（下の TODO リスト）
-3. 十分なシステムコールが揃ったら方法 C でフル std 対応を目指す
-
-## TODO リスト（簡単な順）
-
-### Phase 1: 即座に対応できるもの（既存 syscall の整理）
-
-- [ ] **`println!` マクロの提供**
-  - 難易度: ★☆☆☆☆
-  - `SYS_WRITE` をバックエンドにした `core::fmt::Write` 実装は簡単
-  - `sabos-std` クレートに `println!` / `eprintln!` マクロを定義
-  - これだけで `format!` + `write_str` の手書きが不要になる
+### Phase 9: 外部クレート対応
 
 - [ ] **コマンドライン引数の受け渡し**
   - 難易度: ★★☆☆☆
-  - `SYS_EXEC` / `SYS_SPAWN` に引数文字列を渡せるようにする
-  - カーネル側: 新しいタスクのスタックに argc/argv 相当を積む
-  - ユーザー側: `_start` で引数を受け取る仕組み
+  - SYS_EXEC / SYS_SPAWN に引数文字列を渡せるようにする
+  - PAL の args に接続して `std::env::args()` が使えるようになる
+  - 多くの CLI クレート（clap 等）の前提条件
 
-- [ ] **環境変数（簡易版）**
+- [ ] **環境変数**
   - 難易度: ★★☆☆☆
-  - プロセスごとの環境変数テーブルをカーネルまたはユーザー空間で管理
-  - `SYS_GETENV(key_ptr, key_len, val_ptr, val_len) -> n`
-  - `SYS_SETENV(key_ptr, key_len, val_ptr, val_len) -> 0`
+  - プロセスごとの環境変数テーブル
+  - `std::env::var()` / `std::env::set_var()` が使えるようになる
 
-### Phase 2: ファイルシステムの完成
-
-- [ ] **`SYS_HANDLE_WRITE` の実装（ファイル書き込み）**
-  - 難易度: ★★☆☆☆
-  - syscall 番号 72 は定義済み、カーネル側の FAT32 書き込みロジックを接続するだけ
-  - `std::fs::write()` / `std::io::Write` の基盤
-
-- [ ] **ファイル stat（メタデータ取得）**
-  - 難易度: ★★☆☆☆
-  - ファイルサイズ、作成日時、属性を返す syscall
-  - `SYS_HANDLE_STAT(handle_ptr, stat_ptr) -> 0`
-  - `std::fs::metadata()` の基盤
-
-- [ ] **ファイル seek（ポジション変更）**
-  - 難易度: ★★☆☆☆
-  - `SYS_HANDLE_SEEK(handle_ptr, offset, whence) -> new_pos`
-  - `std::io::Seek` トレイトの基盤
-
-- [ ] **ディレクトリ作成の handle ベース化**
-  - 難易度: ★★☆☆☆
-  - 現在 `mkdir` は handle ベースだが、`SYS_HANDLE_CREATE` 等の整理
-
-### Phase 3: 時刻・乱数
-
-- [ ] **時刻取得 syscall**
+- [ ] **外部クレートのビルドテスト**
   - 難易度: ★★★☆☆
-  - HPET / TSC / PIT からの時刻取得をカーネルで実装
-  - `SYS_CLOCK_GETTIME(clock_id, timespec_ptr) -> 0`
-  - `std::time::Instant` / `std::time::SystemTime` の基盤
+  - `serde_json` や `regex` など代表的なクレートが `user-std/` でビルドできるか確認
+  - 不足している PAL 機能を洗い出す
 
-- [ ] **乱数ソース**
-  - 難易度: ★★☆☆☆
-  - RDRAND 命令があれば簡単（x86_64 なら大抵ある）
-  - `SYS_GETRANDOM(buf_ptr, len) -> n`
-  - `std::collections::HashMap` のハッシュシードにも必要
-
-### Phase 4: 動的メモリ管理の改善
-
-- [ ] **mmap 相当の syscall**
-  - 難易度: ★★★☆☆
-  - ユーザー空間に新しいページをマップする
-  - `SYS_MMAP(addr_hint, len, prot, flags) -> addr`
-  - `SYS_MUNMAP(addr, len) -> 0`
-  - 現在の 256 KiB 固定バンプアロケータを置き換え
-  - `std` の GlobalAlloc の基盤
-
-- [ ] **brk / sbrk 相当**
-  - 難易度: ★★☆☆☆
-  - mmap より簡単な代替案。ヒープの終端を伸ばす
-  - 既存のバンプアロケータを拡張可能にするだけでも良い
-
-### Phase 5: スレッドと同期プリミティブ
-
-- [ ] **スレッド生成 syscall**
-  - 難易度: ★★★★☆
-  - 同じアドレス空間内で新しいスレッドを作る
-  - `SYS_THREAD_CREATE(entry_ptr, stack_ptr, arg_ptr) -> thread_id`
-  - `SYS_THREAD_JOIN(thread_id, timeout_ms) -> exit_code`
-  - ページテーブル共有の仕組みが必要
-
-- [ ] **Mutex / Condvar**
-  - 難易度: ★★★☆☆
-  - futex 相当の syscall を提供
-  - `SYS_FUTEX_WAIT(addr, expected_val, timeout_ms) -> 0`
-  - `SYS_FUTEX_WAKE(addr, count) -> n`
-  - ユーザー空間で spin + futex のハイブリッド mutex を実装
-
-- [ ] **Thread Local Storage (TLS)**
-  - 難易度: ★★★★☆
-  - ELF の TLS セクション対応、または手動 TLS
-  - `std` の初期化に必須
-
-### Phase 6: ネットワークの std 対応
-
-- [x] **ソケット抽象化**
-  - 難易度: ★★★☆☆
-  - `user/src/net.rs` に TcpStream / TcpListener / DNS API を実装
-  - shell.rs / httpd.rs / telnetd.rs から重複コード ~380 行を削除
-  - Drop で自動クローズ（RAII パターン）、低レベル raw API も提供
-  - UDP 対応は未実装（将来の課題）
-
-- [x] **DNS リゾルバの std 対応**
-  - 難易度: ★★☆☆☆
-  - `net::dns_lookup()` で名前解決。`std::net::ToSocketAddrs` は将来課題
-
-### Phase 7: カスタムターゲットと `-Zbuild-std`
-
-- [x] **`x86_64-sabos.json` カスタムターゲット定義**
-  - 難易度: ★★★☆☆
-  - `x86_64-unknown-none` をベースに `os = "sabos"` を設定
-  - リンカスクリプト、ABI の設定
-
-- [x] **PAL 実装 (`sys/pal/sabos/`)**
-  - 難易度: ★★★★★
-  - Phase 1〜6 で実装した syscall を PAL のインターフェースに接続
-  - `unsupported` モジュールをベースに、対応可能なものだけ実装
-
-- [x] **`-Zbuild-std` でのビルド確認**
-  - 難易度: ★★★☆☆
-  - `cargo build -Zbuild-std=std,core,alloc` でビルドが通ることを確認
-
-#### Phase 7 残作業（暫定対応・手抜き箇所）
-
-- [x] **SYS_MMAP が exec で起動したプロセスからハングする問題の修正**
-  - 原因: MMAP_VADDR_BASE (0x4000_0000) が UEFI の 1GiB ヒュージページ identity mapping と衝突
-  - 修正: mmap 領域を L4[2] (0x100_0000_0000 = 1TiB) に移動して衝突回避
-
-- [x] **`println!` マクロを std 経由で動かす**
-  - SYS_MMAP 修正により println! が正常動作するようになった
-  - raw_write() ワークアラウンドを削除し、println! のみで出力
-
-- [x] **`Vec` / `String` / `format!` を使ったテストの追加**
-  - user-std/src/main.rs で String::from, Vec::collect, iter().sum() の動作確認済み
+### 残課題
 
 - [ ] **debug ビルドの OOM 問題の改善**
-  - 難易度: ★★★☆☆
   - 現状: debug ビルドの ELF が 6.4MB で、カーネルヒープ (16MB) 上に Vec で読むと OOM
-  - 原因: カーネルの ELF ローダーが `Vec<u8>` でファイル全体をヒープに読み込むため
+  - 原因: カーネルの ELF ローダーが `Vec<u8>` でファイル全体をヒープに読み込む
   - 対策案: ストリーミング読み込み、またはカーネルヒープサイズ増加
 
-## 先行事例
+- [ ] **nightly 更新時の sysroot パッチ追従**
+  - `scripts/patch-rust-sysroot.sh` は idempotent 設計だが、std のソース構造が変わるとパッチが壊れる
+  - `rust-toolchain.toml` でバージョン固定することで緩和可能
 
-### Redox OS
-- Rust で書かれた Unix 風マイクロカーネル OS
-- rustc をフォークして `target_os = "redox"` を追加
-- `relibc` (C ライブラリ) を経由して std を実装
-- 参考: https://gitlab.redox-os.org/redox-os/relibc
+## ビルド手順
 
-### Theseus OS
-- Rust で書かれた研究用 OS
-- `no_std` のまま独自の安全な抽象化を構築
-- std は使わずに Rust の型システムを活用
+```bash
+# 1. sysroot にパッチを適用（初回 or nightly 更新時）
+make patch-sysroot
 
-### OSDev Wiki
-- Porting Rust standard library の手順がまとまっている
-- 参考: https://wiki.osdev.org/Porting_Rust_standard_library
+# 2. std 対応バイナリをビルド（release）
+make build-user-std
 
-## まず最初にやること
-
-**Phase 1 の `println!` マクロ提供** が最もインパクト大で簡単。
-`SYS_WRITE` は既に動いているので、以下だけで実現できる：
-
-```rust
-// sabos-std/src/lib.rs (新クレート)
-#![no_std]
-
-use core::fmt;
-
-struct StdoutWriter;
-
-impl fmt::Write for StdoutWriter {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        syscall::write(s.as_bytes());
-        Ok(())
-    }
-}
-
-#[macro_export]
-macro_rules! println {
-    () => { $crate::print!("\n") };
-    ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let mut w = $crate::StdoutWriter;
-        let _ = writeln!(w, $($arg)*);
-    }};
-}
+# 3. テスト
+make test  # HELLOSTD.ELF テストを含む 40/40 + α
 ```
 
-これだけで `println!("Hello, {} frames free!", free_count)` が書ける。
+## 関連ファイル
+
+- `x86_64-sabos.json` — カスタムターゲット定義
+- `rust-std-sabos/` — sysroot パッチファイル（PAL + alloc + stdio + random）
+- `scripts/patch-rust-sysroot.sh` — パッチ適用スクリプト
+- `scripts/apply-sysroot-patches.py` — Python パッチエンジン
+- `user-std/` — std 対応バイナリ用クレート
+- `user-std/.cargo/config.toml` — `-Zbuild-std` の設定
