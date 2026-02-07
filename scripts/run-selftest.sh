@@ -115,6 +115,10 @@ send_string() {
         ch="${s:i:1}"
         case "$ch" in
             ' ') send_key spc ;;
+            '/') send_key slash ;;
+            '.') send_key dot ;;
+            '-') send_key minus ;;
+            '_') send_key shift-minus ;;
             *) send_key "$ch" ;;
         esac
     done
@@ -347,6 +351,49 @@ if [ "$net_selftest_ok" = true ]; then
     fi
 else
     echo -e "${RED}WARN: Network API selftest did not complete${NC}"
+fi
+
+sleep 0.5
+
+# --- std 対応バイナリ (HELLOSTD.ELF) のテスト ---
+echo "Testing std hello world binary..."
+
+send_key ret
+wait_for_prompt_after "$(log_line_count)" || true
+base=$(log_line_count)
+send_command "run /hellostd.elf"
+
+echo "Waiting for HELLOSTD.ELF output..."
+hellostd_ok=false
+for i in {1..30}; do
+    if grep_after "$base" "Hello from SABOS std"; then
+        hellostd_ok=true
+        break
+    fi
+    # プロセス終了を検出（成功・失敗どちらも）
+    if grep_after "$base" "keyboard focus released"; then
+        break
+    fi
+    # ページフォルトやエラーの検出
+    if grep_after "$base" "PAGE FAULT"; then
+        echo -e "${RED}ERROR: HELLOSTD.ELF caused a page fault${NC}"
+        break
+    fi
+    sleep 1
+done
+wait_for_prompt_after "$base" || true
+
+if [ "$hellostd_ok" = true ]; then
+    echo -e "${GREEN}HELLOSTD.ELF test PASSED${NC}"
+    # 追加の出力チェック
+    if grep_after "$base" "2 + 3 = 5"; then
+        echo -e "${GREEN}  Arithmetic output OK${NC}"
+    fi
+    if grep_after "$base" "sum of"; then
+        echo -e "${GREEN}  Vec/alloc output OK${NC}"
+    fi
+else
+    echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi
 
 sleep 0.5
