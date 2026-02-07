@@ -2004,10 +2004,10 @@ impl Shell {
         // テスト用にプロセスページテーブルを作成
         let l4_frame = crate::paging::create_process_page_table();
 
-        // 0x4000_0000 (1GiB) に 2 ページ（8KiB）をマッピング
-        // カーネルのアイデンティティマッピング（物理 RAM）と被らないように
-        // 高い仮想アドレスを使う
-        let virt_addr = VirtAddr::new(0x4000_0000);
+        // 0x100_0000_0000 (1TiB) に 2 ページ（8KiB）をマッピング
+        // カーネルのアイデンティティマッピング（UEFI の 1GiB ヒュージページ）と
+        // 被らないように L4[2] 以降の仮想アドレスを使う
+        let virt_addr = VirtAddr::new(0x100_0000_0000);
         let allocated = crate::paging::map_anonymous_pages_in_process(
             l4_frame,
             virt_addr,

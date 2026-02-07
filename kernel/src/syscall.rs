@@ -2407,11 +2407,14 @@ const MMAP_FLAG_ANONYMOUS: u64 = 0x1;
 /// ELF の LOAD セグメント、ユーザースタック (0x2000000)、
 /// およびカーネルのアイデンティティマッピング（物理 RAM 範囲）と
 /// 重ならないように、十分に高いアドレスから割り当てる。
-/// 0x4000_0000 (1 GiB) 以降をユーザーの mmap 領域とする。
-/// QEMU のデフォルト RAM は 128MiB なので 1GiB 以降は安全。
-const MMAP_VADDR_BASE: u64 = 0x4000_0000;
+///
+/// UEFI は物理メモリを 1GiB ヒュージページで identity mapping するため、
+/// L4[0] の範囲（0x0 ～ 0x7F_FFFF_FFFF = 512GiB）には identity mapping の
+/// ページテーブルエントリが存在する可能性がある。
+/// そのため mmap 領域は L4[2] の範囲（1TiB 以降）に配置して衝突を回避する。
+const MMAP_VADDR_BASE: u64 = 0x100_0000_0000; // 1 TiB
 /// mmap 領域の上限。
-const MMAP_VADDR_LIMIT: u64 = 0x80_0000_0000; // 512 GiB
+const MMAP_VADDR_LIMIT: u64 = 0x200_0000_0000; // 2 TiB
 
 /// SYS_MMAP: ユーザー空間に匿名ページをマッピングする。
 ///

@@ -8,33 +8,19 @@
 // この feature gate を明示的に有効にする必要がある。
 #![feature(restricted_std)]
 
-/// SYS_WRITE を直接呼んでコンソールに出力する。
-/// std の println! が未完成のため、暫定的にこの関数で出力する。
-fn raw_write(s: &str) {
-    unsafe {
-        core::arch::asm!(
-            "int 0x80",
-            in("rax") 1u64,   // SYS_WRITE
-            in("rdi") s.as_ptr() as u64,
-            in("rsi") s.len() as u64,
-            lateout("rax") _,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
-    }
-}
-
 fn main() {
-    // 暫定: raw_write で直接出力（SYS_MMAP の問題を回避）
-    // TODO: println! が動くようになったら置き換える
-    raw_write("Hello from SABOS std!\n");
-    raw_write("2 + 3 = 5\n");
+    // println! テスト（std の stdout → PAL の Stdout → SYS_WRITE 経由）
+    println!("Hello from SABOS std!");
+    println!("2 + 3 = {}", 2 + 3);
 
-    // String が使えることの確認（スタック上で完結するのでアロケータ不要）
-    let s = "SABOS";
-    raw_write("Hello, ");
-    raw_write(s);
-    raw_write("!\n");
+    // String が使えることの確認（ヒープアロケーション = SYS_MMAP 経由）
+    let s = String::from("Hello from std String!");
+    println!("{}", s);
+
+    // Vec のテスト
+    let v: Vec<i32> = (1..=5).collect();
+    let sum: i32 = v.iter().sum();
+    println!("sum of 1..=5 = {}", sum);
 
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ
 }
