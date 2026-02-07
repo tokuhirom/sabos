@@ -3,3 +3,4 @@ disk_test.img
 esp/
 kernel/target/
 user/target/
+user-std/target/
