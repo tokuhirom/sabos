@@ -462,6 +462,106 @@ pub fn get_size(handle: &Handle) -> Result<usize, SyscallError> {
     Ok(entry.data.len())
 }
 
+/// ハンドルのメタデータ（stat 情報）
+///
+/// ファイルサイズ、種別、権限をまとめて返すための構造体。
+/// ユーザー空間に直接コピーされるため #[repr(C)] で固定レイアウト。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HandleStat {
+    /// ファイルサイズ（バイト）
+    pub size: u64,
+    /// ハンドルの種別（0 = File, 1 = Directory）
+    pub kind: u64,
+    /// 現在のハンドルの権限ビット
+    pub rights: u64,
+}
+
+/// ハンドルのメタデータを取得する
+///
+/// STAT 権限が必要。ファイルサイズ・種別・権限ビットをまとめて返す。
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+///
+/// # 戻り値
+/// HandleStat 構造体
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: STAT 権限がない
+pub fn stat(handle: &Handle) -> Result<HandleStat, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+
+    // STAT 権限チェック
+    if (entry.rights & HANDLE_RIGHT_STAT) == 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    Ok(HandleStat {
+        size: entry.data.len() as u64,
+        kind: match entry.kind {
+            HandleKind::File => 0,
+            HandleKind::Directory => 1,
+        },
+        rights: entry.rights as u64,
+    })
+}
+
+/// シーク方向の定数: ファイル先頭からの絶対位置
+pub const SEEK_SET: u64 = 0;
+/// シーク方向の定数: 現在位置からの相対オフセット
+pub const SEEK_CUR: u64 = 1;
+/// シーク方向の定数: ファイル末尾からの相対オフセット
+pub const SEEK_END: u64 = 2;
+
+/// ファイルポジションを変更する
+///
+/// SEEK 権限が必要。whence に基づいて新しい pos を計算する。
+/// 範囲外になった場合は 0 にクランプ or ファイルサイズにクランプする。
+///
+/// # 引数
+/// - `handle`: 対象のハンドル
+/// - `offset`: オフセット値（i64、負の値あり）
+/// - `whence`: シーク方向（SEEK_SET / SEEK_CUR / SEEK_END）
+///
+/// # 戻り値
+/// 新しいファイルポジション
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+/// - `PermissionDenied`: SEEK 権限がない
+/// - `NotSupported`: ファイル以外へのシーク
+/// - `InvalidArgument`: 不正な whence 値
+pub fn seek(handle: &Handle, offset: i64, whence: u64) -> Result<u64, SyscallError> {
+    let mut table = HANDLE_TABLE.lock();
+    let entry = get_entry_mut(&mut table, handle)?;
+
+    // SEEK 権限チェック
+    if (entry.rights & HANDLE_RIGHT_SEEK) == 0 {
+        return Err(SyscallError::PermissionDenied);
+    }
+
+    // ファイルのみシーク可能
+    if entry.kind != HandleKind::File {
+        return Err(SyscallError::NotSupported);
+    }
+
+    let size = entry.data.len() as i64;
+    let base = match whence {
+        SEEK_SET => 0i64,
+        SEEK_CUR => entry.pos as i64,
+        SEEK_END => size,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+
+    // 新しいポジションを計算（範囲外は 0 〜 size にクランプ）
+    let new_pos = (base + offset).max(0).min(size) as usize;
+    entry.pos = new_pos;
+    Ok(new_pos as u64)
+}
+
 // =================================================================
 // 内部ヘルパー関数
 // =================================================================

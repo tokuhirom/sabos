@@ -121,6 +121,8 @@ pub const SYS_HANDLE_CLOSE: u64 = 73; // handle_close(handle_ptr)
 pub const SYS_OPENAT: u64 = 74;       // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
 pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
 pub const SYS_HANDLE_ENUM: u64 = 76;  // handle_enum(dir_handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_STAT: u64 = 77;  // handle_stat(handle_ptr, stat_ptr) — メタデータ取得
+pub const SYS_HANDLE_SEEK: u64 = 78;  // handle_seek(handle_ptr, offset, whence) — ポジション変更
 
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
@@ -325,6 +327,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_OPENAT => sys_openat(arg1, arg2, arg3, arg4),
         SYS_RESTRICT_RIGHTS => sys_restrict_rights(arg1, arg2, arg3),
         SYS_HANDLE_ENUM => sys_handle_enum(arg1, arg2, arg3),
+        SYS_HANDLE_STAT => sys_handle_stat(arg1, arg2),
+        SYS_HANDLE_SEEK => sys_handle_seek(arg1, arg2, arg3),
         // ブロックデバイス
         SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
         SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
@@ -813,6 +817,51 @@ fn sys_handle_close(arg1: u64) -> Result<u64, SyscallError> {
 
     crate::handle::close(&handle)?;
     Ok(0)
+}
+
+/// SYS_HANDLE_STAT: Handle のメタデータを取得する
+///
+/// 引数:
+///   arg1 — Handle のポインタ（ユーザー空間）
+///   arg2 — HandleStat の書き込み先ポインタ（ユーザー空間）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_handle_stat(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleStat};
+
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
+    let handle = handle_ptr.read();
+
+    let stat_ptr = user_ptr_from_arg::<HandleStat>(arg2)?;
+
+    let stat = crate::handle::stat(&handle)?;
+    stat_ptr.write(stat);
+    Ok(0)
+}
+
+/// SYS_HANDLE_SEEK: Handle のファイルポジションを変更する
+///
+/// 引数:
+///   arg1 — Handle のポインタ（ユーザー空間）
+///   arg2 — offset（i64 として解釈、SEEK_CUR/SEEK_END で負の値あり）
+///   arg3 — whence（0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END）
+///
+/// 戻り値:
+///   新しいポジション（成功時）
+///   負の値（エラー時）
+fn sys_handle_seek(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::Handle;
+
+    let handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
+    let handle = handle_ptr.read();
+
+    let offset = arg2 as i64;
+    let whence = arg3;
+
+    let new_pos = crate::handle::seek(&handle, offset, whence)?;
+    Ok(new_pos)
 }
 
 /// SYS_OPENAT: ディレクトリハンドルからの相対パスでファイルを開く

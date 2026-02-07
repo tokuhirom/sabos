@@ -103,6 +103,8 @@ pub const SYS_HANDLE_CLOSE: u64 = 73;    // handle_close(handle_ptr)
 pub const SYS_OPENAT: u64 = 74;          // openat(dir_handle_ptr, path_ptr, path_len, new_handle_ptr, rights)
 pub const SYS_RESTRICT_RIGHTS: u64 = 75; // restrict_rights(handle_ptr, new_rights, new_handle_ptr)
 pub const SYS_HANDLE_ENUM: u64 = 76;     // handle_enum(dir_handle_ptr, buf_ptr, len)
+pub const SYS_HANDLE_STAT: u64 = 77;     // handle_stat(handle_ptr, stat_ptr)
+pub const SYS_HANDLE_SEEK: u64 = 78;     // handle_seek(handle_ptr, offset, whence)
 
 // ブロックデバイス (80-89)
 pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
@@ -1102,6 +1104,67 @@ pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, Sysca
         Err(result)
     } else {
         Ok(new_handle)
+    }
+}
+
+/// ハンドルのメタデータ（stat 情報）
+///
+/// ファイルサイズ、種別、権限をまとめて取得するための構造体。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct HandleStat {
+    /// ファイルサイズ（バイト）
+    pub size: u64,
+    /// ハンドルの種別（0 = File, 1 = Directory）
+    pub kind: u64,
+    /// 現在のハンドルの権限ビット
+    pub rights: u64,
+}
+
+/// ハンドルのメタデータを取得する
+///
+/// # 引数
+/// - `handle`: ファイルハンドル（STAT 権限が必要）
+///
+/// # 戻り値
+/// - Ok(HandleStat): 成功時
+/// - Err(errno): エラー時
+pub fn handle_stat(handle: &Handle) -> Result<HandleStat, SyscallResult> {
+    let handle_ptr = handle as *const Handle as u64;
+    let mut stat = HandleStat { size: 0, kind: 0, rights: 0 };
+    let stat_ptr = &mut stat as *mut HandleStat as u64;
+    let result = unsafe { syscall2(SYS_HANDLE_STAT, handle_ptr, stat_ptr) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(stat)
+    }
+}
+
+/// シーク方向の定数: ファイル先頭からの絶対位置
+pub const SEEK_SET: u64 = 0;
+/// シーク方向の定数: 現在位置からの相対オフセット
+pub const SEEK_CUR: u64 = 1;
+/// シーク方向の定数: ファイル末尾からの相対オフセット
+pub const SEEK_END: u64 = 2;
+
+/// ファイルポジションを変更する
+///
+/// # 引数
+/// - `handle`: ファイルハンドル（SEEK 権限が必要）
+/// - `offset`: オフセット値（i64、SEEK_CUR/SEEK_END で負の値あり）
+/// - `whence`: シーク方向（SEEK_SET / SEEK_CUR / SEEK_END）
+///
+/// # 戻り値
+/// - Ok(new_pos): 新しいファイルポジション
+/// - Err(errno): エラー時
+pub fn handle_seek(handle: &Handle, offset: i64, whence: u64) -> Result<u64, SyscallResult> {
+    let handle_ptr = handle as *const Handle as u64;
+    let result = unsafe { syscall3(SYS_HANDLE_SEEK, handle_ptr, offset as u64, whence) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(result as u64)
     }
 }
 

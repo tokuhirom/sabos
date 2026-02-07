@@ -169,7 +169,8 @@ Capability-based security を実現するためのハンドル操作。
 
 - `72` `SYS_HANDLE_WRITE(handle_ptr, buf_ptr, len) -> n`
   - ハンドルにデータを書き込む
-  - WRITE 権限が必要（現在は未実装）
+  - WRITE 権限が必要
+  - インメモリバッファに書き込み、close() 時に FAT32 に書き戻す（write-back 方式）
 
 - `73` `SYS_HANDLE_CLOSE(handle_ptr) -> 0`
   - ハンドルを閉じる
@@ -189,6 +190,19 @@ Capability-based security を実現するためのハンドル操作。
 - `76` `SYS_HANDLE_ENUM(dir_handle_ptr, buf_ptr, len) -> n`
   - ディレクトリハンドルの内容を一覧
   - ENUM 権限が必要
+
+- `77` `SYS_HANDLE_STAT(handle_ptr, stat_ptr) -> 0`
+  - ハンドルのメタデータを取得する
+  - STAT 権限が必要
+  - `stat_ptr`: HandleStat 構造体の書き込み先
+  - HandleStat: `{ size: u64, kind: u64 (0=File, 1=Directory), rights: u64 }`
+
+- `78` `SYS_HANDLE_SEEK(handle_ptr, offset, whence) -> new_pos`
+  - ファイルポジションを変更する
+  - SEEK 権限が必要
+  - `offset`: i64（SEEK_CUR/SEEK_END で負の値あり）
+  - `whence`: 0=SEEK_SET（先頭から）, 1=SEEK_CUR（現在位置から）, 2=SEEK_END（末尾から）
+  - 範囲外は 0 〜 ファイルサイズにクランプ
 
 ## ブロックデバイス (80-89)
 
