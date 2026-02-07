@@ -48,6 +48,8 @@ mod allocator;
 mod gui_client;
 #[path = "../json.rs"]
 mod json;
+#[path = "../net.rs"]
+mod net;
 #[path = "../print.rs"]
 mod print;
 #[path = "../syscall.rs"]
@@ -60,8 +62,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-/// netd のタスクID（起動できた場合のみ設定）
-static mut NETD_TASK_ID: u64 = 0;
 /// 行バッファの最大サイズ
 const LINE_BUFFER_SIZE: usize = 256;
 
@@ -147,10 +147,7 @@ fn print_welcome() {
 /// netd の PID を探す（ps コマンド相当の処理）
 /// init が先に netd を起動しているはずなので、タスク一覧から探す
 fn find_netd() {
-    let netd_id = resolve_task_id_by_name("NETD.ELF").unwrap_or(0);
-    unsafe {
-        NETD_TASK_ID = netd_id;
-    }
+    let _ = net::init_netd();
 }
 
 
@@ -1804,15 +1801,17 @@ fn cmd_dns(args: &str) {
     syscall::write_str(domain);
     syscall::write_str("'...\n");
 
-    let mut ip = [0u8; 4];
-    if netd_dns_lookup(domain, &mut ip).is_err() {
-        syscall::write_str("Error: DNS lookup failed\n");
-        return;
-    }
+    let ip = match net::dns_lookup(domain) {
+        Ok(ip) => ip,
+        Err(_) => {
+            syscall::write_str("Error: DNS lookup failed\n");
+            return;
+        }
+    };
 
     syscall::write_str(domain);
     syscall::write_str(" -> ");
-    write_ip(&ip);
+    write_ip(&ip.octets);
     syscall::write_str("\n");
 }
 
@@ -1849,24 +1848,26 @@ fn cmd_http(args: &str) {
     // IP アドレスを解決または直接パース
     // "localhost" は自分自身の IP として扱う
     let ip = if host == "localhost" {
-        [10, 0, 2, 15] // MY_IP — ループバックで折り返される
+        net::Ipv4Addr::new(10, 0, 2, 15) // MY_IP — ループバックで折り返される
     } else {
         match parse_ip(host) {
-            Some(ip) => ip,
+            Some(ip) => net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]),
             None => {
                 // DNS で解決
                 syscall::write_str("Resolving ");
                 syscall::write_str(host);
                 syscall::write_str("...\n");
 
-                let mut resolved_ip = [0u8; 4];
-                if netd_dns_lookup(host, &mut resolved_ip).is_err() {
-                    syscall::write_str("Error: DNS lookup failed\n");
-                    return;
-                }
+                let resolved_ip = match net::dns_lookup(host) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        syscall::write_str("Error: DNS lookup failed\n");
+                        return;
+                    }
+                };
 
                 syscall::write_str("Resolved to ");
-                write_ip(&resolved_ip);
+                write_ip(&resolved_ip.octets);
                 syscall::write_str("\n");
                 resolved_ip
             }
@@ -1874,14 +1875,15 @@ fn cmd_http(args: &str) {
     };
 
     // TCP 接続
+    let addr = net::SocketAddr::new(ip, port);
     syscall::write_str("Connecting to ");
-    write_ip(&ip);
+    write_ip(&ip.octets);
     syscall::write_str(":");
     write_number(port as u64);
     syscall::write_str("...\n");
 
-    let conn_id = match netd_tcp_connect(&ip, port) {
-        Ok(id) => id,
+    let stream = match net::TcpStream::connect(addr) {
+        Ok(s) => s,
         Err(_) => {
             syscall::write_str("Error: TCP connect failed\n");
             return;
@@ -1893,17 +1895,17 @@ fn cmd_http(args: &str) {
     syscall::write_str("Sending HTTP request...\n");
 
     // GET line — httpd が HTTP/1.1 を期待するので 1.1 にする
-    let _ = netd_tcp_send(conn_id, b"GET ");
-    let _ = netd_tcp_send(conn_id, path.as_bytes());
-    let _ = netd_tcp_send(conn_id, b" HTTP/1.1\r\n");
+    let _ = stream.write(b"GET ");
+    let _ = stream.write(path.as_bytes());
+    let _ = stream.write(b" HTTP/1.1\r\n");
 
     // Host header
-    let _ = netd_tcp_send(conn_id, b"Host: ");
-    let _ = netd_tcp_send(conn_id, host.as_bytes());
-    let _ = netd_tcp_send(conn_id, b"\r\n");
+    let _ = stream.write(b"Host: ");
+    let _ = stream.write(host.as_bytes());
+    let _ = stream.write(b"\r\n");
 
     // Connection header and end of headers
-    let _ = netd_tcp_send(conn_id, b"Connection: close\r\n\r\n");
+    let _ = stream.write(b"Connection: close\r\n\r\n");
 
     // レスポンスを受信
     syscall::write_str("Receiving response...\n");
@@ -1911,8 +1913,8 @@ fn cmd_http(args: &str) {
 
     let mut buf = [0u8; 1024];
     loop {
-        let n = match netd_tcp_recv(conn_id, &mut buf, 5000) {
-            Ok(n) => n,
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n as i64,
             Err(_) => -1,
         };
         if n <= 0 {
@@ -1929,8 +1931,7 @@ fn cmd_http(args: &str) {
 
     syscall::write_str("\n--- End ---\n");
 
-    // 接続を閉じる
-    let _ = netd_tcp_close(conn_id);
+    // stream は Drop で自動クローズされる
 }
 
 /// nc コマンド: TCP の生データ送受信（netcat 風）
@@ -1986,33 +1987,35 @@ fn cmd_nc(args: &str) {
 fn nc_client(host: &str, port: u16) {
     // IP アドレスを解決
     let ip = if host == "localhost" {
-        [10, 0, 2, 15] // QEMU 環境での自分自身の IP
+        net::Ipv4Addr::new(10, 0, 2, 15) // QEMU 環境での自分自身の IP
     } else {
         match parse_ip(host) {
-            Some(ip) => ip,
+            Some(ip) => net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3]),
             None => {
                 // DNS で解決
                 syscall::write_str("Resolving ");
                 syscall::write_str(host);
                 syscall::write_str("...\n");
-                let mut resolved_ip = [0u8; 4];
-                if netd_dns_lookup(host, &mut resolved_ip).is_err() {
-                    syscall::write_str("Error: DNS lookup failed\n");
-                    return;
+                match net::dns_lookup(host) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        syscall::write_str("Error: DNS lookup failed\n");
+                        return;
+                    }
                 }
-                resolved_ip
             }
         }
     };
 
+    let addr = net::SocketAddr::new(ip, port);
     syscall::write_str("Connecting to ");
-    write_ip(&ip);
+    write_ip(&ip.octets);
     syscall::write_str(":");
     write_number(port as u64);
     syscall::write_str("...\n");
 
-    let conn_id = match netd_tcp_connect(&ip, port) {
-        Ok(id) => id,
+    let stream = match net::TcpStream::connect(addr) {
+        Ok(s) => s,
         Err(_) => {
             syscall::write_str("Error: TCP connect failed\n");
             return;
@@ -2021,9 +2024,11 @@ fn nc_client(host: &str, port: u16) {
     syscall::write_str("Connected! (peer will close to exit)\n");
 
     // キーボード入力↔ソケットの双方向中継
-    nc_relay_loop(conn_id);
+    nc_relay_loop(stream.conn_id());
 
-    let _ = netd_tcp_close(conn_id);
+    // stream は Drop で自動クローズされるが、relay_loop 中は conn_id を直接使う
+    // ここで明示的にクローズしたいので into_raw_conn_id は使わない
+    // （Drop が close を呼ぶ）
     syscall::write_str("Connection closed.\n");
 }
 
@@ -2033,14 +2038,17 @@ fn nc_server(port: u16) {
     write_number(port as u64);
     syscall::write_str("...\n");
 
-    if netd_tcp_listen(port).is_err() {
-        syscall::write_str("Error: listen failed\n");
-        return;
-    }
+    let listener = match net::TcpListener::bind(port) {
+        Ok(l) => l,
+        Err(_) => {
+            syscall::write_str("Error: listen failed\n");
+            return;
+        }
+    };
 
-    // accept で接続を待つ（タイムアウト 0 = ブロッキング）
-    let conn_id = match netd_tcp_accept(0) {
-        Ok(id) => id,
+    // accept で接続を待つ（ブロッキング）
+    let stream = match listener.accept() {
+        Ok(s) => s,
         Err(_) => {
             syscall::write_str("Error: accept failed\n");
             return;
@@ -2049,9 +2057,9 @@ fn nc_server(port: u16) {
     syscall::write_str("Client connected! (peer will close to exit)\n");
 
     // キーボード入力↔ソケットの双方向中継
-    nc_relay_loop(conn_id);
+    nc_relay_loop(stream.conn_id());
 
-    let _ = netd_tcp_close(conn_id);
+    // stream は Drop で自動クローズ
     syscall::write_str("Connection closed.\n");
 }
 
@@ -2080,10 +2088,10 @@ fn nc_relay_loop(conn_id: u32) {
                     // Enter: 行バッファの内容 + 改行を送信
                     b'\n' | b'\r' => {
                         if line_len > 0 {
-                            let _ = netd_tcp_send(conn_id, &line_buf[..line_len]);
+                            let _ = net::raw_send(conn_id, &line_buf[..line_len]);
                             line_len = 0;
                         }
-                        let _ = netd_tcp_send(conn_id, b"\r\n");
+                        let _ = net::raw_send(conn_id, b"\r\n");
                         syscall::write_str("\n");
                     }
                     // Backspace
@@ -2107,9 +2115,8 @@ fn nc_relay_loop(conn_id: u32) {
         }
 
         // --- TCP 受信（短タイムアウトでポーリング） ---
-        match netd_tcp_recv(conn_id, &mut recv_buf, 50) {
+        match net::raw_recv(conn_id, &mut recv_buf, 50) {
             Ok(n) if n > 0 => {
-                let n = n as usize;
                 // 受信データをそのまま表示
                 if let Ok(text) = core::str::from_utf8(&recv_buf[..n]) {
                     syscall::write_str(text);
@@ -2406,204 +2413,6 @@ fn cmd_rect(args: &str) {
     if syscall::draw_rect(x, y, w, h, r as u8, g as u8, b as u8) < 0 {
         syscall::write_str("Error: draw_rect failed\n");
     }
-}
-
-// =================================================================
-// netd クライアント
-// =================================================================
-
-const OPCODE_DNS_LOOKUP: u32 = 1;
-const OPCODE_TCP_CONNECT: u32 = 2;
-const OPCODE_TCP_SEND: u32 = 3;
-const OPCODE_TCP_RECV: u32 = 4;
-const OPCODE_TCP_CLOSE: u32 = 5;
-const OPCODE_TCP_LISTEN: u32 = 6;
-const OPCODE_TCP_ACCEPT: u32 = 7;
-
-const IPC_REQ_HEADER: usize = 8;
-const IPC_RESP_HEADER: usize = 12;
-
-fn netd_dns_lookup(domain: &str, ip_out: &mut [u8; 4]) -> Result<(), ()> {
-    let payload = domain.as_bytes();
-    let mut resp = [0u8; 2048];
-    let (status, len) = netd_request(OPCODE_DNS_LOOKUP, payload, &mut resp)?;
-    if status < 0 || len != 4 {
-        return Err(());
-    }
-    ip_out.copy_from_slice(&resp[..4]);
-    Ok(())
-}
-
-fn netd_tcp_connect(ip: &[u8; 4], port: u16) -> Result<u32, ()> {
-    let mut payload = [0u8; 6];
-    payload[0..4].copy_from_slice(ip);
-    payload[4..6].copy_from_slice(&port.to_le_bytes());
-    let mut resp = [0u8; 2048];
-    let (status, len) = netd_request(OPCODE_TCP_CONNECT, &payload, &mut resp)?;
-    if status < 0 || len != 4 {
-        Err(())
-    } else {
-        Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
-    }
-}
-
-fn netd_tcp_send(conn_id: u32, data: &[u8]) -> Result<(), ()> {
-    let mut resp = [0u8; 2048];
-    let mut payload = [0u8; 2048];
-    if 4 + data.len() > payload.len() {
-        return Err(());
-    }
-    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
-    payload[4..4 + data.len()].copy_from_slice(data);
-    let (status, _) = netd_request(OPCODE_TCP_SEND, &payload[..4 + data.len()], &mut resp)?;
-    if status < 0 {
-        Err(())
-    } else {
-        Ok(())
-    }
-}
-
-fn netd_tcp_recv(conn_id: u32, buf: &mut [u8], timeout_ms: u64) -> Result<i64, ()> {
-    let mut payload = [0u8; 16];
-    let max_len = buf.len() as u32;
-    payload[0..4].copy_from_slice(&conn_id.to_le_bytes());
-    payload[4..8].copy_from_slice(&max_len.to_le_bytes());
-    payload[8..16].copy_from_slice(&timeout_ms.to_le_bytes());
-
-    let mut resp = [0u8; 2048];
-    let (status, len) = netd_request(OPCODE_TCP_RECV, &payload, &mut resp)?;
-    if status < 0 {
-        return Err(());
-    }
-    let copy_len = core::cmp::min(buf.len(), len);
-    buf[..copy_len].copy_from_slice(&resp[..copy_len]);
-    Ok(copy_len as i64)
-}
-
-fn netd_tcp_close(conn_id: u32) -> Result<(), ()> {
-    let mut resp = [0u8; 2048];
-    let payload = conn_id.to_le_bytes();
-    let (status, _) = netd_request(OPCODE_TCP_CLOSE, &payload, &mut resp)?;
-    if status < 0 {
-        Err(())
-    } else {
-        Ok(())
-    }
-}
-
-/// 指定ポートで TCP リッスンを開始する（netd に listen を依頼）
-fn netd_tcp_listen(port: u16) -> Result<(), ()> {
-    let payload = port.to_le_bytes();
-    let (status, _) = netd_request(OPCODE_TCP_LISTEN, &payload, &mut [0u8; 32])?;
-    if status < 0 { Err(()) } else { Ok(()) }
-}
-
-/// TCP 接続を受け付ける（netd に accept を依頼）
-/// 成功時は接続 ID を返す。timeout_ms=0 でブロッキング待ち。
-fn netd_tcp_accept(timeout_ms: u64) -> Result<u32, ()> {
-    let payload = timeout_ms.to_le_bytes();
-    let mut resp = [0u8; 32];
-    let (status, len) = netd_request(OPCODE_TCP_ACCEPT, &payload, &mut resp)?;
-    if status < 0 || len != 4 {
-        Err(())
-    } else {
-        Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
-    }
-}
-
-fn netd_request(opcode: u32, payload: &[u8], resp_buf: &mut [u8]) -> Result<(i32, usize), ()> {
-    let mut req = [0u8; 2048];
-    if IPC_REQ_HEADER + payload.len() > req.len() {
-        return Err(());
-    }
-    req[0..4].copy_from_slice(&opcode.to_le_bytes());
-    req[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    req[8..8 + payload.len()].copy_from_slice(payload);
-
-    let mut netd_id = unsafe { NETD_TASK_ID };
-    if netd_id == 0 {
-        find_netd();
-        netd_id = unsafe { NETD_TASK_ID };
-        if netd_id == 0 {
-            return Err(());
-        }
-    }
-
-    if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
-        // netd の PID が変わった可能性があるので再解決して1回だけリトライ
-        find_netd();
-        netd_id = unsafe { NETD_TASK_ID };
-        if netd_id == 0 {
-            return Err(());
-        }
-        if syscall::ipc_send(netd_id, &req[..8 + payload.len()]) < 0 {
-            return Err(());
-        }
-    }
-
-    let mut sender = 0u64;
-    let n = syscall::ipc_recv(&mut sender, resp_buf, 5000);
-    if n < 0 {
-        return Err(());
-    }
-    let n = n as usize;
-    if n < IPC_RESP_HEADER {
-        return Err(());
-    }
-
-    let resp_opcode = u32::from_le_bytes([resp_buf[0], resp_buf[1], resp_buf[2], resp_buf[3]]);
-    if resp_opcode != opcode {
-        return Err(());
-    }
-    let status = i32::from_le_bytes([resp_buf[4], resp_buf[5], resp_buf[6], resp_buf[7]]);
-    let len = u32::from_le_bytes([resp_buf[8], resp_buf[9], resp_buf[10], resp_buf[11]]) as usize;
-    if IPC_RESP_HEADER + len > n {
-        return Err(());
-    }
-    resp_buf.copy_within(IPC_RESP_HEADER..IPC_RESP_HEADER + len, 0);
-
-    Ok((status, len))
-}
-
-/// タスク一覧から指定名のタスク ID を探す
-fn resolve_task_id_by_name(name: &str) -> Option<u64> {
-    let mut buf = [0u8; FILE_BUFFER_SIZE];
-    let result = syscall::get_task_list(&mut buf);
-    if result < 0 {
-        return None;
-    }
-    let len = result as usize;
-    let Ok(s) = core::str::from_utf8(&buf[..len]) else {
-        return None;
-    };
-
-    let (tasks_start, tasks_end) = json::json_find_array_bounds(s, "tasks")?;
-    let mut i = tasks_start;
-    let bytes = s.as_bytes();
-    while i < tasks_end {
-        while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
-            i += 1;
-        }
-        if i >= tasks_end || bytes[i] == b']' {
-            break;
-        }
-
-        let obj_end = json::find_matching_brace(s, i)?;
-        if obj_end > tasks_end {
-            break;
-        }
-
-        let obj = &s[i + 1..obj_end];
-        let id = json::json_find_u64(obj, "id");
-        let task_name = json::json_find_str(obj, "name");
-        if let (Some(id), Some(task_name)) = (id, task_name) {
-            if task_name == name {
-                return Some(id);
-            }
-        }
-        i = obj_end + 1;
-    }
-    None
 }
 
 /// IP アドレスを表示
