@@ -1,8 +1,7 @@
 # TODO: Rust std ライブラリ対応ロードマップ
 
 SABOS のユーザープログラムで `std` クレートを使えるようにするための TODO リスト。
-Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動くようになった。
-今後は PAL の各モジュールを充実させ、外部クレートが使えるレベルを目指す。
+Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`）が動作する状態。
 
 ## 現在の状況
 
@@ -11,7 +10,9 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 - `x86_64-sabos.json` カスタムターゲット（`os = "sabos"`）
 - sysroot パッチ方式で PAL を追加（`scripts/patch-rust-sysroot.sh`）
 - `user-std/` クレートで `fn main()` + `println!` + `String` + `Vec` が動作
-- release ビルド（`opt-level = "z"`, LTO, strip）で 29KB の ELF を生成
+- release ビルド（`opt-level = "z"`, LTO, strip）で 93KB の ELF を生成（serde_json 含む）
+- `RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1` で外部クレートの `restricted_std` 問題を回避
+- `serde` + `serde_json` がビルド・動作確認済み
 
 ### PAL 実装状況
 
@@ -86,6 +87,41 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
   - `serde` + `serde_json` が SABOS 上でビルド・動作することを確認
   - `RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1` で `restricted_std` 問題を解決
   - JSON のシリアライズ/デシリアライズが正常動作
+
+### Phase 10 以降の候補: 未実装 PAL モジュール
+
+以下は現在 unsupported だが、カーネル側に基盤がある or 実装可能なもの。
+
+- [ ] **PAL thread の実装**
+  - 難易度: ★★★☆☆
+  - カーネル側に SYS_THREAD_CREATE(110) / SYS_THREAD_EXIT(111) / SYS_THREAD_JOIN(112) + SYS_FUTEX(120) が既に存在
+  - PAL の `sys/thread/sabos.rs` を作成して `std::thread::spawn()` を動かす
+  - `std::sync::Mutex` / `Condvar` も Futex ベースで動くはず
+  - thread_local は `no_threads` → `thread_local_key` に切り替えが必要
+  - 影響: `rayon`, `tokio`, `crossbeam` などの並行処理クレートが使えるようになる
+
+- [ ] **PAL process の実装**
+  - 難易度: ★★☆☆☆
+  - SYS_EXEC / SYS_SPAWN / SYS_WAIT が既にあるので PAL に接続するだけ
+  - `std::process::Command::new("/FOO.ELF").arg("bar").spawn()` が動くようになる
+  - `std::process::exit()` は既に動作中
+
+- [ ] **SystemTime の実装**
+  - 難易度: ★★★☆☆
+  - RTC（リアルタイムクロック）のドライバ実装が必要
+  - CMOS RTC から年月日時分秒を読み取る SYS_CLOCK_REALTIME を追加
+  - `std::time::SystemTime::now()` / `UNIX_EPOCH` が使えるようになる
+  - 影響: `chrono`, `time` クレートが動く
+
+- [ ] **env::vars() の実装（環境変数一覧）**
+  - 難易度: ★☆☆☆☆
+  - SYS_LISTENV を追加してタスクの全環境変数を返す
+  - `std::env::vars()` イテレータが空でなくなる
+
+- [ ] **net: UdpSocket / IPv6**
+  - 難易度: ★★★★☆
+  - netd に UDP プロトコル処理を追加、IPv6 スタック実装
+  - 現状 TCP + IPv4 のみ
 
 ### 残課題
 
