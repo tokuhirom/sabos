@@ -45,6 +45,19 @@ macro_rules! net_debug {
 // 内部状態
 // ============================================================
 
+/// UDP ソケット
+///
+/// UDP はコネクションレスなので、バインドしたポートで送受信を行う。
+/// recv_queue にはまだ読み取られていない受信データが溜まる。
+pub struct UdpSocketEntry {
+    /// ソケット ID（TCP と共有の ID 空間）
+    pub id: u32,
+    /// バインドしているローカルポート
+    pub local_port: u16,
+    /// 受信キュー: (送信元 IP, 送信元ポート, データ)
+    pub recv_queue: VecDeque<([u8; 4], u16, Vec<u8>)>,
+}
+
 /// ネットワークスタックの内部状態
 struct NetState {
     mac: [u8; 6],
@@ -54,6 +67,10 @@ struct NetState {
     tcp_listen_port: Option<u16>,
     tcp_pending_accept: VecDeque<u32>,
     udp_response: Option<(u16, Vec<u8>)>,
+    /// UDP ソケット一覧
+    udp_sockets: Vec<UdpSocketEntry>,
+    /// UDP エフェメラルポートの次の候補（49152〜65535）
+    udp_next_port: u16,
 }
 
 struct NetStateCell(UnsafeCell<Option<NetState>>);
@@ -76,6 +93,8 @@ fn net_state_mut() -> &'static mut NetState {
                 tcp_listen_port: None,
                 tcp_pending_accept: VecDeque::new(),
                 udp_response: None,
+                udp_sockets: Vec::new(),
+                udp_next_port: 49152,
             });
         }
         slot.as_mut().unwrap()
@@ -768,7 +787,10 @@ pub fn poll_and_handle() {
 /// 簡易実装のためグローバルバッファを使用。
 
 /// UDP パケットを処理する
-fn handle_udp(_ip_header: &Ipv4Header, payload: &[u8]) {
+///
+/// 宛先ポートにバインドされた UDP ソケットがあれば recv_queue に追加する。
+/// なければ既存の DNS レスポンス処理（src_port==53 → udp_response に保存）にフォールバック。
+fn handle_udp(ip_header: &Ipv4Header, payload: &[u8]) {
     if payload.len() < 8 {
         return;
     }
@@ -784,10 +806,19 @@ fn handle_udp(_ip_header: &Ipv4Header, payload: &[u8]) {
         src_port, dst_port, udp_payload.len()
     );
 
+    let state = net_state_mut();
+
+    // 宛先ポートにバインドされた UDP ソケットがあるか探す
+    if let Some(sock) = state.udp_sockets.iter_mut().find(|s| s.local_port == dst_port) {
+        // バインドされたソケットの recv_queue に追加
+        sock.recv_queue.push_back((ip_header.src_ip, src_port, udp_payload.to_vec()));
+        return;
+    }
+
+    // バインドされたソケットがなければ、既存の DNS レスポンス処理にフォールバック
     // DNS レスポンス (ポート 53 から)
     if src_port == 53 {
         // DNS レスポンスをバッファに保存
-        let state = net_state_mut();
         state.udp_response = Some((dst_port, udp_payload.to_vec()));
     }
 }
@@ -1646,4 +1677,149 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
 
     net_debug!("tcp: connection closed");
     Ok(())
+}
+
+// ============================================================
+// UDP ソケット API
+// ============================================================
+//
+// netd の IPC オペコード 8-11 から呼ばれる公開 API。
+// DNS の既存処理（dns_lookup）は引き続き udp_response を使い、
+// ここで管理する UDP ソケットとは独立に動作する。
+
+/// UDP ソケットをバインドする
+///
+/// # 引数
+/// - `port`: バインドするポート番号。0 の場合はエフェメラルポートを自動割り当て。
+///
+/// # 戻り値
+/// - `Ok(socket_id)`: 割り当てられたソケット ID
+/// - `Err`: ポートが既に使用中の場合など
+pub fn udp_bind(port: u16) -> Result<u32, &'static str> {
+    let state = net_state_mut();
+
+    // ポートを決定（0 ならエフェメラルポート自動割り当て）
+    let local_port = if port == 0 {
+        let p = state.udp_next_port;
+        let next = state.udp_next_port.wrapping_add(1);
+        state.udp_next_port = if next < 49152 { 49152 } else { next };
+        p
+    } else {
+        // 指定ポートが既に使用されていないか確認
+        if state.udp_sockets.iter().any(|s| s.local_port == port) {
+            return Err("port already in use");
+        }
+        port
+    };
+
+    // ID は TCP と共有のカウンタから割り当て
+    let id = alloc_conn_id(state);
+
+    state.udp_sockets.push(UdpSocketEntry {
+        id,
+        local_port,
+        recv_queue: VecDeque::new(),
+    });
+
+    net_debug!("udp: bind socket id={} port={}", id, local_port);
+    Ok(id)
+}
+
+/// UDP ソケットでデータを送信する
+///
+/// # 引数
+/// - `socket_id`: バインド時に返されたソケット ID
+/// - `dst_ip`: 宛先 IP アドレス
+/// - `dst_port`: 宛先ポート
+/// - `data`: 送信データ
+pub fn udp_send_to(
+    socket_id: u32,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    let state = net_state_mut();
+    let sock = state
+        .udp_sockets
+        .iter()
+        .find(|s| s.id == socket_id)
+        .ok_or("no such UDP socket")?;
+    let src_port = sock.local_port;
+
+    net_debug!(
+        "udp: send_to socket id={} -> {}.{}.{}.{}:{} len={}",
+        socket_id, dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, data.len()
+    );
+
+    send_udp_packet(dst_ip, dst_port, src_port, data)
+}
+
+/// UDP ソケットからデータを受信する（ブロッキング、タイムアウト付き）
+///
+/// # 引数
+/// - `socket_id`: バインド時に返されたソケット ID
+/// - `timeout_ms`: タイムアウト（ミリ秒）。0 = デフォルト 5 秒
+///
+/// # 戻り値
+/// - `Ok((src_ip, src_port, data))`: 受信したデータと送信元情報
+/// - `Err`: タイムアウトまたはソケットが見つからない場合
+pub fn udp_recv_from(
+    socket_id: u32,
+    timeout_ms: u64,
+) -> Result<([u8; 4], u16, Vec<u8>), &'static str> {
+    let effective_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms };
+    // ポーリングループ: 約 0.5ms ごとにチェックし、合計 timeout_ms 待つ
+    let loops = (effective_timeout as usize).saturating_mul(2000).max(1);
+
+    for _ in 0..loops {
+        poll_and_handle();
+
+        {
+            let state = net_state_mut();
+            let sock = state
+                .udp_sockets
+                .iter_mut()
+                .find(|s| s.id == socket_id);
+            match sock {
+                Some(s) => {
+                    if let Some(item) = s.recv_queue.pop_front() {
+                        return Ok(item);
+                    }
+                }
+                None => return Err("no such UDP socket"),
+            }
+        }
+
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    Err("timeout")
+}
+
+/// UDP ソケットを閉じる
+///
+/// ソケットを削除し、受信キューに残っているデータも破棄する。
+pub fn udp_close(socket_id: u32) -> Result<(), &'static str> {
+    let state = net_state_mut();
+    let idx = state
+        .udp_sockets
+        .iter()
+        .position(|s| s.id == socket_id)
+        .ok_or("no such UDP socket")?;
+    state.udp_sockets.remove(idx);
+    net_debug!("udp: close socket id={}", socket_id);
+    Ok(())
+}
+
+/// UDP ソケットのローカルポートを取得する
+pub fn udp_local_port(socket_id: u32) -> Result<u16, &'static str> {
+    let state = net_state_mut();
+    let sock = state
+        .udp_sockets
+        .iter()
+        .find(|s| s.id == socket_id)
+        .ok_or("no such UDP socket")?;
+    Ok(sock.local_port)
 }
