@@ -7,7 +7,12 @@ use crate::io as std_io;
 
 // SAFETY: ランタイム初期化時に一度だけ呼ばれる。
 // NOTE: 外部から Rust コードが呼ばれる場合、この関数が実行される保証はない。
-pub unsafe fn init(_argc: isize, _argv: *const *const u8, _sigpipe: u8) {}
+//
+// std の lang_start() → rt::init() → sys::pal::init() の順で呼ばれる。
+// argc/argv を sys::args に転送して std::env::args() が動くようにする。
+pub unsafe fn init(argc: isize, argv: *const *const u8, _sigpipe: u8) {
+    unsafe { crate::sys::args::init(argc, argv) }
+}
 
 // SAFETY: ランタイムクリーンアップ時に一度だけ呼ばれる。
 // NOTE: プログラムがアボートした場合、この関数が実行される保証はない。

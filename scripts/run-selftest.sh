@@ -595,6 +595,13 @@ grep -E "(SELFTEST|PASS|FAIL)" "$LOG_FILE" || true
 echo "====================================="
 echo ""
 
+# QEMU ログを保存（デバッグ用）。cleanup の trap で LOG_FILE は削除されるため、
+# exit 前にコピーしておく。SABOS_SAVE_LOG 環境変数で保存先を指定できる。
+if [ -n "$SABOS_SAVE_LOG" ] && [ -f "$LOG_FILE" ]; then
+    cp "$LOG_FILE" "$SABOS_SAVE_LOG"
+    echo "QEMU log saved: $SABOS_SAVE_LOG"
+fi
+
 # 結果を検証
 if grep -q "SELFTEST END:.*PASSED" "$LOG_FILE"; then
     echo -e "${GREEN}All tests PASSED!${NC}"

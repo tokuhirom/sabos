@@ -1694,8 +1694,13 @@ fn exec_by_path_with_args(path: &str, extra_args: &[String]) -> Result<(), Sysca
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
     // argv を構築: [path] + extra_args
+    // path はユーザー空間メモリを指す &str なので、カーネルページテーブルに
+    // 切り替える前にカーネルヒープにコピーしておく必要がある。
+    // switch_to_kernel_page_table() 後はユーザー空間のアドレスは
+    // カーネルのアイデンティティマッピング経由で別の物理アドレスを読んでしまう。
+    let path_owned = String::from(path);
     let mut args_vec: Vec<&str> = Vec::with_capacity(1 + extra_args.len());
-    args_vec.push(path);
+    args_vec.push(&path_owned);
     for arg in extra_args {
         args_vec.push(arg.as_str());
     }
