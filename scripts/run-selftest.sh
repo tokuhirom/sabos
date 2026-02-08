@@ -422,6 +422,15 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  time::monotonic FAILED${NC}"
     fi
+    if grep_after "$base" "time::SystemTime OK"; then
+        echo -e "${GREEN}  time::SystemTime OK${NC}"
+    else
+        if grep_after "$base" "time::SystemTime WARN"; then
+            echo -e "${GREEN}  time::SystemTime OK (but date before 2020)${NC}"
+        else
+            echo -e "${RED}  time::SystemTime FAILED${NC}"
+        fi
+    fi
     if grep_after "$base" "args::count OK"; then
         echo -e "${GREEN}  args::count OK${NC}"
     else

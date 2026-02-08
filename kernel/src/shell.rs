@@ -1213,7 +1213,10 @@ impl Shell {
             // 11.9. clock_monotonic のテスト
             run_test("clock_monotonic", this.test_clock_monotonic());
 
-            // 11.10. getrandom のテスト
+            // 11.10. clock_realtime のテスト（CMOS RTC）
+            run_test("clock_realtime", this.test_clock_realtime());
+
+            // 11.11. getrandom のテスト
             run_test("getrandom", this.test_getrandom());
 
             // 11.11. mmap のテスト（匿名ページの動的マッピング）
@@ -1964,6 +1967,17 @@ impl Shell {
         let ticks2 = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
         let ms2 = ticks2 * 10000 / 182;
         ms2 >= ms1
+    }
+
+    /// SYS_CLOCK_REALTIME のテスト
+    /// CMOS RTC から時刻を読み取り、妥当な範囲であることを確認する。
+    /// UNIX エポック秒が 2020-01-01 以降であれば OK とする。
+    fn test_clock_realtime(&self) -> bool {
+        let secs = crate::rtc::read_unix_epoch_seconds();
+        // 2020-01-01 00:00:00 UTC = 1577836800
+        // 2100-01-01 00:00:00 UTC ≈ 4102444800
+        // この範囲内であれば妥当
+        secs >= 1577836800 && secs < 4102444800
     }
 
     /// SYS_GETRANDOM のテスト

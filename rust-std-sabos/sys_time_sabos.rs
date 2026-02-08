@@ -3,9 +3,8 @@
 // SYS_CLOCK_MONOTONIC(26) を使って std::time::Instant を実装する。
 // このシステムコールは起動からの経過ミリ秒を返す（PIT ティックから変換）。
 //
-// SystemTime（壁時計時刻）は SABOS にリアルタイムクロック (RTC) がまだ
-// 実装されていないため unsupported（panic）とする。
-// 将来 RTC を実装したら SystemTime::now() も対応できる。
+// SYS_CLOCK_REALTIME(130) を使って std::time::SystemTime を実装する。
+// このシステムコールは CMOS RTC から読み取った UNIX エポック秒を返す。
 
 use crate::time::Duration;
 
@@ -16,6 +15,21 @@ fn clock_monotonic_ms() -> u64 {
         core::arch::asm!(
             "int 0x80",
             in("rax") 26u64,   // SYS_CLOCK_MONOTONIC
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    ret
+}
+
+/// SYS_CLOCK_REALTIME(130) を呼んで UNIX エポックからの秒数を取得する
+fn clock_realtime_secs() -> u64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 130u64,   // SYS_CLOCK_REALTIME
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
@@ -59,11 +73,12 @@ impl Instant {
 }
 
 // ============================================================
-// SystemTime — 壁時計時刻（未実装）
+// SystemTime — 壁時計時刻（SYS_CLOCK_REALTIME ベース）
 // ============================================================
 
 /// 壁時計時刻（リアルタイムクロック）。
-/// SABOS にはまだ RTC が実装されていないため、now() は panic する。
+/// CMOS RTC から読み取った UNIX エポック（1970-01-01 00:00:00 UTC）からの
+/// 経過秒数を Duration として保持する。
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct SystemTime(Duration);
 
@@ -78,9 +93,10 @@ impl SystemTime {
     pub const MIN: SystemTime = SystemTime(Duration::ZERO);
 
     /// 現在のシステム時刻を取得する。
-    /// SABOS にはリアルタイムクロックが未実装のため panic する。
+    /// SYS_CLOCK_REALTIME を呼んで CMOS RTC の時刻を返す。
     pub fn now() -> SystemTime {
-        panic!("SystemTime not implemented on SABOS (no RTC)")
+        let secs = clock_realtime_secs();
+        SystemTime(Duration::from_secs(secs))
     }
 
     /// 2つの SystemTime の差を計算する。

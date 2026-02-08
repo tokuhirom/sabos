@@ -21,6 +21,7 @@ mod mouse;
 mod paging;
 mod panic;
 mod procfs;
+mod rtc;
 mod scheduler;
 mod serial;
 mod pci;

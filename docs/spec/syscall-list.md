@@ -274,6 +274,13 @@ Capability-based security を実現するためのハンドル操作。
   - キーは (アドレス空間 ID, 仮想アドレス) で管理し、プロセス間の区別を保証
   - エラー: -10 (不正な op)
 
+## 時刻 (130-139)
+
+- `130` `SYS_CLOCK_REALTIME() -> epoch_secs`
+  - CMOS RTC から現在時刻を読み取り、UNIX エポック（1970-01-01 00:00:00 UTC）からの秒数を返す
+  - BCD → バイナリ変換、UIP フラグ確認、Gregorian 暦 → エポック秒変換を含む
+  - 関連: `SYS_CLOCK_MONOTONIC(26)` は起動からの経過ミリ秒（PIT ベース）
+
 ## エラーコード
 
 SABOS 独自のエラーコード体系。POSIX 互換は目指さない。

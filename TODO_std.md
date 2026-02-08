@@ -29,7 +29,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 | **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
 | **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
-| **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant（SystemTime は未対応） |
+| **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant + SYS_CLOCK_REALTIME ベースの SystemTime |
 | **process** | ✅ 実装済み | SYS_SPAWN/SYS_WAIT/SYS_KILL ベースの Command/Child（パイプ未対応） |
 | **sync** | ✅ 設定済み | `no_threads` モード（シングルスレッド用） |
 
@@ -107,12 +107,12 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - `Command::status()` / `Child::wait()` / `Child::kill()` が動作
   - パイプ（stdin/stdout/stderr リダイレクト）は未対応
 
-- [ ] **SystemTime の実装**
+- [x] **SystemTime の実装**
   - 難易度: ★★★☆☆
-  - RTC（リアルタイムクロック）のドライバ実装が必要
-  - CMOS RTC から年月日時分秒を読み取る SYS_CLOCK_REALTIME を追加
-  - `std::time::SystemTime::now()` / `UNIX_EPOCH` が使えるようになる
-  - 影響: `chrono`, `time` クレートが動く
+  - CMOS RTC ドライバ（kernel/src/rtc.rs）を実装
+  - SYS_CLOCK_REALTIME(130) でUNIX エポック秒を返す
+  - `std::time::SystemTime::now()` / `UNIX_EPOCH` が動作確認済み
+  - `chrono`, `time` クレートが動く可能性あり
 
 - [x] **env::vars() の実装（環境変数一覧）**
   - 難易度: ★☆☆☆☆

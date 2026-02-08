@@ -76,6 +76,24 @@ fn main() {
         println!("time::monotonic FAILED: t2 < t1");
     }
 
+    // === std::time::SystemTime テスト ===
+
+    // SystemTime::now() テスト（SYS_CLOCK_REALTIME 経由で CMOS RTC を読み取る）
+    use std::time::SystemTime;
+    match SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            let secs = duration.as_secs();
+            // UNIX エポック秒が 2020 年以降であることを確認
+            // 2020-01-01 00:00:00 UTC = 1577836800
+            if secs >= 1577836800 {
+                println!("time::SystemTime OK: epoch_secs={}", secs);
+            } else {
+                println!("time::SystemTime WARN: epoch_secs={} (before 2020)", secs);
+            }
+        }
+        Err(e) => println!("time::SystemTime error: {}", e),
+    }
+
     // === std::env::args テスト ===
 
     // std::env::args() テスト（カーネルが argc/argv をレジスタ経由で渡す）

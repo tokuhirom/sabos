@@ -252,6 +252,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_THREAD_JOIN => sys_thread_join(arg1, arg2),
         // Futex
         SYS_FUTEX => sys_futex(arg1, arg2, arg3, arg4),
+        // 時刻
+        SYS_CLOCK_REALTIME => sys_clock_realtime(),
         // システム制御
         SYS_DRAW_PIXEL => sys_draw_pixel(arg1, arg2, arg3),
         SYS_DRAW_RECT => sys_draw_rect(arg1, arg2, arg3, arg4),
@@ -2331,6 +2333,18 @@ fn sys_clock_monotonic() -> Result<u64, SyscallError> {
     // ticks → ms 変換 (sleep_ms の逆: ms = ticks * 10000 / 182)
     let ms = ticks * 10000 / 182;
     Ok(ms)
+}
+
+// =================================================================
+// SYS_CLOCK_REALTIME: 壁時計時刻の取得
+// =================================================================
+
+/// SYS_CLOCK_REALTIME: CMOS RTC から現在時刻を読み取り、
+/// UNIX エポック（1970-01-01 00:00:00 UTC）からの秒数を返す。
+///
+/// 戻り値: UNIX エポックからの秒数
+fn sys_clock_realtime() -> Result<u64, SyscallError> {
+    Ok(crate::rtc::read_unix_epoch_seconds())
 }
 
 // =================================================================
