@@ -598,6 +598,65 @@ fn cmd_selftest_net() {
         }
     }
 
+    // テスト 5: UdpSocket — DNS サーバーに手動クエリ送信
+    //
+    // UdpSocket::bind(0) でエフェメラルポートにバインドし、
+    // DNS クエリパケットを手動構築して 10.0.2.3:53 に send_to。
+    // recv_from で DNS レスポンスを受信し、送信元が 10.0.2.3:53 であることを確認する。
+    total += 1;
+    {
+        let ok = (|| -> Result<bool, net::NetError> {
+            let mut sock = net::UdpSocket::bind(0)?;
+            sock.set_recv_timeout(5000);
+
+            // DNS クエリを手動構築: example.com の A レコードを問い合わせ
+            // ヘッダー (12 bytes): ID=0xABCD, Flags=RD(0x0100), QDCOUNT=1
+            let mut query: [u8; 33] = [0; 33];
+            query[0] = 0xAB; query[1] = 0xCD; // ID
+            query[2] = 0x01; query[3] = 0x00; // Flags: RD=1
+            query[4] = 0x00; query[5] = 0x01; // QDCOUNT=1
+            // QNAME: \x07example\x03com\x00
+            query[12] = 7;
+            query[13..20].copy_from_slice(b"example");
+            query[20] = 3;
+            query[21..24].copy_from_slice(b"com");
+            query[24] = 0;
+            // QTYPE=A(1), QCLASS=IN(1)
+            query[25] = 0x00; query[26] = 0x01;
+            query[27] = 0x00; query[28] = 0x01;
+
+            let dns_addr = net::SocketAddr::new(net::Ipv4Addr::new(10, 0, 2, 3), 53);
+            sock.send_to(&query[..29], dns_addr)?;
+
+            // レスポンスを受信
+            let mut buf = [0u8; 512];
+            let (n, addr) = sock.recv_from(&mut buf)?;
+
+            // 送信元が DNS サーバー (10.0.2.3:53) であること
+            if addr.ip.octets != [10, 0, 2, 3] || addr.port != 53 {
+                return Ok(false);
+            }
+            // レスポンスの ID が一致すること
+            if n >= 2 && buf[0] == 0xAB && buf[1] == 0xCD {
+                return Ok(true);
+            }
+            Ok(false)
+        })();
+
+        match ok {
+            Ok(true) => {
+                syscall::write_str("[PASS] net_udp_dns_query\n");
+                passed += 1;
+            }
+            Ok(false) => {
+                syscall::write_str("[FAIL] net_udp_dns_query (wrong response)\n");
+            }
+            Err(_) => {
+                syscall::write_str("[FAIL] net_udp_dns_query (error)\n");
+            }
+        }
+    }
+
     // 結果出力
     syscall::write_str("=== NET SELFTEST END: ");
     write_number(passed as u64);
