@@ -52,5 +52,29 @@ fn main() {
     // テストファイルを削除して後始末
     let _ = std::fs::remove_file("/STDTEST.TXT");
 
+    // === std::time テスト ===
+
+    // std::time::Instant::now() テスト（SYS_CLOCK_MONOTONIC 経由）
+    let start = std::time::Instant::now();
+    // 少し計算して時間を消費する
+    let mut dummy: u64 = 0;
+    for i in 0..100_000u64 {
+        dummy = dummy.wrapping_add(i);
+    }
+    // dummy を使って最適化による削除を防ぐ
+    let _ = dummy;
+    let elapsed = start.elapsed();
+    // 起動からの経過時間が取得できていれば OK（elapsed は 0 以上）
+    println!("time::Instant OK: elapsed={}ms", elapsed.as_millis());
+
+    // Instant の単調増加性テスト
+    let t1 = std::time::Instant::now();
+    let t2 = std::time::Instant::now();
+    if t2 >= t1 {
+        println!("time::monotonic OK");
+    } else {
+        println!("time::monotonic FAILED: t2 < t1");
+    }
+
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ
 }

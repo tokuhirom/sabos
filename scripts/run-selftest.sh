@@ -412,6 +412,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  fs::metadata FAILED${NC}"
     fi
+    if grep_after "$base" "time::Instant OK"; then
+        echo -e "${GREEN}  time::Instant OK${NC}"
+    else
+        echo -e "${RED}  time::Instant FAILED${NC}"
+    fi
+    if grep_after "$base" "time::monotonic OK"; then
+        echo -e "${GREEN}  time::monotonic OK${NC}"
+    else
+        echo -e "${RED}  time::monotonic FAILED${NC}"
+    fi
 else
     echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi

@@ -24,11 +24,11 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 | **thread_local** | ✅ 設定済み | `no_threads` モード（Cell ベース） |
 | **args** | ❌ unsupported | `std::env::args()` は空を返す |
 | **env** | ❌ unsupported | `std::env::var()` はエラーを返す |
-| **fs** | ❌ unsupported | `std::fs::*` はエラーを返す |
+| **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
 | **net** | ❌ unsupported | `std::net::*` はエラーを返す |
 | **os** | △ 最小限 | `exit()` と `getpid()` のみ実装 |
 | **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
-| **time** | ❌ unsupported | `std::time::*` はエラーを返す |
+| **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant（SystemTime は未対応） |
 | **process** | ❌ unsupported | `std::process::Command` はエラーを返す |
 | **sync** | ✅ 設定済み | `no_threads` モード（シングルスレッド用） |
 
@@ -48,16 +48,16 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 
 既にカーネル側に syscall が存在するが、PAL に接続されていないものを繋ぐ。
 
-- [ ] **PAL fs の実装**
-  - 難易度: ★★★☆☆
-  - SYS_HANDLE_OPEN / SYS_HANDLE_READ / SYS_HANDLE_WRITE / SYS_HANDLE_CLOSE を
-    PAL の `fs::File` に接続
-  - `std::fs::read_to_string()` / `std::fs::write()` が使えるようになる
+- [x] **PAL fs の実装**
+  - `sys_fs_sabos.rs` + `os_sabos_mod.rs` + `os_sabos_ffi.rs` を追加
+  - `std::fs::read_to_string()` / `std::fs::write()` / `std::fs::metadata()` が動作
+  - `_start` のスタックアラインメント修正（GPF 対策）も含む
 
-- [ ] **PAL time の実装**
-  - 難易度: ★★☆☆☆
-  - SYS_CLOCK_MONOTONIC を PAL の `time::Instant` に接続
-  - `std::time::Instant::now()` / `elapsed()` が使えるようになる
+- [x] **PAL time の実装**
+  - `sys_time_sabos.rs` を追加
+  - SYS_CLOCK_MONOTONIC(26) を PAL の `time::Instant` に接続
+  - `std::time::Instant::now()` / `elapsed()` が動作
+  - `SystemTime` は RTC 未実装のため unsupported
 
 - [ ] **PAL os の充実**
   - 難易度: ★★☆☆☆

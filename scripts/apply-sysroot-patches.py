@@ -204,6 +204,17 @@ def patch_os_mod(content: str) -> str:
     return insert_after_line(content, 'pub mod xous;', sabos_entry)
 
 
+def patch_time_mod(content: str) -> str:
+    """sys/time/mod.rs: _ => { の直前に sabos ブランチを追加"""
+    sabos_branch = (
+        '    target_os = "sabos" => {\n'
+        '        mod sabos;\n'
+        '        use sabos as imp;\n'
+        '    }'
+    )
+    return insert_before_line(content, "    _ => {", sabos_branch)
+
+
 # ============================================================
 # メイン
 # ============================================================
@@ -225,6 +236,7 @@ def main():
         ("sys/random/mod.rs", 'target_os = "sabos"', patch_random_mod),
         ("sys/fs/mod.rs", 'target_os = "sabos"', patch_fs_mod),
         ("os/mod.rs", 'target_os = "sabos"', patch_os_mod),
+        ("sys/time/mod.rs", 'target_os = "sabos"', patch_time_mod),
     ]
 
     for rel_path, marker, patch_fn in patches:
