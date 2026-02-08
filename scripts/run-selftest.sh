@@ -422,6 +422,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  time::monotonic FAILED${NC}"
     fi
+    if grep_after "$base" "env::current_dir OK"; then
+        echo -e "${GREEN}  env::current_dir OK${NC}"
+    else
+        echo -e "${RED}  env::current_dir FAILED${NC}"
+    fi
+    if grep_after "$base" "env::var OK: SABOS_TEST=hello_env"; then
+        echo -e "${GREEN}  env::var OK${NC}"
+    else
+        echo -e "${RED}  env::var FAILED${NC}"
+    fi
 else
     echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi

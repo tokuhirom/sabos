@@ -76,5 +76,22 @@ fn main() {
         println!("time::monotonic FAILED: t2 < t1");
     }
 
+    // === std::env テスト ===
+
+    // std::env::current_dir() テスト（getcwd → "/" を返す）
+    match std::env::current_dir() {
+        Ok(path) => println!("env::current_dir OK: {}", path.display()),
+        Err(e) => println!("env::current_dir error: {}", e),
+    }
+
+    // std::env::set_var() / var() テスト（SYS_SETENV / SYS_GETENV 経由）
+    // set_var は Rust 1.66+ で unsafe（マルチスレッド環境でのデータ競合防止のため）
+    // SABOS はシングルスレッドなので安全
+    unsafe { std::env::set_var("SABOS_TEST", "hello_env"); }
+    match std::env::var("SABOS_TEST") {
+        Ok(val) => println!("env::var OK: SABOS_TEST={}", val),
+        Err(e) => println!("env::var error: {}", e),
+    }
+
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ
 }

@@ -73,7 +73,12 @@ cp "$PATCH_DIR/sys_fs_sabos.rs" "$STD_SRC/sys/fs/sabos.rs"
 echo "[COPY] sys/time/sabos.rs"
 cp "$PATCH_DIR/sys_time_sabos.rs" "$STD_SRC/sys/time/sabos.rs"
 
-# ---- 3e. os/sabos ディレクトリの作成とファイルコピー ----
+# ---- 3e. env ファイルのコピー ----
+
+echo "[COPY] sys/env/sabos.rs"
+cp "$PATCH_DIR/sys_env_sabos.rs" "$STD_SRC/sys/env/sabos.rs"
+
+# ---- 3f. os/sabos ディレクトリの作成とファイルコピー ----
 
 OS_SABOS_DIR="$STD_SRC/os/sabos"
 if [ -d "$OS_SABOS_DIR" ]; then

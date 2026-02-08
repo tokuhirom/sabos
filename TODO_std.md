@@ -23,10 +23,10 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 | **random** | ✅ 実装済み | SYS_GETRANDOM ベースの fill_bytes |
 | **thread_local** | ✅ 設定済み | `no_threads` モード（Cell ベース） |
 | **args** | ❌ unsupported | `std::env::args()` は空を返す |
-| **env** | ❌ unsupported | `std::env::var()` はエラーを返す |
+| **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV ベースの var/set_var（一覧取得は未対応） |
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
 | **net** | ❌ unsupported | `std::net::*` はエラーを返す |
-| **os** | △ 最小限 | `exit()` と `getpid()` のみ実装 |
+| **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
 | **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
 | **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant（SystemTime は未対応） |
 | **process** | ❌ unsupported | `std::process::Command` はエラーを返す |
@@ -59,10 +59,11 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
   - `std::time::Instant::now()` / `elapsed()` が動作
   - `SystemTime` は RTC 未実装のため unsupported
 
-- [ ] **PAL os の充実**
-  - 難易度: ★★☆☆☆
-  - `std::process::exit()` は実装済み
-  - `std::env::current_dir()` 等を追加
+- [x] **PAL os の充実 + env の実装**
+  - `sys_pal_sabos_os.rs` を改善: getcwd → "/", temp_dir → "/", home_dir → "/"
+  - `sys_env_sabos.rs` を新規作成: SYS_GETENV(37)/SYS_SETENV(38) に接続
+  - `std::env::var()` / `std::env::set_var()` / `std::env::current_dir()` が動作
+  - env 一覧取得（`std::env::vars()`）は空を返す（SYS_LISTENV 未実装のため）
 
 - [ ] **PAL net の実装**
   - 難易度: ★★★★☆

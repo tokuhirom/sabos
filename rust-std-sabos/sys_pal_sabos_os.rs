@@ -1,7 +1,11 @@
 // sys/pal/sabos/os.rs — SABOS OS 関数
 //
-// unsupported/os.rs をベースに、exit() と getpid() を SABOS システムコールで実装。
-// その他の関数は unsupported のまま。
+// unsupported/os.rs をベースに、SABOS 向けの OS 関数を実装。
+// - exit() / getpid(): SABOS システムコール経由
+// - getcwd(): SABOS はフラット FAT32 なのでルート "/" を返す
+// - temp_dir(): ファイルシステムのルート "/" を返す
+// - home_dir(): ルート "/" を返す
+// - chdir() / current_exe(): unsupported（カーネル側に未実装）
 
 use super::unsupported;
 use crate::ffi::{OsStr, OsString};
@@ -9,10 +13,15 @@ use crate::marker::PhantomData;
 use crate::path::{self, PathBuf};
 use crate::{fmt, io};
 
+/// カレントディレクトリを取得する。
+/// SABOS はフラット FAT32 ファイルシステムで、ディレクトリ階層の概念が薄いため
+/// 常にルート "/" を返す。将来 chdir を実装したら対応する。
 pub fn getcwd() -> io::Result<PathBuf> {
-    unsupported()
+    Ok(PathBuf::from("/"))
 }
 
+/// カレントディレクトリを変更する。
+/// SABOS カーネルに cwd の概念がまだないため unsupported。
 pub fn chdir(_: &path::Path) -> io::Result<()> {
     unsupported()
 }
@@ -49,16 +58,22 @@ impl fmt::Display for JoinPathsError {
 
 impl crate::error::Error for JoinPathsError {}
 
+/// 実行中のバイナリのパスを取得する。
+/// カーネルが実行パスを保持していないため unsupported。
 pub fn current_exe() -> io::Result<PathBuf> {
     unsupported()
 }
 
+/// テンポラリディレクトリを返す。
+/// SABOS ではルートディレクトリ "/" を返す。
 pub fn temp_dir() -> PathBuf {
-    panic!("no filesystem on this platform")
+    PathBuf::from("/")
 }
 
+/// ホームディレクトリを返す。
+/// SABOS ではルートディレクトリ "/" を返す。
 pub fn home_dir() -> Option<PathBuf> {
-    None
+    Some(PathBuf::from("/"))
 }
 
 /// プロセスを終了する: SYS_EXIT(60) を呼ぶ

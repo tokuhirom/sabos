@@ -215,6 +215,29 @@ def patch_time_mod(content: str) -> str:
     return insert_before_line(content, "    _ => {", sabos_branch)
 
 
+def patch_env_mod(content: str) -> str:
+    """sys/env/mod.rs: _ => { の直前に sabos ブランチを追加し、
+    common モジュールの条件にも sabos を追加する。"""
+    # 1. cfg_select! 内に sabos ブランチを追加
+    sabos_branch = (
+        '    target_os = "sabos" => {\n'
+        '        mod sabos;\n'
+        '        pub use sabos::*;\n'
+        '    }'
+    )
+    content = insert_before_line(content, "    _ => {", sabos_branch)
+
+    # 2. common モジュールの #[cfg(any(...))] に sabos を追加
+    # target_os = "xous", の後に target_os = "sabos", を追加
+    content = insert_after_line(
+        content,
+        '    target_os = "xous",',
+        '    target_os = "sabos",'
+    )
+
+    return content
+
+
 # ============================================================
 # メイン
 # ============================================================
@@ -237,6 +260,7 @@ def main():
         ("sys/fs/mod.rs", 'target_os = "sabos"', patch_fs_mod),
         ("os/mod.rs", 'target_os = "sabos"', patch_os_mod),
         ("sys/time/mod.rs", 'target_os = "sabos"', patch_time_mod),
+        ("sys/env/mod.rs", 'target_os = "sabos"', patch_env_mod),
     ]
 
     for rel_path, marker, patch_fn in patches:
