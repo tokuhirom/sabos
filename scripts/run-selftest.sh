@@ -471,6 +471,21 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  net::tcp_parse FAILED${NC}"
     fi
+    if grep_after "$base" "net::udp_bind OK"; then
+        echo -e "${GREEN}  net::udp_bind OK${NC}"
+    else
+        echo -e "${RED}  net::udp_bind FAILED${NC}"
+    fi
+    if grep_after "$base" "net::udp_send OK"; then
+        echo -e "${GREEN}  net::udp_send OK${NC}"
+    else
+        echo -e "${RED}  net::udp_send FAILED${NC}"
+    fi
+    if grep_after "$base" "net::udp_recv OK"; then
+        echo -e "${GREEN}  net::udp_recv OK${NC}"
+    else
+        echo -e "${RED}  net::udp_recv FAILED${NC}"
+    fi
     if grep_after "$base" "process::status OK"; then
         echo -e "${GREEN}  process::status OK${NC}"
     else

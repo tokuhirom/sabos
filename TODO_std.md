@@ -26,7 +26,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 | **args** | ✅ 実装済み | カーネルの argc/argv を Atomic 変数で保存、`std::env::args()` 対応 |
 | **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV/SYS_LISTENV ベースの var/set_var/vars |
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
-| **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
+| **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener/UdpSocket 対応（IPv6 は未対応） |
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
 | **thread** | ✅ 実装済み | SYS_THREAD_CREATE/EXIT/JOIN ベースの spawn/join（thread_local は no_threads モード） |
 | **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant + SYS_CLOCK_REALTIME ベースの SystemTime |
@@ -119,10 +119,16 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - SYS_LISTENV(39) を追加してタスクの全環境変数を "KEY=VALUE\n" 形式で返す
   - `std::env::vars()` イテレータが動作確認済み
 
-- [ ] **net: UdpSocket / IPv6**
+- [x] **net: UdpSocket**
+  - 難易度: ★★★☆☆
+  - netd に UDP プロトコル処理を追加（IPC オペコード 8-11）
+  - `std::net::UdpSocket` の bind/send_to/recv_from/send/recv/connect が動作確認済み
+  - unsupported: duplicate/set_nonblocking/peek/peek_from/IPv6 マルチキャスト系
+
+- [ ] **net: IPv6**
   - 難易度: ★★★★☆
-  - netd に UDP プロトコル処理を追加、IPv6 スタック実装
-  - 現状 TCP + IPv4 のみ
+  - IPv6 スタック実装
+  - 現状 IPv4 のみ
 
 ### 残課題
 
