@@ -26,6 +26,7 @@ EXIT0_ELF = user/target/x86_64-unknown-none/debug/exit0
 TERM_ELF = user/target/x86_64-unknown-none/debug/term
 LIFE_ELF = user/target/x86_64-unknown-none/debug/life
 MANDELBROT_ELF = user/target/x86_64-unknown-none/debug/mandelbrot
+SNAKE_ELF = user/target/x86_64-unknown-none/debug/snake
 HELLO_STD_ELF = user-std/target/x86_64-sabos/release/sabos-user-std
 ESP_DIR = esp/EFI/BOOT
 
@@ -125,6 +126,7 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(TERM_ELF) ::TERM.ELF
 	mcopy -i $(DISK_IMG) $(LIFE_ELF) ::LIFE.ELF
 	mcopy -i $(DISK_IMG) $(MANDELBROT_ELF) ::MANDEL.ELF
+	mcopy -i $(DISK_IMG) $(SNAKE_ELF) ::SNAKE.ELF
 	@# std 対応バイナリがビルド済みならディスクに追加
 	@if [ -f "$(HELLO_STD_ELF)" ]; then \
 		mcopy -i $(DISK_IMG) $(HELLO_STD_ELF) ::HELLOSTD.ELF; \
