@@ -125,10 +125,13 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - `std::net::UdpSocket` の bind/send_to/recv_from/send/recv/connect が動作確認済み
   - unsupported: duplicate/set_nonblocking/peek/peek_from/IPv6 マルチキャスト系
 
-- [ ] **net: IPv6**
+- [x] **net: IPv6 Phase 1 (ICMPv6 + NDP)**
   - 難易度: ★★★★☆
-  - IPv6 スタック実装
-  - 現状 IPv4 のみ
+  - IPv6 パケットの送受信基盤を実装
+  - ICMPv6 Echo Request/Reply (ping6) が動作
+  - NDP Neighbor Solicitation/Advertisement に応答
+  - `ping6 fec0::2` で QEMU ゲートウェイに ping が通る
+  - Phase 2 以降: TCP/UDP over IPv6、IPC プロトコル拡張、PAL 対応
 
 ### 残課題
 

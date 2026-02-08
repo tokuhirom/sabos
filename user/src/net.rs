@@ -42,6 +42,8 @@ const OPCODE_UDP_SEND_TO: u32 = 9;
 const OPCODE_UDP_RECV_FROM: u32 = 10;
 /// UDP ソケットのクローズ
 const OPCODE_UDP_CLOSE: u32 = 11;
+/// IPv6 ping (ICMPv6 Echo)
+const OPCODE_PING6: u32 = 12;
 
 /// IPC リクエストヘッダサイズ: opcode(4) + payload_len(4) = 8 バイト
 const IPC_REQ_HEADER: usize = 8;
@@ -90,6 +92,10 @@ pub enum NetError {
     UdpSendFailed,
     /// UDP 受信に失敗
     UdpRecvFailed,
+    /// IPv6 ping に失敗
+    Ping6Failed,
+    /// IPv6 ping タイムアウト
+    Ping6Timeout,
 }
 
 // =================================================================
@@ -111,6 +117,25 @@ impl Ipv4Addr {
 
     /// オクテット配列への参照を返す
     pub fn octets(&self) -> &[u8; 4] {
+        &self.octets
+    }
+}
+
+/// IPv6 アドレス（std::net::Ipv6Addr 互換風）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6Addr {
+    /// IPv6 アドレスのオクテット（16 バイト）
+    pub octets: [u8; 16],
+}
+
+impl Ipv6Addr {
+    /// オクテット配列から Ipv6Addr を生成する
+    pub const fn from_octets(octets: [u8; 16]) -> Self {
+        Self { octets }
+    }
+
+    /// オクテット配列への参照を返す
+    pub fn octets(&self) -> &[u8; 16] {
         &self.octets
     }
 }
@@ -344,6 +369,41 @@ pub fn dns_lookup(domain: &str) -> Result<Ipv4Addr, NetError> {
         return Err(NetError::DnsLookupFailed);
     }
     Ok(Ipv4Addr::new(resp[0], resp[1], resp[2], resp[3]))
+}
+
+/// IPv6 ping (ICMPv6 Echo) を実行する
+///
+/// 指定した IPv6 アドレスに ICMPv6 Echo Request を送信し、
+/// Echo Reply が返ってくるまで待つ。
+///
+/// # 引数
+/// - `addr`: 宛先 IPv6 アドレス
+/// - `timeout_ms`: タイムアウト（ミリ秒）
+///
+/// # 戻り値
+/// - `Ok(src_ip)`: 応答元の IPv6 アドレス（16 バイト）
+/// - `Err(Ping6Timeout)`: タイムアウト
+/// - `Err(Ping6Failed)`: その他のエラー
+pub fn ping6(addr: &Ipv6Addr, timeout_ms: u32) -> Result<[u8; 16], NetError> {
+    // payload: [dst_ip: 16B][timeout_ms: u32 LE]
+    let mut payload = [0u8; 20];
+    payload[0..16].copy_from_slice(&addr.octets);
+    payload[16..20].copy_from_slice(&timeout_ms.to_le_bytes());
+
+    let mut resp = [0u8; IPC_BUF_SIZE];
+    let (status, len) = netd_request(OPCODE_PING6, &payload, &mut resp)
+        .map_err(|_| NetError::Ping6Failed)?;
+
+    if status == -42 {
+        return Err(NetError::Ping6Timeout);
+    }
+    if status < 0 || len < 16 {
+        return Err(NetError::Ping6Failed);
+    }
+
+    let mut src_ip = [0u8; 16];
+    src_ip.copy_from_slice(&resp[0..16]);
+    Ok(src_ip)
 }
 
 // =================================================================

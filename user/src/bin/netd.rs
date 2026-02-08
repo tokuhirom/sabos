@@ -33,6 +33,7 @@ const OPCODE_UDP_BIND: u32 = 8;
 const OPCODE_UDP_SEND_TO: u32 = 9;
 const OPCODE_UDP_RECV_FROM: u32 = 10;
 const OPCODE_UDP_CLOSE: u32 = 11;
+const OPCODE_PING6: u32 = 12;
 
 const IPC_BUF_SIZE: usize = 2048;
 const IPC_RECV_TIMEOUT_MS: u64 = 10;
@@ -252,6 +253,34 @@ fn netd_loop() -> ! {
                     let socket_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if let Err(err) = netstack::udp_close(socket_id) {
                         status = map_netstack_error(err);
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            // ========================================
+            // IPv6 ping オペコード (12)
+            // ========================================
+            OPCODE_PING6 => {
+                // payload: [dst_ip: 16B][timeout_ms: u32 LE]
+                if payload.len() == 20 {
+                    let mut dst_ip = [0u8; 16];
+                    dst_ip.copy_from_slice(&payload[0..16]);
+                    let timeout_ms = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+
+                    // Echo Request を送信（id=1, seq=1 の固定値で簡易実装）
+                    netstack::send_icmpv6_echo_request(&dst_ip, 1, 1);
+
+                    // Echo Reply を待つ
+                    match netstack::wait_icmpv6_echo_reply(timeout_ms as u64) {
+                        Ok((_id, _seq, src_ip)) => {
+                            // レスポンス: [src_ip: 16B]
+                            resp_len = 16;
+                            resp[12..28].copy_from_slice(&src_ip);
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
                     }
                 } else {
                     status = -1;

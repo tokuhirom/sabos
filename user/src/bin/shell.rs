@@ -26,6 +26,7 @@
 // - kill <task_id>: タスクを強制終了
 // - sleep <ms>: 指定ミリ秒スリープ
 // - dns <domain>: DNS 解決
+// - ping6 <ipv6_addr>: IPv6 ping (ICMPv6 Echo)
 // - http <host[:port]> [path]: HTTP GET リクエスト（localhost 対応）
 // - sed [-n] s/OLD/NEW/[gp] <file>: 簡易 sed（リテラル置換）
 // - grep [-i] [-v] [-c] PATTERN [FILE]: パターンに一致する行を出力
@@ -239,6 +240,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "kill" => cmd_kill(args),
         "sleep" => cmd_sleep(args),
         "dns" => cmd_dns(args),
+        "ping6" => cmd_ping6(args),
         "http" => cmd_http(args),
         "nc" => cmd_nc(args),
         "sed" => cmd_sed(args, state),
@@ -476,6 +478,7 @@ fn cmd_help() {
     syscall::write_str("  kill <task_id>    - Kill a task by ID\n");
     syscall::write_str("  sleep <ms>        - Sleep for milliseconds\n");
     syscall::write_str("  dns <domain>      - DNS lookup\n");
+    syscall::write_str("  ping6 <ipv6_addr> - IPv6 ping (ICMPv6 Echo)\n");
     syscall::write_str("  http <host[:port]> [path] - HTTP GET request\n");
     syscall::write_str("  nc <host> <port>  - TCP connect (netcat client)\n");
     syscall::write_str("  nc -l <port>      - TCP listen (netcat server)\n");
@@ -653,6 +656,23 @@ fn cmd_selftest_net() {
             }
             Err(_) => {
                 syscall::write_str("[FAIL] net_udp_dns_query (error)\n");
+            }
+        }
+    }
+
+    // テスト 6: IPv6 ping (fec0::2 = QEMU ゲートウェイ)
+    total += 1;
+    {
+        let ipv6_gw = net::Ipv6Addr::from_octets(
+            [0xfe, 0xc0, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x02]
+        );
+        match net::ping6(&ipv6_gw, 5000) {
+            Ok(_src_ip) => {
+                syscall::write_str("[PASS] net_ipv6_ping\n");
+                passed += 1;
+            }
+            Err(_) => {
+                syscall::write_str("[FAIL] net_ipv6_ping\n");
             }
         }
     }
@@ -2002,6 +2022,134 @@ fn cmd_dns(args: &str) {
     syscall::write_str(" -> ");
     write_ip(&ip.octets);
     syscall::write_str("\n");
+}
+
+/// ping6 コマンド: IPv6 ping (ICMPv6 Echo)
+///
+/// 指定した IPv6 アドレスに ICMPv6 Echo Request を送信し、応答を確認する。
+/// 例: ping6 fec0::2
+fn cmd_ping6(args: &str) {
+    let addr_str = args.trim();
+    if addr_str.is_empty() {
+        syscall::write_str("Usage: ping6 <ipv6_addr>\n");
+        syscall::write_str("  Example: ping6 fec0::2\n");
+        return;
+    }
+
+    let octets = match parse_ipv6(addr_str) {
+        Some(o) => o,
+        None => {
+            syscall::write_str("Error: Invalid IPv6 address\n");
+            return;
+        }
+    };
+
+    syscall::write_str("PING6 ");
+    syscall::write_str(addr_str);
+    syscall::write_str("...\n");
+
+    let ipv6_addr = net::Ipv6Addr::from_octets(octets);
+    match net::ping6(&ipv6_addr, 5000) {
+        Ok(_src_ip) => {
+            syscall::write_str("Reply from ");
+            syscall::write_str(addr_str);
+            syscall::write_str(": ICMPv6 Echo Reply\n");
+        }
+        Err(net::NetError::Ping6Timeout) => {
+            syscall::write_str("Error: ping6 timeout\n");
+        }
+        Err(_) => {
+            syscall::write_str("Error: ping6 failed\n");
+        }
+    }
+}
+
+/// IPv6 アドレス文字列をパースする
+///
+/// `::` の省略記法をサポートする。
+/// 例: "fec0::15" → [0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x15]
+/// 例: "::1" → [0, 0, ..., 0, 0x01]
+/// 例: "fe80::1:2" → [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2]
+fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
+    // `::` で左右に分割
+    let (left_str, right_str) = if let Some(pos) = s.find("::") {
+        (&s[..pos], &s[pos + 2..])
+    } else {
+        (s, "")
+    };
+
+    let has_double_colon = s.contains("::");
+
+    // 左側のグループをパース
+    let mut left_groups: Vec<u16> = Vec::new();
+    if !left_str.is_empty() {
+        for part in left_str.split(':') {
+            let val = parse_hex_u16(part)?;
+            left_groups.push(val);
+        }
+    }
+
+    // 右側のグループをパース
+    let mut right_groups: Vec<u16> = Vec::new();
+    if !right_str.is_empty() {
+        for part in right_str.split(':') {
+            let val = parse_hex_u16(part)?;
+            right_groups.push(val);
+        }
+    }
+
+    // 合計 8 グループになるかチェック
+    let total = left_groups.len() + right_groups.len();
+    if has_double_colon {
+        if total > 8 {
+            return None;
+        }
+    } else {
+        // `::` がない場合は全 8 グループ必要
+        // ただし左側だけで 8 グループの場合もある（right_str は空）
+        if total != 8 {
+            return None;
+        }
+    }
+
+    // 8 グループに展開
+    let mut groups = [0u16; 8];
+    for (i, &g) in left_groups.iter().enumerate() {
+        groups[i] = g;
+    }
+    if has_double_colon {
+        let fill_start = 8 - right_groups.len();
+        for (i, &g) in right_groups.iter().enumerate() {
+            groups[fill_start + i] = g;
+        }
+    }
+
+    // 16 バイトに変換
+    let mut result = [0u8; 16];
+    for i in 0..8 {
+        result[i * 2] = (groups[i] >> 8) as u8;
+        result[i * 2 + 1] = (groups[i] & 0xFF) as u8;
+    }
+
+    Some(result)
+}
+
+/// 16 進文字列を u16 にパースする（IPv6 アドレスのグループ用）
+fn parse_hex_u16(s: &str) -> Option<u16> {
+    if s.is_empty() || s.len() > 4 {
+        return None;
+    }
+    let mut val: u16 = 0;
+    for c in s.chars() {
+        let digit = match c {
+            '0'..='9' => c as u16 - '0' as u16,
+            'a'..='f' => c as u16 - 'a' as u16 + 10,
+            'A'..='F' => c as u16 - 'A' as u16 + 10,
+            _ => return None,
+        };
+        val = val.checked_mul(16)?.checked_add(digit)?;
+    }
+    Some(val)
 }
 
 /// http コマンド: HTTP GET リクエスト

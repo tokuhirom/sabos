@@ -35,6 +35,10 @@ pub const DNS_SERVER_IP: [u8; 4] = [10, 0, 2, 3];
 /// ブロードキャスト MAC アドレス
 pub const BROADCAST_MAC: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 
+/// ゲストの IPv6 アドレス (QEMU SLIRP デフォルト: fec0::15)
+pub const MY_IPV6: [u8; 16] = [0xfe, 0xc0, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x15];
+
+
 macro_rules! net_debug {
     ($($arg:tt)*) => {{
         let _ = ($($arg)*);
@@ -71,6 +75,8 @@ struct NetState {
     udp_sockets: Vec<UdpSocketEntry>,
     /// UDP エフェメラルポートの次の候補（49152〜65535）
     udp_next_port: u16,
+    /// ICMPv6 Echo Reply を受信したときに保存する (id, seq, src_ip)
+    icmpv6_echo_reply: Option<(u16, u16, [u8; 16])>,
 }
 
 struct NetStateCell(UnsafeCell<Option<NetState>>);
@@ -95,6 +101,7 @@ fn net_state_mut() -> &'static mut NetState {
                 udp_response: None,
                 udp_sockets: Vec::new(),
                 udp_next_port: 49152,
+                icmpv6_echo_reply: None,
             });
         }
         slot.as_mut().unwrap()
@@ -120,6 +127,8 @@ pub fn init() -> Result<(), &'static str> {
 const ETHERTYPE_IPV4: u16 = 0x0800;
 /// ARP
 const ETHERTYPE_ARP: u16 = 0x0806;
+/// IPv6
+const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 // ============================================================
 // ARP 定数
@@ -142,6 +151,8 @@ const IP_PROTO_ICMP: u8 = 1;
 const IP_PROTO_TCP: u8 = 6;
 /// UDP
 const IP_PROTO_UDP: u8 = 17;
+/// ICMPv6
+const IP_PROTO_ICMPV6: u8 = 58;
 
 // ============================================================
 // ICMP タイプ
@@ -513,6 +524,9 @@ pub fn handle_packet(data: &[u8]) {
         }
         ETHERTYPE_IPV4 => {
             handle_ipv4(eth_header, payload);
+        }
+        ETHERTYPE_IPV6 => {
+            handle_ipv6(eth_header, payload);
         }
         _ => {
             net_debug!("net: unknown ethertype {:#06x}", ethertype);
@@ -1822,4 +1836,477 @@ pub fn udp_local_port(socket_id: u32) -> Result<u16, &'static str> {
         .find(|s| s.id == socket_id)
         .ok_or("no such UDP socket")?;
     Ok(sock.local_port)
+}
+
+// ============================================================
+// IPv6 / ICMPv6 / NDP
+// ============================================================
+//
+// IPv6 パケットの送受信、ICMPv6 Echo (ping6)、
+// NDP (Neighbor Discovery Protocol) の最小実装。
+//
+// ## プロトコル階層
+//
+// [Ethernet] → [IPv6] → [ICMPv6] → Echo Request/Reply, NDP
+//
+// ## QEMU SLIRP の IPv6 設定
+//
+// `-netdev user,id=net0,ipv6=on` で有効化すると:
+//   - ゲスト IPv6: fec0::15（IPv4 の 10.0.2.15 に対応）
+//   - ゲートウェイ: fec0::2
+//   - DNS: fec0::3
+//   - SLIRP が Router Advertisement を送信
+//   - SLIRP が Neighbor Solicitation でゲストの MAC を問い合わせる
+
+// ============================================================
+// ICMPv6 タイプ定数
+// ============================================================
+
+/// ICMPv6 Echo Request
+const ICMPV6_ECHO_REQUEST: u8 = 128;
+/// ICMPv6 Echo Reply
+const ICMPV6_ECHO_REPLY: u8 = 129;
+/// ICMPv6 Router Advertisement (NDP)
+const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
+/// ICMPv6 Neighbor Solicitation (NDP)
+const ICMPV6_NEIGHBOR_SOLICITATION: u8 = 135;
+/// ICMPv6 Neighbor Advertisement (NDP)
+const ICMPV6_NEIGHBOR_ADVERTISEMENT: u8 = 136;
+
+// ============================================================
+// IPv6 ヘッダー
+// ============================================================
+
+/// IPv6 ヘッダー (40 バイト固定)
+///
+/// IPv4 と異なり、IPv6 ヘッダーは固定長 40 バイト。
+/// 拡張ヘッダーは next_header フィールドでチェーンする。
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |Version| Traffic Class |           Flow Label                  |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |         Payload Length        |  Next Header  |   Hop Limit   |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                                                               |
+/// +                         Source Address                        +
+/// |                         (128 bits)                            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                                                               |
+/// +                      Destination Address                      +
+/// |                         (128 bits)                            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct Ipv6Header {
+    /// Version(4bit) + Traffic Class(8bit) + Flow Label(20bit)
+    pub version_tc_fl: [u8; 4],
+    /// ペイロード長（IPv6 ヘッダーを含まない）
+    pub payload_length: [u8; 2],
+    /// 次のヘッダー（= IPv4 の protocol に相当。ICMPv6=58, TCP=6, UDP=17）
+    pub next_header: u8,
+    /// Hop Limit（= IPv4 の TTL に相当）
+    pub hop_limit: u8,
+    /// 送信元 IPv6 アドレス (128 bits)
+    pub src_ip: [u8; 16],
+    /// 宛先 IPv6 アドレス (128 bits)
+    pub dst_ip: [u8; 16],
+}
+
+// ============================================================
+// ICMPv6 ヘッダー
+// ============================================================
+
+/// ICMPv6 ヘッダー (4 バイト共通部分)
+///
+/// ICMPv6 メッセージの先頭 4 バイトは全タイプ共通:
+/// - Type (1 byte)
+/// - Code (1 byte)
+/// - Checksum (2 bytes)
+///
+/// Echo Request/Reply の場合は、この後に Identifier (2B) + Sequence (2B) が続く。
+/// NDP の場合は、この後にタイプ固有のフィールドが続く。
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
+pub struct Icmpv6Header {
+    /// ICMPv6 メッセージタイプ
+    pub icmpv6_type: u8,
+    /// メッセージコード
+    pub code: u8,
+    /// チェックサム（IPv6 疑似ヘッダー含む）
+    pub checksum: [u8; 2],
+}
+
+/// IPv6 パケットを処理する
+///
+/// 宛先アドレスが以下のいずれかの場合に処理する:
+/// - MY_IPV6 (fec0::15): 自分宛ユニキャスト
+/// - ソリシテッドノードマルチキャスト (ff02::1:ffXX:XXXX): NDP 用
+/// - リンクローカル全ノードマルチキャスト (ff02::1): RA 等
+fn handle_ipv6(_eth_header: &EthernetHeader, payload: &[u8]) {
+    if payload.len() < 40 {
+        return;
+    }
+
+    let ipv6_header = unsafe { &*(payload.as_ptr() as *const Ipv6Header) };
+
+    // バージョンチェック（上位 4 ビットが 6 であること）
+    if (ipv6_header.version_tc_fl[0] >> 4) != 6 {
+        return;
+    }
+
+    // 宛先アドレスの判定:
+    // 1. 自分宛ユニキャスト (MY_IPV6)
+    // 2. ソリシテッドノードマルチキャスト (ff02::1:ff00:0/104 + 下位 24bit)
+    //    → NDP Neighbor Solicitation の宛先
+    // 3. リンクローカル全ノードマルチキャスト (ff02::1)
+    //    → Router Advertisement の宛先
+    let is_my_unicast = ipv6_header.dst_ip == MY_IPV6;
+    let is_solicited_node_multicast = is_solicited_node_multicast_for(&ipv6_header.dst_ip, &MY_IPV6);
+    let is_all_nodes_multicast = ipv6_header.dst_ip == [0xff, 0x02, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x01];
+
+    if !is_my_unicast && !is_solicited_node_multicast && !is_all_nodes_multicast {
+        return;
+    }
+
+    let ipv6_payload = &payload[40..];
+
+    match ipv6_header.next_header {
+        IP_PROTO_ICMPV6 => {
+            handle_icmpv6(ipv6_header, ipv6_payload);
+        }
+        _ => {
+            net_debug!("ipv6: unknown next_header {}", ipv6_header.next_header);
+        }
+    }
+}
+
+/// ソリシテッドノードマルチキャストアドレスの判定
+///
+/// ソリシテッドノードマルチキャストは ff02::1:ff00:0/104 に
+/// ターゲットアドレスの下位 24 ビットを付加した形式。
+/// NDP Neighbor Solicitation の宛先として使われる。
+///
+/// 例: MY_IPV6 = fec0::15 → ソリシテッドノード = ff02::1:ff00:0015
+fn is_solicited_node_multicast_for(multicast: &[u8; 16], target: &[u8; 16]) -> bool {
+    // ff02::1:ff00:0/104 のプレフィックス (13 バイト)
+    let prefix = [0xff, 0x02, 0,0,0,0,0,0, 0,0,0, 0x01, 0xff];
+    if multicast[..13] != prefix {
+        return false;
+    }
+    // 下位 3 バイトがターゲットアドレスの下位 3 バイトと一致
+    multicast[13] == target[13] && multicast[14] == target[14] && multicast[15] == target[15]
+}
+
+/// ICMPv6 パケットを処理する
+///
+/// ICMPv6 メッセージタイプに応じてディスパッチする:
+/// - Echo Request (128) → Echo Reply を返す
+/// - Echo Reply (129) → ping6 の応答として保存
+/// - Router Advertisement (134) → ログのみ（アドレスは固定）
+/// - Neighbor Solicitation (135) → Neighbor Advertisement を返す
+fn handle_icmpv6(ipv6_header: &Ipv6Header, payload: &[u8]) {
+    if payload.len() < 4 {
+        return;
+    }
+
+    let icmpv6 = unsafe { &*(payload.as_ptr() as *const Icmpv6Header) };
+
+    match icmpv6.icmpv6_type {
+        ICMPV6_ECHO_REQUEST => {
+            net_debug!("icmpv6: Echo Request received");
+            send_icmpv6_echo_reply(ipv6_header, payload);
+        }
+        ICMPV6_ECHO_REPLY => {
+            net_debug!("icmpv6: Echo Reply received");
+            // Echo Reply: ヘッダー (4B) + Identifier (2B) + Sequence (2B) + Data
+            if payload.len() >= 8 {
+                let id = u16::from_be_bytes([payload[4], payload[5]]);
+                let seq = u16::from_be_bytes([payload[6], payload[7]]);
+                let state = net_state_mut();
+                state.icmpv6_echo_reply = Some((id, seq, ipv6_header.src_ip));
+            }
+        }
+        ICMPV6_ROUTER_ADVERTISEMENT => {
+            // Router Advertisement は受信するが、アドレスは固定なので処理不要
+            net_debug!("icmpv6: Router Advertisement received (ignored)");
+        }
+        ICMPV6_NEIGHBOR_SOLICITATION => {
+            net_debug!("icmpv6: Neighbor Solicitation received");
+            handle_ndp_neighbor_solicitation(ipv6_header, payload);
+        }
+        ICMPV6_NEIGHBOR_ADVERTISEMENT => {
+            net_debug!("icmpv6: Neighbor Advertisement received (ignored)");
+        }
+        _ => {
+            net_debug!("icmpv6: unknown type {}", icmpv6.icmpv6_type);
+        }
+    }
+}
+
+/// ICMPv6 Echo Reply を送信する
+///
+/// 受信した Echo Request に対して Echo Reply を返す。
+/// ICMPv6 の type を 129 (Echo Reply) に変更し、チェックサムを再計算する。
+fn send_icmpv6_echo_reply(request_ipv6: &Ipv6Header, icmpv6_data: &[u8]) {
+    if icmpv6_data.len() < 8 {
+        return;
+    }
+
+    // Echo Reply ペイロード: ICMPv6 ヘッダー (type=129, code=0) + id + seq + data
+    let mut reply_payload = Vec::with_capacity(icmpv6_data.len());
+    // Type=129 (Echo Reply), Code=0, Checksum=0 (後で計算)
+    reply_payload.push(ICMPV6_ECHO_REPLY);
+    reply_payload.push(0);
+    reply_payload.push(0); // checksum placeholder
+    reply_payload.push(0);
+    // Identifier + Sequence + Data はそのままコピー
+    reply_payload.extend_from_slice(&icmpv6_data[4..]);
+
+    // ICMPv6 チェックサムを計算（IPv6 疑似ヘッダー含む）
+    let checksum = calculate_icmpv6_checksum(
+        &MY_IPV6,
+        &request_ipv6.src_ip,
+        &reply_payload,
+    );
+    reply_payload[2] = (checksum >> 8) as u8;
+    reply_payload[3] = (checksum & 0xFF) as u8;
+
+    // IPv6 パケットとして送信
+    send_ipv6_packet(
+        &request_ipv6.src_ip,
+        IP_PROTO_ICMPV6,
+        &reply_payload,
+    );
+}
+
+/// NDP Neighbor Solicitation を処理する
+///
+/// ターゲットアドレスが MY_IPV6 と一致する場合、
+/// Neighbor Advertisement を返して自分の MAC アドレスを通知する。
+///
+/// Neighbor Solicitation パケット構造:
+///   ICMPv6 Header (4B): type=135, code=0, checksum
+///   Reserved (4B): 0
+///   Target Address (16B): 問い合わせ対象の IPv6 アドレス
+///   [Option: Source Link-Layer Address (8B): type=1, length=1, MAC]
+fn handle_ndp_neighbor_solicitation(_ipv6_header: &Ipv6Header, payload: &[u8]) {
+    // 最小サイズ: ICMPv6 Header(4) + Reserved(4) + Target(16) = 24 バイト
+    if payload.len() < 24 {
+        return;
+    }
+
+    // ターゲットアドレスを取得（offset 8〜23）
+    let mut target = [0u8; 16];
+    target.copy_from_slice(&payload[8..24]);
+
+    // ターゲットが自分の IPv6 アドレスでなければ無視
+    if target != MY_IPV6 {
+        net_debug!("ndp: NS target is not MY_IPV6, ignoring");
+        return;
+    }
+
+    // Neighbor Advertisement を送信
+    send_ndp_neighbor_advertisement(&target, &_ipv6_header.src_ip);
+}
+
+/// NDP Neighbor Advertisement を送信する
+///
+/// Neighbor Advertisement パケット構造:
+///   ICMPv6 Header (4B): type=136, code=0, checksum
+///   Flags + Reserved (4B): R=0, S=1, O=1 → 0x60000000
+///   Target Address (16B): 自分の IPv6 アドレス
+///   Option: Target Link-Layer Address (8B): type=2, length=1, MAC(6B)
+fn send_ndp_neighbor_advertisement(target: &[u8; 16], dst_ip: &[u8; 16]) {
+    let my_mac = net_state_mut().mac;
+
+    // NA ペイロードを構築
+    let mut na_payload = Vec::with_capacity(32);
+
+    // ICMPv6 Header: type=136, code=0, checksum=0 (後で計算)
+    na_payload.push(ICMPV6_NEIGHBOR_ADVERTISEMENT);
+    na_payload.push(0); // code
+    na_payload.push(0); // checksum placeholder
+    na_payload.push(0);
+
+    // Flags: S=1 (Solicited), O=1 (Override) → bit 30 と bit 29
+    // 0x60000000 in big-endian
+    na_payload.push(0x60);
+    na_payload.push(0x00);
+    na_payload.push(0x00);
+    na_payload.push(0x00);
+
+    // Target Address (16B)
+    na_payload.extend_from_slice(target);
+
+    // Option: Target Link-Layer Address
+    // type=2 (Target Link-Layer Address), length=1 (8バイト単位)
+    na_payload.push(2);    // type
+    na_payload.push(1);    // length (1 * 8 = 8 bytes)
+    na_payload.extend_from_slice(&my_mac); // 6 bytes
+
+    // ICMPv6 チェックサムを計算
+    let checksum = calculate_icmpv6_checksum(
+        &MY_IPV6,
+        dst_ip,
+        &na_payload,
+    );
+    na_payload[2] = (checksum >> 8) as u8;
+    na_payload[3] = (checksum & 0xFF) as u8;
+
+    // IPv6 パケットとして送信
+    send_ipv6_packet(dst_ip, IP_PROTO_ICMPV6, &na_payload);
+}
+
+/// IPv6 パケットを送信する
+///
+/// Ethernet ヘッダー + IPv6 ヘッダー + ペイロードを構築して送信する。
+/// 宛先 MAC は簡易実装のためブロードキャストを使用。
+fn send_ipv6_packet(dst_ip: &[u8; 16], next_header: u8, payload: &[u8]) {
+    let my_mac = net_state_mut().mac;
+
+    // 宛先 MAC: 簡易実装のためブロードキャストを使用
+    // （本来は NDP で解決した MAC を使うべき）
+    let dst_mac = BROADCAST_MAC;
+
+    // Ethernet ヘッダー
+    let eth_header = EthernetHeader {
+        dst_mac,
+        src_mac: my_mac,
+        ethertype: ETHERTYPE_IPV6.to_be_bytes(),
+    };
+
+    // IPv6 ヘッダー
+    let ipv6_header = Ipv6Header {
+        version_tc_fl: [0x60, 0x00, 0x00, 0x00], // Version=6, TC=0, Flow Label=0
+        payload_length: (payload.len() as u16).to_be_bytes(),
+        next_header,
+        hop_limit: 64,
+        src_ip: MY_IPV6,
+        dst_ip: *dst_ip,
+    };
+
+    // パケットを構築
+    let mut packet = Vec::with_capacity(14 + 40 + payload.len());
+
+    // Ethernet ヘッダー (14B)
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
+    });
+
+    // IPv6 ヘッダー (40B)
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&ipv6_header as *const _ as *const u8, 40)
+    });
+
+    // ペイロード
+    packet.extend_from_slice(payload);
+
+    // 送信
+    if syscall::net_send_frame(&packet) < 0 {
+        net_debug!("ipv6: failed to send packet");
+    } else {
+        net_debug!("ipv6: sent packet, next_header={}, len={}", next_header, payload.len());
+    }
+}
+
+/// ICMPv6 チェックサムを計算する
+///
+/// ICMPv6 のチェックサムは IPv6 疑似ヘッダーを含めて計算する（RFC 4443）。
+/// IPv4 の ICMP と異なり、疑似ヘッダーの付加は必須。
+///
+/// 疑似ヘッダー構造:
+///   Source Address (16B)
+///   Destination Address (16B)
+///   Upper-Layer Packet Length (4B, big-endian)
+///   Zero (3B) + Next Header (1B = 58 for ICMPv6)
+fn calculate_icmpv6_checksum(
+    src_ip: &[u8; 16],
+    dst_ip: &[u8; 16],
+    icmpv6_data: &[u8],
+) -> u16 {
+    let icmpv6_len = icmpv6_data.len();
+
+    // 疑似ヘッダー + ICMPv6 データ
+    let mut data = Vec::with_capacity(40 + icmpv6_len);
+
+    // 疑似ヘッダー
+    data.extend_from_slice(src_ip);                              // Source Address (16B)
+    data.extend_from_slice(dst_ip);                              // Destination Address (16B)
+    data.extend_from_slice(&(icmpv6_len as u32).to_be_bytes());  // Upper-Layer Packet Length (4B)
+    data.push(0);                                                 // Zero
+    data.push(0);                                                 // Zero
+    data.push(0);                                                 // Zero
+    data.push(IP_PROTO_ICMPV6);                                  // Next Header (58)
+
+    // ICMPv6 データ
+    data.extend_from_slice(icmpv6_data);
+
+    calculate_checksum(&data)
+}
+
+/// ICMPv6 Echo Request を送信する（ping6 コマンド用）
+///
+/// 指定した IPv6 アドレスに ICMPv6 Echo Request を送信する。
+///
+/// # 引数
+/// - `dst_ip`: 宛先 IPv6 アドレス
+/// - `id`: Echo Request の Identifier
+/// - `seq`: Echo Request の Sequence Number
+pub fn send_icmpv6_echo_request(dst_ip: &[u8; 16], id: u16, seq: u16) {
+    // ICMPv6 Echo Reply バッファをクリア
+    net_state_mut().icmpv6_echo_reply = None;
+
+    // Echo Request ペイロード: type(1) + code(1) + checksum(2) + id(2) + seq(2) + data
+    let mut echo_payload = Vec::with_capacity(16);
+    echo_payload.push(ICMPV6_ECHO_REQUEST); // type=128
+    echo_payload.push(0);                    // code=0
+    echo_payload.push(0);                    // checksum placeholder
+    echo_payload.push(0);
+    echo_payload.extend_from_slice(&id.to_be_bytes());  // Identifier
+    echo_payload.extend_from_slice(&seq.to_be_bytes()); // Sequence Number
+    // 8 バイトのダミーデータ（ping の慣例）
+    echo_payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+
+    // ICMPv6 チェックサムを計算
+    let checksum = calculate_icmpv6_checksum(
+        &MY_IPV6,
+        dst_ip,
+        &echo_payload,
+    );
+    echo_payload[2] = (checksum >> 8) as u8;
+    echo_payload[3] = (checksum & 0xFF) as u8;
+
+    // IPv6 パケットとして送信
+    send_ipv6_packet(dst_ip, IP_PROTO_ICMPV6, &echo_payload);
+}
+
+/// ICMPv6 Echo Reply を待つ（タイムアウト付き）
+///
+/// # 引数
+/// - `timeout_ms`: タイムアウト（ミリ秒）
+///
+/// # 戻り値
+/// - `Ok((id, seq, src_ip))`: 受信した Echo Reply の情報
+/// - `Err("timeout")`: タイムアウト
+pub fn wait_icmpv6_echo_reply(timeout_ms: u64) -> Result<(u16, u16, [u8; 16]), &'static str> {
+    let loops = (timeout_ms as usize).saturating_mul(2000).max(1);
+
+    for _ in 0..loops {
+        poll_and_handle();
+
+        let state = net_state_mut();
+        if let Some((id, seq, src_ip)) = state.icmpv6_echo_reply.take() {
+            return Ok((id, seq, src_ip));
+        }
+
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    Err("timeout")
 }
