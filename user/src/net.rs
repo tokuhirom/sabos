@@ -34,6 +34,14 @@ const OPCODE_TCP_CLOSE: u32 = 5;
 const OPCODE_TCP_LISTEN: u32 = 6;
 /// TCP 接続の受け入れ
 const OPCODE_TCP_ACCEPT: u32 = 7;
+/// UDP バインド
+const OPCODE_UDP_BIND: u32 = 8;
+/// UDP データ送信
+const OPCODE_UDP_SEND_TO: u32 = 9;
+/// UDP データ受信
+const OPCODE_UDP_RECV_FROM: u32 = 10;
+/// UDP ソケットのクローズ
+const OPCODE_UDP_CLOSE: u32 = 11;
 
 /// IPC リクエストヘッダサイズ: opcode(4) + payload_len(4) = 8 バイト
 const IPC_REQ_HEADER: usize = 8;
@@ -76,6 +84,12 @@ pub enum NetError {
     AcceptFailed,
     /// IPC 通信エラー
     IpcError,
+    /// UDP バインドに失敗
+    UdpBindFailed,
+    /// UDP 送信に失敗
+    UdpSendFailed,
+    /// UDP 受信に失敗
+    UdpRecvFailed,
 }
 
 // =================================================================
@@ -415,6 +429,140 @@ pub fn raw_accept(timeout_ms: u64) -> Result<u32, NetError> {
         Err(NetError::AcceptFailed)
     } else {
         Ok(u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]))
+    }
+}
+
+// =================================================================
+// UdpSocket — UDP ソケットの抽象化
+// =================================================================
+
+/// UDP ソケット（std::net::UdpSocket 互換風）
+///
+/// Drop で自動的にソケットをクローズする（RAII パターン）。
+/// bind() でポートにバインドし、send_to / recv_from でデータを送受信する。
+pub struct UdpSocket {
+    /// netd が管理するソケット ID
+    socket_id: u32,
+    /// バインドしているローカルポート
+    local_port: u16,
+    /// 受信タイムアウト（ミリ秒）。0 = デフォルト 5000ms
+    recv_timeout_ms: u64,
+}
+
+impl UdpSocket {
+    /// 指定ポートにバインドして UDP ソケットを作成する
+    ///
+    /// port=0 でエフェメラルポートを自動割り当て。
+    ///
+    /// # 例
+    /// ```
+    /// let sock = net::UdpSocket::bind(0)?;  // エフェメラルポート
+    /// let sock = net::UdpSocket::bind(5353)?;  // 特定ポート
+    /// ```
+    pub fn bind(port: u16) -> Result<Self, NetError> {
+        let payload = port.to_le_bytes();
+        let mut resp = [0u8; IPC_BUF_SIZE];
+        let (status, len) = netd_request(OPCODE_UDP_BIND, &payload, &mut resp)
+            .map_err(|_| NetError::UdpBindFailed)?;
+        if status < 0 || len < 6 {
+            return Err(NetError::UdpBindFailed);
+        }
+        let socket_id = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+        let local_port = u16::from_le_bytes([resp[4], resp[5]]);
+        Ok(Self {
+            socket_id,
+            local_port,
+            recv_timeout_ms: 5000,
+        })
+    }
+
+    /// データを指定アドレスに送信する
+    ///
+    /// # 引数
+    /// - `data`: 送信データ
+    /// - `addr`: 宛先アドレス（IP + ポート）
+    pub fn send_to(&self, data: &[u8], addr: SocketAddr) -> Result<usize, NetError> {
+        // payload: [socket_id: u32][dst_ip: 4B][dst_port: u16 LE][data...]
+        let mut payload = [0u8; IPC_BUF_SIZE];
+        let total = 10 + data.len();
+        if total > payload.len() {
+            return Err(NetError::UdpSendFailed);
+        }
+        payload[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        payload[4..8].copy_from_slice(&addr.ip.octets);
+        payload[8..10].copy_from_slice(&addr.port.to_le_bytes());
+        payload[10..10 + data.len()].copy_from_slice(data);
+
+        let mut resp = [0u8; 32];
+        let (status, _) = netd_request(OPCODE_UDP_SEND_TO, &payload[..total], &mut resp)
+            .map_err(|_| NetError::UdpSendFailed)?;
+        if status < 0 {
+            Err(NetError::UdpSendFailed)
+        } else {
+            Ok(data.len())
+        }
+    }
+
+    /// データを受信し、送信元アドレスも返す
+    ///
+    /// # 引数
+    /// - `buf`: 受信バッファ
+    ///
+    /// # 戻り値
+    /// - `Ok((n, addr))`: 受信バイト数と送信元アドレス
+    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr), NetError> {
+        // payload: [socket_id: u32][max_len: u32 LE][timeout_ms: u64 LE]
+        let mut payload = [0u8; 16];
+        let max_len = buf.len() as u32;
+        payload[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        payload[4..8].copy_from_slice(&max_len.to_le_bytes());
+        payload[8..16].copy_from_slice(&self.recv_timeout_ms.to_le_bytes());
+
+        let mut resp = [0u8; IPC_BUF_SIZE];
+        let (status, len) = netd_request(OPCODE_UDP_RECV_FROM, &payload, &mut resp)
+            .map_err(|_| NetError::UdpRecvFailed)?;
+
+        // status == -42 はタイムアウト
+        if status == -42 {
+            return Err(NetError::Timeout);
+        }
+        if status < 0 || len < 6 {
+            return Err(NetError::UdpRecvFailed);
+        }
+
+        // レスポンス: [src_ip: 4B][src_port: u16 LE][data...]
+        let src_ip = Ipv4Addr::new(resp[0], resp[1], resp[2], resp[3]);
+        let src_port = u16::from_le_bytes([resp[4], resp[5]]);
+        let data_len = len - 6;
+        let copy_len = core::cmp::min(data_len, buf.len());
+        buf[..copy_len].copy_from_slice(&resp[6..6 + copy_len]);
+
+        let addr = SocketAddr::new(src_ip, src_port);
+        Ok((copy_len, addr))
+    }
+
+    /// 受信タイムアウトを設定する（ミリ秒）
+    pub fn set_recv_timeout(&mut self, ms: u64) {
+        self.recv_timeout_ms = ms;
+    }
+
+    /// バインドしているローカルポートを返す
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+
+    /// ソケット ID を返す
+    pub fn socket_id(&self) -> u32 {
+        self.socket_id
+    }
+}
+
+impl Drop for UdpSocket {
+    /// ソケットを自動クローズする
+    fn drop(&mut self) {
+        let payload = self.socket_id.to_le_bytes();
+        let mut resp = [0u8; 32];
+        let _ = netd_request(OPCODE_UDP_CLOSE, &payload, &mut resp);
     }
 }
 
