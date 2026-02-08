@@ -16,3 +16,4 @@ log = { version = "0.4.29", default-features = false }
 sabos-blockdev = { path = "../libs/blockdev" }
 sabos-fat-core = { path = "../libs/fat-core" }
 sabos-textutil = { path = "../libs/textutil" }
+sabos-syscall = { path = "../libs/sabos-syscall" }

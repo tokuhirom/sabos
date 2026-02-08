@@ -4,17 +4,14 @@
 
 use core::arch::asm;
 
-// ネットワーク (40-49)
-pub const SYS_NET_SEND_FRAME: u64 = 45; // net_send_frame(buf_ptr, len)
-pub const SYS_NET_RECV_FRAME: u64 = 46; // net_recv_frame(buf_ptr, len, timeout_ms)
-pub const SYS_NET_GET_MAC: u64 = 47;    // net_get_mac(buf_ptr, len)
-
-// IPC (90-99)
-pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
-pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
-
-// 終了
-pub const SYS_EXIT: u64 = 60;
+/// システムコール番号の定義
+///
+/// sabos-syscall クレートで一元管理している。
+/// 番号の追加・変更は libs/sabos-syscall/src/lib.rs で行うこと。
+pub use sabos_syscall::{
+    SYS_NET_SEND_FRAME, SYS_NET_RECV_FRAME, SYS_NET_GET_MAC,
+    SYS_IPC_SEND, SYS_IPC_RECV, SYS_EXIT,
+};
 
 pub type SyscallResult = i64;
 

@@ -2,7 +2,7 @@
 # Make の子プロセスには渡さないようにする
 unexport RUSTUP_TOOLCHAIN
 
-.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img test
+.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img test check-syscall
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -171,9 +171,14 @@ clean:
 	rm -rf esp
 	rm -f $(DISK_IMG)
 
+# PAL ファイルの syscall 番号を検証する。
+# libs/sabos-syscall/src/lib.rs を正として、rust-std-sabos/*.rs の番号が一致するかチェック。
+check-syscall:
+	python3 scripts/check-syscall-numbers.py
+
 # 自動テストを実行する。
 # QEMU を起動して selftest コマンドを実行し、結果を検証する。
 # CI で使う場合はこのターゲットを呼ぶ。
-test: build $(ESP_DIR) disk-img
+test: check-syscall build $(ESP_DIR) disk-img
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh

@@ -17,6 +17,9 @@ jobs:
         with:
           targets: x86_64-unknown-uefi,x86_64-unknown-none
 
+      - name: Check syscall numbers (PAL)
+        run: python3 scripts/check-syscall-numbers.py
+
       - name: Build user program
         run: cd user && cargo build --target x86_64-unknown-none
 
