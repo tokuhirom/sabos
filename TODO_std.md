@@ -135,14 +135,14 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 
 ### 残課題
 
-- [ ] **debug ビルドの OOM 問題の改善**
-  - 現状: debug ビルドの ELF が 6.4MB で、カーネルヒープ (16MB) 上に Vec で読むと OOM
-  - 原因: カーネルの ELF ローダーが `Vec<u8>` でファイル全体をヒープに読み込む
-  - 対策案: ストリーミング読み込み、またはカーネルヒープサイズ増加
+- [x] **debug ビルドの OOM 問題の改善**
+  - 解決済み: スラブアロケータ実装（Large 領域 12.5 MiB + realloc in-place 拡張 + 隣接ブロック結合）と FAT32 の `read_file_data()` に `Vec::with_capacity(entry.size)` を追加したことで、debug ELF (9.3 MB) が OOM なしでロード可能
+  - 倍々成長による一時メモリ消費が根本的に解消された
 
-- [ ] **nightly 更新時の sysroot パッチ追従**
-  - `scripts/patch-rust-sysroot.sh` は idempotent 設計だが、std のソース構造が変わるとパッチが壊れる
-  - `rust-toolchain.toml` でバージョン固定することで緩和可能
+- [x] **nightly 更新時の sysroot パッチ追従**
+  - 解決済み: `rust-toolchain.toml` で `channel = "nightly-2026-02-02"` に日付固定
+  - nightly が勝手に更新されてパッチが壊れるリスクを回避
+  - 更新する場合は意図的に日付を変更し、パッチの動作を確認してからコミットする運用
 
 ## ビルド手順
 
