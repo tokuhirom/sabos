@@ -452,6 +452,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  net::tcp_parse FAILED${NC}"
     fi
+    if grep_after "$base" "serde::to_string OK"; then
+        echo -e "${GREEN}  serde::to_string OK${NC}"
+    else
+        echo -e "${RED}  serde::to_string FAILED${NC}"
+    fi
+    if grep_after "$base" "serde::from_str OK"; then
+        echo -e "${GREEN}  serde::from_str OK${NC}"
+    else
+        echo -e "${RED}  serde::from_str FAILED${NC}"
+    fi
 else
     echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi

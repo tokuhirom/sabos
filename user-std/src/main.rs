@@ -126,5 +126,32 @@ fn main() {
     let addr: std::net::SocketAddr = "10.0.2.2:80".parse().unwrap();
     println!("net::tcp_parse OK: {}", addr);
 
+    // === serde_json テスト ===
+
+    // 外部クレート（serde + serde_json）がビルド・動作するかの検証
+    use serde::{Serialize, Deserialize};
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Point { x: i32, y: i32 }
+
+    let p = Point { x: 1, y: 2 };
+    match serde_json::to_string(&p) {
+        Ok(json) => {
+            println!("serde::to_string OK: {}", json);
+            // デシリアライズして元に戻るか検証
+            match serde_json::from_str::<Point>(&json) {
+                Ok(p2) => {
+                    if p2 == p {
+                        println!("serde::from_str OK: {:?}", p2);
+                    } else {
+                        println!("serde::from_str MISMATCH: {:?} != {:?}", p2, p);
+                    }
+                }
+                Err(e) => println!("serde::from_str error: {}", e),
+            }
+        }
+        Err(e) => println!("serde::to_string error: {}", e),
+    }
+
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ
 }

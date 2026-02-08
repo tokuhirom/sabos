@@ -88,7 +88,7 @@ build-user-std:
 		cd ..; \
 		echo "$$NEW_HASH" > $(SYSROOT_HASH_FILE); \
 	fi
-	cd user-std && RUSTUP_TOOLCHAIN=nightly cargo -Zjson-target-spec build --release
+	cd user-std && RUSTUP_TOOLCHAIN=nightly RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1 cargo -Zjson-target-spec build --release
 
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
