@@ -25,6 +25,7 @@ TSH_ELF = user/target/x86_64-unknown-none/debug/tsh
 EXIT0_ELF = user/target/x86_64-unknown-none/debug/exit0
 TERM_ELF = user/target/x86_64-unknown-none/debug/term
 LIFE_ELF = user/target/x86_64-unknown-none/debug/life
+MANDELBROT_ELF = user/target/x86_64-unknown-none/debug/mandelbrot
 HELLO_STD_ELF = user-std/target/x86_64-sabos/release/sabos-user-std
 ESP_DIR = esp/EFI/BOOT
 
@@ -102,7 +103,7 @@ $(ESP_DIR):
 # FAT32 ディスクイメージを作成する。
 # 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF, TERM.ELF, LIFE.ELF を書き込む。
+# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF, TERM.ELF, LIFE.ELF, MANDEL.ELF を書き込む。
 # USER_ELF (旧シェル) は現在は disk.img に含めない。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
@@ -123,6 +124,7 @@ disk-img: build-user
 	mcopy -i $(DISK_IMG) $(EXIT0_ELF) ::EXIT0.ELF
 	mcopy -i $(DISK_IMG) $(TERM_ELF) ::TERM.ELF
 	mcopy -i $(DISK_IMG) $(LIFE_ELF) ::LIFE.ELF
+	mcopy -i $(DISK_IMG) $(MANDELBROT_ELF) ::MANDEL.ELF
 	@# std 対応バイナリがビルド済みならディスクに追加
 	@if [ -f "$(HELLO_STD_ELF)" ]; then \
 		mcopy -i $(DISK_IMG) $(HELLO_STD_ELF) ::HELLOSTD.ELF; \
