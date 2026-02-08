@@ -22,7 +22,7 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 | **stdio** | ✅ 実装済み | SYS_WRITE/SYS_READ ベースの Stdout/Stdin |
 | **random** | ✅ 実装済み | SYS_GETRANDOM ベースの fill_bytes |
 | **thread_local** | ✅ 設定済み | `no_threads` モード（Cell ベース） |
-| **args** | ❌ unsupported | `std::env::args()` は空を返す |
+| **args** | ✅ 実装済み | カーネルの argc/argv を Atomic 変数で保存、`std::env::args()` 対応 |
 | **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV ベースの var/set_var（一覧取得は未対応） |
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
 | **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
@@ -72,23 +72,20 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
   - UdpSocket は unsupported（netd が UDP 未対応のため）
   - IPv6 は unsupported（SABOS は IPv4 のみ）
 
-### Phase 9: 外部クレート対応
+### Phase 9: コマンドライン引数 + 外部クレート対応
 
-- [ ] **コマンドライン引数の受け渡し**
-  - 難易度: ★★☆☆☆
-  - SYS_EXEC / SYS_SPAWN に引数文字列を渡せるようにする
-  - PAL の args に接続して `std::env::args()` が使えるようになる
-  - 多くの CLI クレート（clap 等）の前提条件
+- [x] **コマンドライン引数の受け渡し**
+  - PAL の `sys_args_sabos.rs` を新規作成: Unix 実装に倣い Atomic 変数で argc/argv を保存
+  - `_start_rust()` に argc/argv を渡すよう修正（System V ABI でレジスタ伝播）
+  - SYS_EXEC / SYS_SPAWN を 4 引数に拡張（arg3=args_ptr, arg4=args_len）
+  - 引数バッファフォーマット: `[u16 len][bytes]` の繰り返し（長さプレフィックス形式）
+  - シェルの run / spawn コマンドも引数対応
+  - `std::env::args()` が動作確認済み
 
-- [ ] **環境変数**
-  - 難易度: ★★☆☆☆
-  - プロセスごとの環境変数テーブル
-  - `std::env::var()` / `std::env::set_var()` が使えるようになる
-
-- [ ] **外部クレートのビルドテスト**
-  - 難易度: ★★★☆☆
-  - `serde_json` や `regex` など代表的なクレートが `user-std/` でビルドできるか確認
-  - 不足している PAL 機能を洗い出す
+- [x] **外部クレートのビルドテスト**
+  - `serde` + `serde_json` が SABOS 上でビルド・動作することを確認
+  - `RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1` で `restricted_std` 問題を解決
+  - JSON のシリアライズ/デシリアライズが正常動作
 
 ### 残課題
 

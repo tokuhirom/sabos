@@ -80,8 +80,14 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 ## プロセス管理 (30-39)
 
-- `30` `SYS_EXEC(path_ptr, path_len) -> 0`
-- `31` `SYS_SPAWN(path_ptr, path_len) -> task_id`
+- `30` `SYS_EXEC(path_ptr, path_len, args_ptr, args_len) -> 0`
+  - プログラムを同期実行（フォアグラウンド）
+  - args_ptr=0 ならパスのみを argv[0] として渡す（後方互換）
+  - 引数バッファフォーマット: `[u16 len][bytes]` の繰り返し（長さプレフィックス形式）
+- `31` `SYS_SPAWN(path_ptr, path_len, args_ptr, args_len) -> task_id`
+  - バックグラウンドでプロセスを起動
+  - args_ptr=0 ならパスのみを argv[0] として渡す（後方互換）
+  - 引数バッファフォーマット: `[u16 len][bytes]` の繰り返し（長さプレフィックス形式）
 - `32` `SYS_YIELD() -> 0`
 - `33` `SYS_SLEEP(ms) -> 0`
 - `34` `SYS_WAIT(task_id, timeout_ms) -> exit_code`
