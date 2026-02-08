@@ -63,6 +63,27 @@ cp "$PATCH_DIR/sys_stdio_sabos.rs" "$STD_SRC/sys/stdio/sabos.rs"
 echo "[COPY] sys/random/sabos.rs"
 cp "$PATCH_DIR/sys_random_sabos.rs" "$STD_SRC/sys/random/sabos.rs"
 
+# ---- 3c. fs ファイルのコピー ----
+
+echo "[COPY] sys/fs/sabos.rs"
+cp "$PATCH_DIR/sys_fs_sabos.rs" "$STD_SRC/sys/fs/sabos.rs"
+
+# ---- 3d. os/sabos ディレクトリの作成とファイルコピー ----
+
+OS_SABOS_DIR="$STD_SRC/os/sabos"
+if [ -d "$OS_SABOS_DIR" ]; then
+    echo "[SKIP] $OS_SABOS_DIR already exists"
+else
+    echo "[CREATE] $OS_SABOS_DIR"
+    mkdir -p "$OS_SABOS_DIR"
+fi
+
+echo "[COPY] os/sabos/mod.rs"
+cp "$PATCH_DIR/os_sabos_mod.rs" "$OS_SABOS_DIR/mod.rs"
+
+echo "[COPY] os/sabos/ffi.rs"
+cp "$PATCH_DIR/os_sabos_ffi.rs" "$OS_SABOS_DIR/ffi.rs"
+
 # ---- 4. 既存ファイルへのパッチ（Python で正確に処理） ----
 
 python3 "$SCRIPT_DIR/apply-sysroot-patches.py" "$STD_SRC"

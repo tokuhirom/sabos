@@ -22,5 +22,35 @@ fn main() {
     let sum: i32 = v.iter().sum();
     println!("sum of 1..=5 = {}", sum);
 
+    // === std::fs テスト ===
+
+    // std::fs::read_to_string テスト
+    // ディスクイメージ上の HELLO.TXT を読み取る
+    match std::fs::read_to_string("/HELLO.TXT") {
+        Ok(content) => println!("fs::read_to_string OK: {}", content.trim()),
+        Err(e) => println!("fs::read_to_string error: {}", e),
+    }
+
+    // std::fs::write テスト（新規ファイル作成 + 書き込み）
+    match std::fs::write("/STDTEST.TXT", "written by std::fs") {
+        Ok(()) => println!("fs::write OK"),
+        Err(e) => println!("fs::write error: {}", e),
+    }
+
+    // 書き込んだファイルを読み返して検証
+    match std::fs::read_to_string("/STDTEST.TXT") {
+        Ok(content) => println!("fs::read_back OK: {}", content),
+        Err(e) => println!("fs::read_back error: {}", e),
+    }
+
+    // std::fs::metadata テスト
+    match std::fs::metadata("/HELLO.TXT") {
+        Ok(meta) => println!("fs::metadata OK: size={} is_file={}", meta.len(), meta.is_file()),
+        Err(e) => println!("fs::metadata error: {}", e),
+    }
+
+    // テストファイルを削除して後始末
+    let _ = std::fs::remove_file("/STDTEST.TXT");
+
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ
 }

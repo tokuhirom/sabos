@@ -42,10 +42,34 @@ pub fn abort_internal() -> ! {
 /// Hermit OS の `runtime_entry` と同じ役割を果たす。
 ///
 /// 呼び出しフロー:
-///   _start() → main(0, null) → lang_start() → ユーザーの fn main() → exit()
+///   _start() → _start_rust() → main(0, null) → lang_start() → ユーザーの fn main() → exit()
+///
+/// _start はアセンブリで実装する。iretq でジャンプされるため、エントリ時の
+/// RSP は 16 バイトアラインされている（16n）。しかし System V ABI の関数呼び出し
+/// 規約では、call 命令がリターンアドレスを push するため、関数エントリでは
+/// RSP = 16n - 8 であることが前提。この 8 バイトのずれが GPF の原因になる。
+///
+/// 対策として、_start をアセンブリで書いて RSP を明示的に 16n - 8 に調整してから
+/// Rust 関数を call する。call 命令自体がさらに 8 バイト push するため、
+/// _start_rust のエントリでは RSP = 16n - 16 = 16 の倍数になり、ABI 準拠となる。
+#[cfg(not(test))]
+core::arch::global_asm!(
+    ".global _start",
+    "_start:",
+    // RSP を 16 バイトアラインに調整する。
+    // iretq でジャンプされた時点で RSP は 16n（16 の倍数）。
+    // System V ABI では call 前に RSP が 16 の倍数であることが要求される。
+    // call _start_rust が 8 バイト push するため、_start_rust エントリでは
+    // RSP = 16n - 8 となり、ABI の前提通りになる。
+    "and rsp, -16",        // RSP を 16 バイト境界に揃える（念のため）
+    "call _start_rust",    // Rust 関数を呼ぶ（リターンアドレスを push）
+    "ud2",                 // ここには来ないはず
+);
+
+/// _start から呼ばれる Rust 側エントリポイント
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start() -> ! {
+pub unsafe extern "C" fn _start_rust() -> ! {
     unsafe extern "C" {
         fn main(argc: isize, argv: *const *const u8) -> i32;
     }

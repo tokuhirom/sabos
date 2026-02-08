@@ -392,6 +392,26 @@ if [ "$hellostd_ok" = true ]; then
     if grep_after "$base" "sum of"; then
         echo -e "${GREEN}  Vec/alloc output OK${NC}"
     fi
+    if grep_after "$base" "fs::read_to_string OK"; then
+        echo -e "${GREEN}  fs::read_to_string OK${NC}"
+    else
+        echo -e "${RED}  fs::read_to_string FAILED${NC}"
+    fi
+    if grep_after "$base" "fs::write OK"; then
+        echo -e "${GREEN}  fs::write OK${NC}"
+    else
+        echo -e "${RED}  fs::write FAILED${NC}"
+    fi
+    if grep_after "$base" "fs::read_back OK: written by std::fs"; then
+        echo -e "${GREEN}  fs::read_back OK${NC}"
+    else
+        echo -e "${RED}  fs::read_back FAILED${NC}"
+    fi
+    if grep_after "$base" "fs::metadata OK"; then
+        echo -e "${GREEN}  fs::metadata OK${NC}"
+    else
+        echo -e "${RED}  fs::metadata FAILED${NC}"
+    fi
 else
     echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi
