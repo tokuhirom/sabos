@@ -78,6 +78,11 @@ cp "$PATCH_DIR/sys_time_sabos.rs" "$STD_SRC/sys/time/sabos.rs"
 echo "[COPY] sys/env/sabos.rs"
 cp "$PATCH_DIR/sys_env_sabos.rs" "$STD_SRC/sys/env/sabos.rs"
 
+# ---- 3g. net/connection ファイルのコピー ----
+
+echo "[COPY] sys/net/connection/sabos.rs"
+cp "$PATCH_DIR/sys_net_connection_sabos.rs" "$STD_SRC/sys/net/connection/sabos.rs"
+
 # ---- 3f. os/sabos ディレクトリの作成とファイルコピー ----
 
 OS_SABOS_DIR="$STD_SRC/os/sabos"

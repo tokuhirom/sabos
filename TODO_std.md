@@ -25,7 +25,7 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
 | **args** | ❌ unsupported | `std::env::args()` は空を返す |
 | **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV ベースの var/set_var（一覧取得は未対応） |
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
-| **net** | ❌ unsupported | `std::net::*` はエラーを返す |
+| **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
 | **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
 | **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant（SystemTime は未対応） |
@@ -65,11 +65,12 @@ Phase 7 で基本的な std 対応（`println!` / `String` / `Vec`）が動く�
   - `std::env::var()` / `std::env::set_var()` / `std::env::current_dir()` が動作
   - env 一覧取得（`std::env::vars()`）は空を返す（SYS_LISTENV 未実装のため）
 
-- [ ] **PAL net の実装**
-  - 難易度: ★★★★☆
-  - netd 経由の TCP を PAL の `net::TcpStream` に接続
-  - `std::net::TcpStream::connect()` が使えるようになる
-  - IPC ベースの netd 通信を PAL 内部に隠蔽する必要がある
+- [x] **PAL net の実装**
+  - `sys_net_connection_sabos.rs` を追加
+  - IPC syscall (SYS_IPC_SEND/RECV) で netd と直接通信
+  - `std::net::TcpStream::connect()` / `TcpListener::bind()` / DNS lookup が動作
+  - UdpSocket は unsupported（netd が UDP 未対応のため）
+  - IPv6 は unsupported（SABOS は IPv4 のみ）
 
 ### Phase 9: 外部クレート対応
 

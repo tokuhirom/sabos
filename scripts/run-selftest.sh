@@ -432,6 +432,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  env::var FAILED${NC}"
     fi
+    if grep_after "$base" "net::lookup OK"; then
+        echo -e "${GREEN}  net::lookup OK${NC}"
+    else
+        echo -e "${RED}  net::lookup FAILED${NC}"
+    fi
+    if grep_after "$base" "net::tcp_parse OK"; then
+        echo -e "${GREEN}  net::tcp_parse OK${NC}"
+    else
+        echo -e "${RED}  net::tcp_parse FAILED${NC}"
+    fi
 else
     echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
 fi

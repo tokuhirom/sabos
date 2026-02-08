@@ -215,6 +215,17 @@ def patch_time_mod(content: str) -> str:
     return insert_before_line(content, "    _ => {", sabos_branch)
 
 
+def patch_net_connection_mod(content: str) -> str:
+    """sys/net/connection/mod.rs: _ => { の直前に sabos ブランチを追加"""
+    sabos_branch = (
+        '    target_os = "sabos" => {\n'
+        '        mod sabos;\n'
+        '        pub use sabos::*;\n'
+        '    }'
+    )
+    return insert_before_line(content, "    _ => {", sabos_branch)
+
+
 def patch_env_mod(content: str) -> str:
     """sys/env/mod.rs: _ => { の直前に sabos ブランチを追加し、
     common モジュールの条件にも sabos を追加する。"""
@@ -261,6 +272,7 @@ def main():
         ("os/mod.rs", 'target_os = "sabos"', patch_os_mod),
         ("sys/time/mod.rs", 'target_os = "sabos"', patch_time_mod),
         ("sys/env/mod.rs", 'target_os = "sabos"', patch_env_mod),
+        ("sys/net/connection/mod.rs", 'target_os = "sabos"', patch_net_connection_mod),
     ]
 
     for rel_path, marker, patch_fn in patches:
