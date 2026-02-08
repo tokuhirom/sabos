@@ -816,6 +816,24 @@ pub fn get_env_var(key: &str) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
+/// 現在のタスクの全環境変数を "KEY=VALUE\n" 形式の文字列として返す。
+///
+/// SYS_LISTENV で使われる。バッファに書き込む前にサイズが分かるように
+/// まず文字列全体を構築する。
+pub fn list_env_vars() -> String {
+    let sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &sched.tasks[current];
+    let mut result = String::new();
+    for (key, value) in &task.env_vars {
+        result.push_str(key);
+        result.push('=');
+        result.push_str(value);
+        result.push('\n');
+    }
+    result
+}
+
 /// 現在のタスクの環境変数を設定する。
 ///
 /// 既に同じキーの環境変数がある場合は上書きする。

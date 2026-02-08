@@ -218,6 +218,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_KILL => sys_kill(arg1),
         SYS_GETENV => sys_getenv(arg1, arg2, arg3, arg4),
         SYS_SETENV => sys_setenv(arg1, arg2, arg3, arg4),
+        SYS_LISTENV => sys_listenv(arg1, arg2),
         // ネットワーク
         SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
         SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
@@ -1988,6 +1989,31 @@ fn sys_setenv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Syscall
     // 現在のタスクの環境変数に設定
     crate::scheduler::set_env_var(key, value);
     Ok(0)
+}
+
+/// SYS_LISTENV: 全環境変数を一覧取得する
+///
+/// 引数:
+///   arg1 — バッファのポインタ（ユーザー空間）
+///   arg2 — バッファの長さ
+///
+/// バッファに "KEY=VALUE\n" の繰り返しで書き込む。
+///
+/// 戻り値:
+///   書き込んだバイト数（成功時）
+///   -4 (BUFFER_OVERFLOW): バッファが小さすぎる
+fn sys_listenv(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    let buf = user_slice_from_args(arg1, arg2)?;
+
+    // 全環境変数を "KEY=VALUE\n" 形式で取得
+    let data = crate::scheduler::list_env_vars();
+
+    if data.len() > buf.as_slice().len() {
+        return Err(SyscallError::BufferOverflow);
+    }
+
+    buf.as_mut_slice()[..data.len()].copy_from_slice(data.as_bytes());
+    Ok(data.len() as u64)
 }
 
 // =================================================================

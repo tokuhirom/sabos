@@ -76,6 +76,7 @@ pub const SYS_GETPID: u64 = 35;  // getpid() — 自分のタスク ID を取得
 pub const SYS_KILL: u64 = 36;    // kill(task_id) — タスクを強制終了
 pub const SYS_GETENV: u64 = 37;  // getenv(key_ptr, key_len, val_buf_ptr, val_buf_len) — 環境変数を取得
 pub const SYS_SETENV: u64 = 38;  // setenv(key_ptr, key_len, val_ptr, val_len) — 環境変数を設定
+pub const SYS_LISTENV: u64 = 39; // listenv(buf_ptr, buf_len) — 全環境変数を一覧取得
 
 // =================================================================
 // ネットワーク (40-49)

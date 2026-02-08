@@ -24,7 +24,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 | **random** | ✅ 実装済み | SYS_GETRANDOM ベースの fill_bytes |
 | **thread_local** | ✅ 設定済み | `no_threads` モード（Cell ベース） |
 | **args** | ✅ 実装済み | カーネルの argc/argv を Atomic 変数で保存、`std::env::args()` 対応 |
-| **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV ベースの var/set_var（一覧取得は未対応） |
+| **env** | ✅ 実装済み | SYS_GETENV/SYS_SETENV/SYS_LISTENV ベースの var/set_var/vars |
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
 | **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
@@ -64,7 +64,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - `sys_pal_sabos_os.rs` を改善: getcwd → "/", temp_dir → "/", home_dir → "/"
   - `sys_env_sabos.rs` を新規作成: SYS_GETENV(37)/SYS_SETENV(38) に接続
   - `std::env::var()` / `std::env::set_var()` / `std::env::current_dir()` が動作
-  - env 一覧取得（`std::env::vars()`）は空を返す（SYS_LISTENV 未実装のため）
+  - env 一覧取得（`std::env::vars()`）は SYS_LISTENV 経由で動作
 
 - [x] **PAL net の実装**
   - `sys_net_connection_sabos.rs` を追加
@@ -113,10 +113,10 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - `std::time::SystemTime::now()` / `UNIX_EPOCH` が使えるようになる
   - 影響: `chrono`, `time` クレートが動く
 
-- [ ] **env::vars() の実装（環境変数一覧）**
+- [x] **env::vars() の実装（環境変数一覧）**
   - 難易度: ★☆☆☆☆
-  - SYS_LISTENV を追加してタスクの全環境変数を返す
-  - `std::env::vars()` イテレータが空でなくなる
+  - SYS_LISTENV(39) を追加してタスクの全環境変数を "KEY=VALUE\n" 形式で返す
+  - `std::env::vars()` イテレータが動作確認済み
 
 - [ ] **net: UdpSocket / IPv6**
   - 難易度: ★★★★☆

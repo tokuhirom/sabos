@@ -106,6 +106,19 @@ fn main() {
         Err(e) => println!("env::var error: {}", e),
     }
 
+    // === std::env::vars() テスト ===
+
+    // std::env::vars() テスト（SYS_LISTENV 経由で全環境変数を取得）
+    // 直前に SABOS_TEST=hello_env を set_var しているので、少なくとも 1 つは返るはず
+    let vars: Vec<(String, String)> = std::env::vars().collect();
+    println!("env::vars OK: count={}", vars.len());
+    // SABOS_TEST が含まれているか確認
+    if vars.iter().any(|(k, _)| k == "SABOS_TEST") {
+        println!("env::vars_contains OK: SABOS_TEST found");
+    } else {
+        println!("env::vars_contains FAILED: SABOS_TEST not found");
+    }
+
     // === std::net テスト ===
 
     // DNS 解決テスト（std::net::ToSocketAddrs 経由で lookup_host を呼ぶ）

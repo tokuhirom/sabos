@@ -442,6 +442,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  env::var FAILED${NC}"
     fi
+    if grep_after "$base" "env::vars OK"; then
+        echo -e "${GREEN}  env::vars OK${NC}"
+    else
+        echo -e "${RED}  env::vars FAILED${NC}"
+    fi
+    if grep_after "$base" "env::vars_contains OK"; then
+        echo -e "${GREEN}  env::vars_contains OK${NC}"
+    else
+        echo -e "${RED}  env::vars_contains FAILED${NC}"
+    fi
     if grep_after "$base" "net::lookup OK"; then
         echo -e "${GREEN}  net::lookup OK${NC}"
     else

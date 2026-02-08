@@ -817,6 +817,28 @@ pub fn setenv(key: &str, value: &str) -> SyscallResult {
     }
 }
 
+/// 全環境変数の一覧を取得する
+///
+/// バッファに "KEY=VALUE\n" の繰り返しで書き込む。
+///
+/// # 戻り値
+/// - `Ok(n)`: 書き込んだバイト数
+/// - `Err(-4)`: バッファが小さすぎる
+pub fn listenv(buf: &mut [u8]) -> Result<usize, SyscallResult> {
+    let ret = unsafe {
+        syscall2(
+            SYS_LISTENV,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        ) as i64
+    };
+    if ret < 0 {
+        Err(ret)
+    } else {
+        Ok(ret as usize)
+    }
+}
+
 // =================================================================
 // システム制御関連
 // =================================================================

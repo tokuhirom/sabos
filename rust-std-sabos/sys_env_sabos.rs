@@ -1,11 +1,9 @@
 // sys/env/sabos.rs — SABOS 環境変数 PAL 実装
 //
-// SYS_GETENV(37) / SYS_SETENV(38) を使って std::env::var() / set_var() を実装する。
+// SYS_GETENV(37) / SYS_SETENV(38) / SYS_LISTENV(39) を使って
+// std::env::var() / set_var() / vars() を実装する。
 // SABOS カーネルはタスクごとに環境変数テーブル（Vec<(String, String)>）を保持しており、
 // spawn 時に親プロセスの環境変数が子プロセスにコピーされる。
-//
-// env() イテレータは現在 SABOS に一覧取得 syscall がないため空を返す。
-// 将来 SYS_LISTENV を追加したら対応できる。
 
 pub use super::common::Env;
 use crate::ffi::{OsStr, OsString};
@@ -71,12 +69,76 @@ fn syscall_setenv(key: &[u8], value: &[u8]) -> i64 {
     ret as i64
 }
 
+/// SYS_LISTENV(39) を呼んで全環境変数を取得する。
+///
+/// 引数:
+///   rdi — バッファのポインタ
+///   rsi — バッファの長さ
+///
+/// 戻り値:
+///   正の値 — 書き込んだバイト数
+///   -4  — バッファが小さすぎる（BufferOverflow）
+fn syscall_listenv(buf: &mut [u8]) -> i64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 39u64,              // SYS_LISTENV
+            in("rdi") buf.as_mut_ptr() as u64,
+            in("rsi") buf.len() as u64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    ret as i64
+}
+
 /// 全環境変数のイテレータを返す。
-/// 現在 SABOS に一覧取得 syscall がないため空のイテレータを返す。
-/// 将来 SYS_LISTENV を実装したら対応する。
+/// SYS_LISTENV(39) を呼んで "KEY=VALUE\n" 形式のバッファを取得し、
+/// パースして (OsString, OsString) のペアに変換する。
 pub fn env() -> Env {
-    // 空の Vec で Env イテレータを作成
-    Env::new(Vec::new())
+    // まず 1KB のバッファで試す
+    let mut buf = vec![0u8; 1024];
+    let ret = syscall_listenv(&mut buf);
+
+    if ret == -4 {
+        // バッファが小さすぎるので大きなバッファで再試行
+        let mut big_buf = vec![0u8; 8192];
+        let ret2 = syscall_listenv(&mut big_buf);
+        if ret2 < 0 {
+            return Env::new(Vec::new());
+        }
+        let len = ret2 as usize;
+        return Env::new(parse_env_buf(&big_buf[..len]));
+    }
+
+    if ret < 0 {
+        return Env::new(Vec::new());
+    }
+
+    let len = ret as usize;
+    Env::new(parse_env_buf(&buf[..len]))
+}
+
+/// "KEY=VALUE\n" 形式のバッファをパースして (OsString, OsString) のペアに変換する。
+fn parse_env_buf(data: &[u8]) -> Vec<(OsString, OsString)> {
+    let mut result = Vec::new();
+    for line in data.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        // 最初の '=' で分割
+        if let Some(eq_pos) = line.iter().position(|&b| b == b'=') {
+            let key = &line[..eq_pos];
+            let value = &line[eq_pos + 1..];
+            result.push((
+                OsStringExt::from_vec(key.to_vec()),
+                OsStringExt::from_vec(value.to_vec()),
+            ));
+        }
+    }
+    result
 }
 
 /// 環境変数の値を取得する。
