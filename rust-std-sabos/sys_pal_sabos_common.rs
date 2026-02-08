@@ -42,7 +42,7 @@ pub fn abort_internal() -> ! {
 /// Hermit OS の `runtime_entry` と同じ役割を果たす。
 ///
 /// 呼び出しフロー:
-///   _start() → _start_rust() → main(0, null) → lang_start() → ユーザーの fn main() → exit()
+///   _start() → _start_rust(argc, argv) → main(argc, argv) → lang_start() → ユーザーの fn main() → exit()
 ///
 /// _start はアセンブリで実装する。iretq でジャンプされるため、エントリ時の
 /// RSP は 16 バイトアラインされている（16n）。しかし System V ABI の関数呼び出し
@@ -67,15 +67,22 @@ core::arch::global_asm!(
 );
 
 /// _start から呼ばれる Rust 側エントリポイント
+///
+/// iretq でジャンプされた時点で rdi=argc, rsi=argv, rdx=envp がレジスタにセットされている。
+/// _start アセンブリの `call _start_rust` は System V ABI に従うため、
+/// rdi → argc, rsi → argv としてそのまま引数として渡ってくる。
+/// これにより std::env::args() が正しく動作する。
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start_rust() -> ! {
+pub unsafe extern "C" fn _start_rust(argc: isize, argv: *const *const u8) -> ! {
     unsafe extern "C" {
         fn main(argc: isize, argv: *const *const u8) -> i32;
     }
 
-    // SABOS では現在 argc/argv を渡さないので 0 / null で呼ぶ
-    let result = unsafe { main(0, core::ptr::null()) };
+    // カーネルが setup_user_stack_args() でスタックに配置した argc/argv を
+    // そのまま main() に渡す。std の lang_start() → init() に伝播し、
+    // std::env::args() で取得できるようになる。
+    let result = unsafe { main(argc, argv) };
 
     // SYS_EXIT でプロセスを終了
     unsafe {

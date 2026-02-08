@@ -226,6 +226,29 @@ def patch_net_connection_mod(content: str) -> str:
     return insert_before_line(content, "    _ => {", sabos_branch)
 
 
+def patch_args_mod(content: str) -> str:
+    """sys/args/mod.rs: common モジュールの条件に sabos を追加し、
+    cfg_select! 内の _ => の直前に sabos ブランチを追加する。"""
+    # 1. common モジュールの #[cfg(any(...))] に sabos を追加
+    # target_os = "xous", の後に追加
+    content = insert_after_line(
+        content,
+        '    target_os = "xous",',
+        '    target_os = "sabos",'
+    )
+
+    # 2. cfg_select! 内に sabos ブランチを追加
+    sabos_branch = (
+        '    target_os = "sabos" => {\n'
+        '        mod sabos;\n'
+        '        pub use sabos::*;\n'
+        '    }'
+    )
+    content = insert_before_line(content, "    _ => {", sabos_branch)
+
+    return content
+
+
 def patch_env_mod(content: str) -> str:
     """sys/env/mod.rs: _ => { の直前に sabos ブランチを追加し、
     common モジュールの条件にも sabos を追加する。"""
@@ -272,6 +295,7 @@ def main():
         ("os/mod.rs", 'target_os = "sabos"', patch_os_mod),
         ("sys/time/mod.rs", 'target_os = "sabos"', patch_time_mod),
         ("sys/env/mod.rs", 'target_os = "sabos"', patch_env_mod),
+        ("sys/args/mod.rs", 'target_os = "sabos"', patch_args_mod),
         ("sys/net/connection/mod.rs", 'target_os = "sabos"', patch_net_connection_mod),
     ]
 
