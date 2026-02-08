@@ -422,6 +422,16 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  time::monotonic FAILED${NC}"
     fi
+    if grep_after "$base" "args::count OK"; then
+        echo -e "${GREEN}  args::count OK${NC}"
+    else
+        echo -e "${RED}  args::count FAILED${NC}"
+    fi
+    if grep_after "$base" "args::argv0 OK"; then
+        echo -e "${GREEN}  args::argv0 OK${NC}"
+    else
+        echo -e "${RED}  args::argv0 FAILED${NC}"
+    fi
     if grep_after "$base" "env::current_dir OK"; then
         echo -e "${GREEN}  env::current_dir OK${NC}"
     else

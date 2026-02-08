@@ -76,6 +76,19 @@ fn main() {
         println!("time::monotonic FAILED: t2 < t1");
     }
 
+    // === std::env::args テスト ===
+
+    // std::env::args() テスト（カーネルが argc/argv をレジスタ経由で渡す）
+    let args: Vec<String> = std::env::args().collect();
+    println!("args::count OK: {}", args.len());
+    if !args.is_empty() {
+        println!("args::argv0 OK: {}", args[0]);
+    }
+    // 引数が 2 つ以上あれば追加引数も表示
+    if args.len() > 1 {
+        println!("args::argv1 OK: {}", args[1]);
+    }
+
     // === std::env テスト ===
 
     // std::env::current_dir() テスト（getcwd → "/" を返す）
