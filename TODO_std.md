@@ -28,7 +28,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 | **fs** | ✅ 実装済み | SYS_OPEN/READ/WRITE/CLOSE/STAT/SEEK ベースの File + readdir/unlink/rmdir |
 | **net** | ✅ 実装済み | IPC 経由で netd に接続、DNS/TcpStream/TcpListener 対応（UDP/IPv6 は未対応） |
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
-| **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
+| **thread** | ✅ 実装済み | SYS_THREAD_CREATE/EXIT/JOIN ベースの spawn/join（thread_local は no_threads モード） |
 | **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant + SYS_CLOCK_REALTIME ベースの SystemTime |
 | **process** | ✅ 実装済み | SYS_SPAWN/SYS_WAIT/SYS_KILL ベースの Command/Child（パイプ未対応） |
 | **sync** | ✅ 設定済み | `no_threads` モード（シングルスレッド用） |
@@ -92,13 +92,13 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 
 以下は現在 unsupported だが、カーネル側に基盤がある or 実装可能なもの。
 
-- [ ] **PAL thread の実装**
+- [x] **PAL thread の実装**
   - 難易度: ★★★☆☆
-  - カーネル側に SYS_THREAD_CREATE(110) / SYS_THREAD_EXIT(111) / SYS_THREAD_JOIN(112) + SYS_FUTEX(120) が既に存在
-  - PAL の `sys/thread/sabos.rs` を作成して `std::thread::spawn()` を動かす
-  - `std::sync::Mutex` / `Condvar` も Futex ベースで動くはず
-  - thread_local は `no_threads` → `thread_local_key` に切り替えが必要
-  - 影響: `rayon`, `tokio`, `crossbeam` などの並行処理クレートが使えるようになる
+  - SYS_THREAD_CREATE(110) / SYS_THREAD_EXIT(111) / SYS_THREAD_JOIN(112) を PAL に接続
+  - `std::thread::spawn()` / `join()` / `yield_now()` / `sleep()` が動作確認済み
+  - thread_local は `no_threads` モードのまま（ThreadInit::init() をスキップして対応）
+  - `std::thread::current()` はスポーンしたスレッドからメインスレッドのハンドルを返す制約あり
+  - thread_local を `thread_local_key` に切り替えれば制約解消の見込み
 
 - [x] **PAL process の実装**
   - 難易度: ★★☆☆☆

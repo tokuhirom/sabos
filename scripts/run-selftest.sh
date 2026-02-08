@@ -486,6 +486,21 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  process::wait FAILED${NC}"
     fi
+    if grep_after "$base" "thread::spawn_join OK"; then
+        echo -e "${GREEN}  thread::spawn_join OK${NC}"
+    else
+        echo -e "${RED}  thread::spawn_join FAILED${NC}"
+    fi
+    if grep_after "$base" "thread::return_value OK"; then
+        echo -e "${GREEN}  thread::return_value OK${NC}"
+    else
+        echo -e "${RED}  thread::return_value FAILED${NC}"
+    fi
+    if grep_after "$base" "thread::yield_now OK"; then
+        echo -e "${GREEN}  thread::yield_now OK${NC}"
+    else
+        echo -e "${RED}  thread::yield_now FAILED${NC}"
+    fi
     if grep_after "$base" "serde::to_string OK"; then
         echo -e "${GREEN}  serde::to_string OK${NC}"
     else

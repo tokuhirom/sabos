@@ -184,6 +184,49 @@ fn main() {
         Err(e) => println!("process::spawn error: {}", e),
     }
 
+    // === std::thread テスト ===
+
+    // std::thread::spawn() テスト（SYS_THREAD_CREATE + SYS_THREAD_JOIN 経由）
+    // スレッドを作成し、共有変数を書き換えて join で終了を待つ。
+    // NOTE: no_threads モードのため thread_local は共有される。
+    //       AtomicBool で安全にデータをやり取りする。
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static THREAD_DONE: AtomicBool = AtomicBool::new(false);
+
+    let handle = std::thread::spawn(|| {
+        // スレッド内で処理を実行
+        THREAD_DONE.store(true, Ordering::SeqCst);
+    });
+    match handle.join() {
+        Ok(()) => {
+            if THREAD_DONE.load(Ordering::SeqCst) {
+                println!("thread::spawn_join OK");
+            } else {
+                println!("thread::spawn_join FAILED: flag not set");
+            }
+        }
+        Err(_) => println!("thread::spawn_join FAILED: join panicked"),
+    }
+
+    // スレッドで値を返すテスト
+    let handle2 = std::thread::spawn(|| {
+        42u64
+    });
+    match handle2.join() {
+        Ok(val) => {
+            if val == 42 {
+                println!("thread::return_value OK: {}", val);
+            } else {
+                println!("thread::return_value FAILED: expected 42, got {}", val);
+            }
+        }
+        Err(_) => println!("thread::return_value FAILED: join panicked"),
+    }
+
+    // yield_now テスト（クラッシュしなければ OK）
+    std::thread::yield_now();
+    println!("thread::yield_now OK");
+
     // === serde_json テスト ===
 
     // 外部クレート（serde + serde_json）がビルド・動作するかの検証

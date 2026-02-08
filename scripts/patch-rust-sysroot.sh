@@ -93,6 +93,11 @@ cp "$PATCH_DIR/sys_args_sabos.rs" "$STD_SRC/sys/args/sabos.rs"
 echo "[COPY] sys/process/sabos.rs"
 cp "$PATCH_DIR/sys_process_sabos.rs" "$STD_SRC/sys/process/sabos.rs"
 
+# ---- 3j. thread ファイルのコピー ----
+
+echo "[COPY] sys/thread/sabos.rs"
+cp "$PATCH_DIR/sys_thread_sabos.rs" "$STD_SRC/sys/thread/sabos.rs"
+
 # ---- 3f. os/sabos ディレクトリの作成とファイルコピー ----
 
 OS_SABOS_DIR="$STD_SRC/os/sabos"
