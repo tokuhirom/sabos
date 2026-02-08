@@ -137,75 +137,6 @@ fn main() {
         println!("env::vars_contains FAILED: SABOS_TEST not found");
     }
 
-    // === std::net テスト ===
-
-    // DNS 解決テスト（std::net::ToSocketAddrs 経由で lookup_host を呼ぶ）
-    use std::net::ToSocketAddrs;
-    match ("example.com", 80).to_socket_addrs() {
-        Ok(mut addrs) => {
-            if let Some(addr) = addrs.next() {
-                println!("net::lookup OK: {}", addr);
-            }
-        }
-        Err(e) => println!("net::lookup error: {}", e),
-    }
-
-    // TCP 接続テスト（IP アドレスリテラルのパーステスト）
-    // 実際の TCP 接続は外部ネットワーク依存で CI では不安定なため、
-    // SocketAddr のパース → connect_inner の呼び出しまでを確認する。
-    // 完全な TCP 通信テストは user シェルの selftest_net (no_std バイナリ) で実施。
-    let addr: std::net::SocketAddr = "10.0.2.2:80".parse().unwrap();
-    println!("net::tcp_parse OK: {}", addr);
-
-    // === std::net::UdpSocket テスト ===
-    //
-    // UdpSocket::bind(0) でエフェメラルポートにバインドし、
-    // DNS サーバー (10.0.2.3:53) に手動 DNS クエリを送って応答を受信する。
-    {
-        use std::net::UdpSocket;
-        match UdpSocket::bind("0.0.0.0:0") {
-            Ok(sock) => {
-                println!("net::udp_bind OK");
-                // read_timeout を設定（5 秒）
-                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-
-                // DNS クエリを手動構築: example.com の A レコード
-                let mut query = [0u8; 29];
-                query[0] = 0xAB; query[1] = 0xCD; // ID
-                query[2] = 0x01; query[3] = 0x00; // Flags: RD=1
-                query[4] = 0x00; query[5] = 0x01; // QDCOUNT=1
-                // QNAME: \x07example\x03com\x00
-                query[12] = 7;
-                query[13..20].copy_from_slice(b"example");
-                query[20] = 3;
-                query[21..24].copy_from_slice(b"com");
-                query[24] = 0;
-                query[25] = 0x00; query[26] = 0x01; // QTYPE=A
-                query[27] = 0x00; query[28] = 0x01; // QCLASS=IN
-
-                match sock.send_to(&query, "10.0.2.3:53") {
-                    Ok(n) => println!("net::udp_send OK: {} bytes", n),
-                    Err(e) => println!("net::udp_send error: {}", e),
-                }
-
-                let mut buf = [0u8; 512];
-                match sock.recv_from(&mut buf) {
-                    Ok((n, addr)) => {
-                        if n >= 2 && buf[0] == 0xAB && buf[1] == 0xCD {
-                            println!("net::udp_recv OK: {} bytes from {}", n, addr);
-                        } else {
-                            println!("net::udp_recv FAILED: unexpected response");
-                        }
-                    }
-                    Err(e) => println!("net::udp_recv error: {}", e),
-                }
-            }
-            Err(e) => {
-                println!("net::udp_bind error: {}", e);
-            }
-        }
-    }
-
     // === std::process テスト ===
 
     // std::process::Command テスト（SYS_SPAWN + SYS_WAIT 経由）
@@ -301,6 +232,76 @@ fn main() {
             }
         }
         Err(e) => println!("serde::to_string error: {}", e),
+    }
+
+    // === std::net テスト ===
+    //
+    // ネットワークテストは最後に実行する。
+    // DNS lookup が netd との IPC タイムアウトでハングすると、
+    // 以降のテストが実行されないため、他のテストを先に完了させる。
+
+    // TCP アドレスパーステスト（ネットワーク通信不要）
+    let addr: std::net::SocketAddr = "10.0.2.2:80".parse().unwrap();
+    println!("net::tcp_parse OK: {}", addr);
+
+    // DNS 解決テスト（std::net::ToSocketAddrs 経由で lookup_host を呼ぶ）
+    use std::net::ToSocketAddrs;
+    match ("example.com", 80).to_socket_addrs() {
+        Ok(mut addrs) => {
+            if let Some(addr) = addrs.next() {
+                println!("net::lookup OK: {}", addr);
+            }
+        }
+        Err(e) => println!("net::lookup error: {}", e),
+    }
+
+    // === std::net::UdpSocket テスト ===
+    //
+    // UdpSocket::bind(0) でエフェメラルポートにバインドし、
+    // DNS サーバー (10.0.2.3:53) に手動 DNS クエリを送って応答を受信する。
+    {
+        use std::net::UdpSocket;
+        match UdpSocket::bind("0.0.0.0:0") {
+            Ok(sock) => {
+                println!("net::udp_bind OK");
+                // read_timeout を設定（5 秒）
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+                // DNS クエリを手動構築: example.com の A レコード
+                let mut query = [0u8; 29];
+                query[0] = 0xAB; query[1] = 0xCD; // ID
+                query[2] = 0x01; query[3] = 0x00; // Flags: RD=1
+                query[4] = 0x00; query[5] = 0x01; // QDCOUNT=1
+                // QNAME: \x07example\x03com\x00
+                query[12] = 7;
+                query[13..20].copy_from_slice(b"example");
+                query[20] = 3;
+                query[21..24].copy_from_slice(b"com");
+                query[24] = 0;
+                query[25] = 0x00; query[26] = 0x01; // QTYPE=A
+                query[27] = 0x00; query[28] = 0x01; // QCLASS=IN
+
+                match sock.send_to(&query, "10.0.2.3:53") {
+                    Ok(n) => println!("net::udp_send OK: {} bytes", n),
+                    Err(e) => println!("net::udp_send error: {}", e),
+                }
+
+                let mut buf = [0u8; 512];
+                match sock.recv_from(&mut buf) {
+                    Ok((n, addr)) => {
+                        if n >= 2 && buf[0] == 0xAB && buf[1] == 0xCD {
+                            println!("net::udp_recv OK: {} bytes from {}", n, addr);
+                        } else {
+                            println!("net::udp_recv FAILED: unexpected response");
+                        }
+                    }
+                    Err(e) => println!("net::udp_recv error: {}", e),
+                }
+            }
+            Err(e) => {
+                println!("net::udp_bind error: {}", e);
+            }
+        }
     }
 
     // std::process::exit は PAL 経由で SYS_EXIT を呼ぶ

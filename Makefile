@@ -2,6 +2,11 @@
 # Make の子プロセスには渡さないようにする
 unexport RUSTUP_TOOLCHAIN
 
+# rust-toolchain.toml から nightly チャンネル名を取得する。
+# build-user-std で RUSTUP_TOOLCHAIN を明示的に指定するために使う。
+# -Zjson-target-spec は nightly 専用フラグのため、toolchain 指定が必須。
+NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
+
 .PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img test check-syscall
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
@@ -88,7 +93,7 @@ build-user-std:
 		cd ..; \
 		echo "$$NEW_HASH" > $(SYSROOT_HASH_FILE); \
 	fi
-	cd user-std && RUSTUP_TOOLCHAIN=nightly RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1 cargo -Zjson-target-spec build --release
+	cd user-std && RUSTUP_TOOLCHAIN=$(NIGHTLY_CHANNEL) RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1 cargo -Zjson-target-spec build --release
 
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
@@ -179,6 +184,6 @@ check-syscall:
 # 自動テストを実行する。
 # QEMU を起動して selftest コマンドを実行し、結果を検証する。
 # CI で使う場合はこのターゲットを呼ぶ。
-test: check-syscall build $(ESP_DIR) disk-img
+test: check-syscall build build-user-std $(ESP_DIR) disk-img
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh

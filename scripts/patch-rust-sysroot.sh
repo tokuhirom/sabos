@@ -18,8 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PATCH_DIR="$PROJECT_DIR/rust-std-sabos"
 
+# rust-toolchain.toml から nightly チャンネル名を取得する。
+# channel = "nightly-2026-02-02" のような日付付き nightly にも対応。
+TOOLCHAIN=$(grep 'channel' "$PROJECT_DIR/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
+echo "Toolchain: $TOOLCHAIN (from rust-toolchain.toml)"
+
 # sysroot パスを取得
-SYSROOT="$(rustc +nightly --print sysroot)"
+SYSROOT="$(rustc +$TOOLCHAIN --print sysroot)"
 STD_SRC="$SYSROOT/lib/rustlib/src/rust/library/std/src"
 
 echo "=== SABOS sysroot patch ==="
