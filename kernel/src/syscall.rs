@@ -209,8 +209,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_MMAP => sys_mmap(arg1, arg2, arg3, arg4),
         SYS_MUNMAP => sys_munmap(arg1, arg2),
         // プロセス管理
-        SYS_EXEC => sys_exec(arg1, arg2),
-        SYS_SPAWN => sys_spawn(arg1, arg2),
+        SYS_EXEC => sys_exec(arg1, arg2, arg3, arg4),
+        SYS_SPAWN => sys_spawn(arg1, arg2, arg3, arg4),
         SYS_YIELD => sys_yield(),
         SYS_SLEEP => sys_sleep(arg1),
         SYS_WAIT => sys_wait(arg1, arg2),
@@ -1613,6 +1613,12 @@ fn sys_pci_config_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64
 /// 引数:
 ///   arg1 — パスのポインタ（ユーザー空間）
 ///   arg2 — パスの長さ
+///   arg3 — 引数バッファのポインタ（0 なら引数なし）
+///   arg4 — 引数バッファの長さ
+///
+/// 引数バッファのフォーマット:
+///   [u16 len][bytes] の繰り返し。各引数は長さプレフィックス付きで連続配置。
+///   arg3=0 なら後方互換でパスのみを argv[0] として渡す。
 ///
 /// 戻り値:
 ///   0（成功時、プログラム終了後）
@@ -1620,16 +1626,61 @@ fn sys_pci_config_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64
 ///
 /// 指定した ELF ファイルを読み込んで同期実行する。
 /// プログラムが終了するまでこのシステムコールはブロックする。
-fn sys_exec(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+fn sys_exec(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-    exec_by_path(path)?;
+
+    // 追加引数をパース
+    let extra_args = parse_args_buffer(arg3, arg4)?;
+
+    exec_by_path_with_args(path, &extra_args)?;
     Ok(0)
+}
+
+/// ユーザー空間の引数バッファをパースする。
+///
+/// 引数バッファのフォーマット: [u16 len][bytes][u16 len][bytes]...
+/// 各引数は「2バイトのリトルエンディアン長さ」+「その長さ分のバイト列」で連続配置。
+/// args_ptr が 0 の場合は空の Vec を返す（後方互換）。
+fn parse_args_buffer(args_ptr: u64, args_len: u64) -> Result<Vec<String>, SyscallError> {
+    if args_ptr == 0 || args_len == 0 {
+        return Ok(Vec::new());
+    }
+
+    let buf = user_slice_from_args(args_ptr, args_len)?;
+    let data = buf.as_slice();
+    let mut offset = 0;
+    let mut args = Vec::new();
+
+    while offset + 2 <= data.len() {
+        // 長さプレフィックス（リトルエンディアン u16）を読む
+        let len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+        offset += 2;
+
+        if offset + len > data.len() {
+            return Err(SyscallError::InvalidArgument);
+        }
+
+        let arg_str = core::str::from_utf8(&data[offset..offset + len])
+            .map_err(|_| SyscallError::InvalidUtf8)?;
+        args.push(String::from(arg_str));
+        offset += len;
+    }
+
+    Ok(args)
 }
 
 /// exec の共通実装（カーネル内でパスが確定済みの場合に使用）
 fn exec_by_path(path: &str) -> Result<(), SyscallError> {
+    exec_by_path_with_args(path, &[])
+}
+
+/// exec の共通実装（追加引数付き）
+///
+/// argv は [path, extra_args[0], extra_args[1], ...] の形で構築される。
+/// extra_args が空なら path のみが argv[0] になる（後方互換）。
+fn exec_by_path_with_args(path: &str, extra_args: &[String]) -> Result<(), SyscallError> {
     // プロセス名を作成（パスからファイル名部分を抽出）
     let process_name = String::from(
         path.rsplit('/').next().unwrap_or(path)
@@ -1639,12 +1690,19 @@ fn exec_by_path(path: &str) -> Result<(), SyscallError> {
     let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
 
+    // argv を構築: [path] + extra_args
+    let mut args_vec: Vec<&str> = Vec::with_capacity(1 + extra_args.len());
+    args_vec.push(path);
+    for arg in extra_args {
+        args_vec.push(arg.as_str());
+    }
+
     // スケジューラにユーザープロセスとして登録
     let (current_cr3, current_flags) = Cr3::read();
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &[path]) {
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &args_vec) {
         Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }
@@ -1723,6 +1781,12 @@ pub fn exec_with_args_for_test(path: &str, args: &[&str], env_vars: &[(&str, &st
 /// 引数:
 ///   arg1 — パスのポインタ（ユーザー空間）
 ///   arg2 — パスの長さ
+///   arg3 — 引数バッファのポインタ（0 なら引数なし）
+///   arg4 — 引数バッファの長さ
+///
+/// 引数バッファのフォーマット:
+///   [u16 len][bytes] の繰り返し。各引数は長さプレフィックス付きで連続配置。
+///   arg3=0 なら後方互換でパスのみを argv[0] として渡す。
 ///
 /// 戻り値:
 ///   タスク ID（成功時）
@@ -1730,7 +1794,7 @@ pub fn exec_with_args_for_test(path: &str, args: &[&str], env_vars: &[(&str, &st
 ///
 /// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
 /// 即座に戻り、プロセスはスケジューラで管理される。
-fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+fn sys_spawn(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     // パスを取得
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
@@ -1743,16 +1807,26 @@ fn sys_spawn(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     // パスもコピーしておく（ユーザー空間の文字列は spawn 後に無効になる可能性がある）
     let path_owned = String::from(path);
 
+    // 追加引数をパース
+    let extra_args = parse_args_buffer(arg3, arg4)?;
+
     // FAT32 からファイルを読み込む
     let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
     let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+
+    // argv を構築: [path] + extra_args
+    let mut args_vec: Vec<&str> = Vec::with_capacity(1 + extra_args.len());
+    args_vec.push(&path_owned);
+    for arg in &extra_args {
+        args_vec.push(arg.as_str());
+    }
 
     // スケジューラにユーザープロセスとして登録（カーネルのページテーブルで実行）
     let (current_cr3, current_flags) = Cr3::read();
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
-    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &[&path_owned]) {
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &args_vec) {
         Ok(id) => id,
         Err(_) => {
             unsafe { Cr3::write(current_cr3, current_flags); }

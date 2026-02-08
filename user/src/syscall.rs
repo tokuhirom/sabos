@@ -616,7 +616,7 @@ pub fn pci_config_read(bus: u8, device: u8, function: u8, offset: u8, size: u8) 
 pub fn exec(path: &str) -> SyscallResult {
     let path_ptr = path.as_ptr() as u64;
     let path_len = path.len() as u64;
-    unsafe { syscall2(SYS_EXEC, path_ptr, path_len) as i64 }
+    unsafe { syscall4(SYS_EXEC, path_ptr, path_len, 0, 0) as i64 }
 }
 
 /// バックグラウンドでプロセスを起動
@@ -633,7 +633,78 @@ pub fn exec(path: &str) -> SyscallResult {
 pub fn spawn(path: &str) -> SyscallResult {
     let path_ptr = path.as_ptr() as u64;
     let path_len = path.len() as u64;
-    unsafe { syscall2(SYS_SPAWN, path_ptr, path_len) as i64 }
+    unsafe { syscall4(SYS_SPAWN, path_ptr, path_len, 0, 0) as i64 }
+}
+
+/// プログラムを引数付きで同期実行（フォアグラウンド）
+///
+/// # 引数
+/// - `path`: 実行する ELF ファイルのパス
+/// - `args`: コマンドライン引数のスライス
+///
+/// # 戻り値
+/// - 0（成功時、プログラム終了後）
+/// - 負の値（エラー時）
+///
+/// argv は [path, args[0], args[1], ...] の形でカーネルが構築する。
+pub fn exec_with_args(path: &str, args: &[&str]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    if args.is_empty() {
+        return unsafe { syscall4(SYS_EXEC, path_ptr, path_len, 0, 0) as i64 };
+    }
+    let mut buf = [0u8; ARGS_BUF_SIZE];
+    let len = build_args_buffer(args, &mut buf);
+    unsafe { syscall4(SYS_EXEC, path_ptr, path_len, buf.as_ptr() as u64, len as u64) as i64 }
+}
+
+/// バックグラウンドでプロセスを引数付きで起動
+///
+/// # 引数
+/// - `path`: 実行する ELF ファイルのパス
+/// - `args`: コマンドライン引数のスライス
+///
+/// # 戻り値
+/// - タスク ID（成功時）
+/// - 負の値（エラー時）
+///
+/// argv は [path, args[0], args[1], ...] の形でカーネルが構築する。
+pub fn spawn_with_args(path: &str, args: &[&str]) -> SyscallResult {
+    let path_ptr = path.as_ptr() as u64;
+    let path_len = path.len() as u64;
+    if args.is_empty() {
+        return unsafe { syscall4(SYS_SPAWN, path_ptr, path_len, 0, 0) as i64 };
+    }
+    let mut buf = [0u8; ARGS_BUF_SIZE];
+    let len = build_args_buffer(args, &mut buf);
+    unsafe { syscall4(SYS_SPAWN, path_ptr, path_len, buf.as_ptr() as u64, len as u64) as i64 }
+}
+
+/// 引数バッファの最大サイズ（1KB — コマンドライン引数の合計がこれを超えると切り捨て）
+const ARGS_BUF_SIZE: usize = 1024;
+
+/// 引数バッファを固定サイズバッファに構築する。
+///
+/// フォーマット: [u16 len][bytes][u16 len][bytes]...
+/// 各引数は「2バイトのリトルエンディアン長さ」+「その長さ分のバイト列」で連続配置。
+///
+/// 戻り値: 書き込んだバイト数
+fn build_args_buffer(args: &[&str], buf: &mut [u8]) -> usize {
+    let mut offset = 0;
+    for arg in args {
+        let len = arg.len() as u16;
+        let needed = 2 + arg.len();
+        if offset + needed > buf.len() {
+            break; // バッファが足りなければ残りの引数を切り捨て
+        }
+        let le_bytes = len.to_le_bytes();
+        buf[offset] = le_bytes[0];
+        buf[offset + 1] = le_bytes[1];
+        offset += 2;
+        buf[offset..offset + arg.len()].copy_from_slice(arg.as_bytes());
+        offset += arg.len();
+    }
+    offset
 }
 
 /// CPU を譲る
