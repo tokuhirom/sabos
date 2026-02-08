@@ -1,26 +1,29 @@
 // sys/net/connection/sabos.rs — SABOS ネットワーク PAL 実装
 //
 // SABOS のネットワークスタックは netd デーモン（ユーザー空間）が担当しており、
-// IPC メッセージ経由で DNS / TCP の操作を行う。
+// IPC メッセージ経由で DNS / TCP / UDP の操作を行う。
 //
-// この PAL は std::net::TcpStream / TcpListener / lookup_host を netd IPC に接続する。
-// UdpSocket は netd が UDP 未対応のため unsupported。
-// IPv6 も SABOS が IPv4 のみのため unsupported。
+// この PAL は std::net::TcpStream / TcpListener / UdpSocket / lookup_host を
+// netd IPC に接続する。IPv6 は SABOS が IPv4 のみのため unsupported。
 //
 // ## IPC プロトコル（netd）
 //
 // リクエスト: [opcode:u32 LE][payload_len:u32 LE][payload...]
 // レスポンス: [opcode:u32 LE][status:i32 LE][data_len:u32 LE][data...]
 //
-// | opcode | 操作          | payload                        | response data |
-// |--------|--------------|-------------------------------|---------------|
-// | 1      | DNS_LOOKUP   | domain string                  | 4 bytes IPv4  |
-// | 2      | TCP_CONNECT  | 4B IP + 2B port LE             | 4B conn_id    |
-// | 3      | TCP_SEND     | 4B conn_id + data              | (なし)        |
-// | 4      | TCP_RECV     | 4B conn_id + 4B max_len + 8B timeout_ms | data bytes |
-// | 5      | TCP_CLOSE    | 4B conn_id                     | (なし)        |
-// | 6      | TCP_LISTEN   | 2B port LE                     | (なし)        |
-// | 7      | TCP_ACCEPT   | 8B timeout_ms                  | 4B conn_id    |
+// | opcode | 操作           | payload                                    | response data              |
+// |--------|---------------|--------------------------------------------|---------------------------|
+// | 1      | DNS_LOOKUP    | domain string                               | 4 bytes IPv4              |
+// | 2      | TCP_CONNECT   | 4B IP + 2B port LE                          | 4B conn_id                |
+// | 3      | TCP_SEND      | 4B conn_id + data                           | (なし)                    |
+// | 4      | TCP_RECV      | 4B conn_id + 4B max_len + 8B timeout_ms     | data bytes                |
+// | 5      | TCP_CLOSE     | 4B conn_id                                  | (なし)                    |
+// | 6      | TCP_LISTEN    | 2B port LE                                  | (なし)                    |
+// | 7      | TCP_ACCEPT    | 8B timeout_ms                               | 4B conn_id                |
+// | 8      | UDP_BIND      | 2B port LE                                  | 4B socket_id + 2B port    |
+// | 9      | UDP_SEND_TO   | 4B socket_id + 4B IP + 2B port + data       | (なし)                    |
+// | 10     | UDP_RECV_FROM | 4B socket_id + 4B max_len + 8B timeout_ms   | 4B IP + 2B port + data    |
+// | 11     | UDP_CLOSE     | 4B socket_id                                | (なし)                    |
 
 use crate::fmt;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
@@ -685,140 +688,293 @@ impl fmt::Debug for TcpListener {
 }
 
 // ============================================================
-// UdpSocket（unsupported — netd が UDP 未対応のため）
+// UdpSocket — netd の IPC 経由で UDP 通信を行う
 // ============================================================
 
-pub struct UdpSocket(!);
+/// netd IPC プロトコル: UDP 関連オペコード
+const OPCODE_UDP_BIND: u32 = 8;
+const OPCODE_UDP_SEND_TO: u32 = 9;
+const OPCODE_UDP_RECV_FROM: u32 = 10;
+const OPCODE_UDP_CLOSE: u32 = 11;
+
+/// UDP ソケット: netd の socket_id で管理される
+pub struct UdpSocket {
+    /// netd が管理するソケット ID
+    socket_id: u32,
+    /// バインドしているローカルアドレス
+    local_addr: SocketAddr,
+    /// 読み取りタイムアウト
+    read_timeout: Option<Duration>,
+    /// 書き込みタイムアウト（SABOS では未使用だが API 互換のため保持）
+    write_timeout: Option<Duration>,
+    /// connect() で設定されたデフォルト送信先アドレス
+    connected_addr: Option<SocketAddr>,
+}
 
 impl UdpSocket {
-    pub fn bind<A: ToSocketAddrs>(_: A) -> io::Result<UdpSocket> {
-        unsupported()
+    /// 指定アドレスにバインドして UDP ソケットを作成する
+    ///
+    /// addr のポート番号でバインドする。IP アドレスは無視（SABOS は 0.0.0.0 固定）。
+    /// ポート 0 でエフェメラルポート自動割り当て。
+    pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
+        let addrs = addr.to_socket_addrs()?;
+        let mut last_err = io::Error::new(io::ErrorKind::InvalidInput, "no addresses to bind to");
+        for a in addrs {
+            let port = a.port();
+            let payload = port.to_le_bytes();
+            let mut resp = [0u8; 16];
+            match netd_request(OPCODE_UDP_BIND, &payload, &mut resp) {
+                Ok((status, len)) if status >= 0 && len >= 6 => {
+                    let socket_id = u32::from_le_bytes([resp[0], resp[1], resp[2], resp[3]]);
+                    let local_port = u16::from_le_bytes([resp[4], resp[5]]);
+                    return Ok(UdpSocket {
+                        socket_id,
+                        local_addr: SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::new(0, 0, 0, 0),
+                            local_port,
+                        )),
+                        read_timeout: None,
+                        write_timeout: None,
+                        connected_addr: None,
+                    });
+                }
+                Ok(_) => {
+                    last_err = io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "UDP bind failed",
+                    );
+                }
+                Err(e) => {
+                    last_err = e;
+                }
+            }
+        }
+        Err(last_err)
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.0
+        self.connected_addr.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "UDP socket not connected")
+        })
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        self.0
+        Ok(self.local_addr)
     }
 
-    pub fn recv_from(&self, _: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        self.0
+    pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        let timeout_ms = self
+            .read_timeout
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(DEFAULT_RECV_TIMEOUT_MS);
+
+        // payload: [socket_id: u32][max_len: u32 LE][timeout_ms: u64 LE]
+        let max_len = buf.len() as u32;
+        let mut payload = [0u8; 16];
+        payload[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        payload[4..8].copy_from_slice(&max_len.to_le_bytes());
+        payload[8..16].copy_from_slice(&timeout_ms.to_le_bytes());
+
+        let mut resp = [0u8; IPC_BUF_SIZE];
+        let (status, len) = netd_request(OPCODE_UDP_RECV_FROM, &payload, &mut resp)?;
+
+        if status == -42 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "UDP recv timed out",
+            ));
+        }
+        if status < 0 || len < 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "UDP recv failed",
+            ));
+        }
+
+        // レスポンス: [src_ip: 4B][src_port: u16 LE][data...]
+        let src_ip = Ipv4Addr::new(resp[0], resp[1], resp[2], resp[3]);
+        let src_port = u16::from_le_bytes([resp[4], resp[5]]);
+        let data_len = len - 6;
+        let copy_len = data_len.min(buf.len());
+        buf[..copy_len].copy_from_slice(&resp[6..6 + copy_len]);
+
+        let addr = SocketAddr::V4(SocketAddrV4::new(src_ip, src_port));
+        Ok((copy_len, addr))
     }
 
-    pub fn peek_from(&self, _: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
-        self.0
+    pub fn peek_from(&self, _buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        // netd は peek 未対応
+        unsupported()
     }
 
-    pub fn send_to(&self, _: &[u8], _: &SocketAddr) -> io::Result<usize> {
-        self.0
+    pub fn send_to(&self, buf: &[u8], addr: &SocketAddr) -> io::Result<usize> {
+        let (ip_bytes, port) = socket_addr_to_ipv4_port(addr)?;
+
+        // payload: [socket_id: u32][dst_ip: 4B][dst_port: u16 LE][data...]
+        let total = 10 + buf.len();
+        if total > IPC_BUF_SIZE - IPC_REQ_HEADER {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP payload too large",
+            ));
+        }
+        let mut payload = vec![0u8; total];
+        payload[0..4].copy_from_slice(&self.socket_id.to_le_bytes());
+        payload[4..8].copy_from_slice(&ip_bytes);
+        payload[8..10].copy_from_slice(&port.to_le_bytes());
+        payload[10..10 + buf.len()].copy_from_slice(buf);
+
+        let mut resp = [0u8; 32];
+        let (status, _) = netd_request(OPCODE_UDP_SEND_TO, &payload, &mut resp)?;
+        if status < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "UDP send failed",
+            ));
+        }
+        Ok(buf.len())
     }
 
     pub fn duplicate(&self) -> io::Result<UdpSocket> {
-        self.0
+        // netd は socket_id の複製を未対応
+        unsupported()
     }
 
-    pub fn set_read_timeout(&self, _: Option<Duration>) -> io::Result<()> {
-        self.0
+    pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        let self_mut = unsafe { &mut *(self as *const Self as *mut Self) };
+        self_mut.read_timeout = dur;
+        Ok(())
     }
 
-    pub fn set_write_timeout(&self, _: Option<Duration>) -> io::Result<()> {
-        self.0
+    pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
+        let self_mut = unsafe { &mut *(self as *const Self as *mut Self) };
+        self_mut.write_timeout = dur;
+        Ok(())
     }
 
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
-        self.0
+        Ok(self.read_timeout)
     }
 
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
-        self.0
+        Ok(self.write_timeout)
     }
 
     pub fn set_broadcast(&self, _: bool) -> io::Result<()> {
-        self.0
+        // スタブ: ブロードキャスト設定は未対応だがエラーにはしない
+        Ok(())
     }
 
     pub fn broadcast(&self) -> io::Result<bool> {
-        self.0
+        Ok(false)
     }
 
     pub fn set_multicast_loop_v4(&self, _: bool) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn multicast_loop_v4(&self) -> io::Result<bool> {
-        self.0
+        unsupported()
     }
 
     pub fn set_multicast_ttl_v4(&self, _: u32) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
-        self.0
+        unsupported()
     }
 
     pub fn set_multicast_loop_v6(&self, _: bool) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn multicast_loop_v6(&self) -> io::Result<bool> {
-        self.0
+        unsupported()
     }
 
     pub fn join_multicast_v4(&self, _: &Ipv4Addr, _: &Ipv4Addr) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn join_multicast_v6(&self, _: &Ipv6Addr, _: u32) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn leave_multicast_v4(&self, _: &Ipv4Addr, _: &Ipv4Addr) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn leave_multicast_v6(&self, _: &Ipv6Addr, _: u32) -> io::Result<()> {
-        self.0
+        unsupported()
     }
 
     pub fn set_ttl(&self, _: u32) -> io::Result<()> {
-        self.0
+        // スタブ: TTL 設定は未対応だがエラーにはしない
+        Ok(())
     }
 
     pub fn ttl(&self) -> io::Result<u32> {
-        self.0
+        Ok(64)
     }
 
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        self.0
+        Ok(None)
     }
 
     pub fn set_nonblocking(&self, _: bool) -> io::Result<()> {
-        self.0
+        // netd はノンブロッキングモード未対応
+        unsupported()
     }
 
-    pub fn recv(&self, _: &mut [u8]) -> io::Result<usize> {
-        self.0
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        // connect() で設定されたアドレスから受信
+        let (n, _addr) = self.recv_from(buf)?;
+        Ok(n)
     }
 
     pub fn peek(&self, _: &mut [u8]) -> io::Result<usize> {
-        self.0
+        unsupported()
     }
 
-    pub fn send(&self, _: &[u8]) -> io::Result<usize> {
-        self.0
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        // connect() で設定されたアドレスに送信
+        let addr = self.connected_addr.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "UDP socket not connected")
+        })?;
+        self.send_to(buf, &addr)
     }
 
-    pub fn connect<A: ToSocketAddrs>(&self, _: A) -> io::Result<()> {
-        self.0
+    pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+        let addrs = addr.to_socket_addrs()?;
+        for a in addrs {
+            let self_mut = unsafe { &mut *(self as *const Self as *mut Self) };
+            self_mut.connected_addr = Some(a);
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no addresses resolved",
+        ))
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        // ソケットを自動クローズ（エラーは無視）
+        let payload = self.socket_id.to_le_bytes();
+        let mut resp = [0u8; 32];
+        let _ = netd_request(OPCODE_UDP_CLOSE, &payload, &mut resp);
     }
 }
 
 impl fmt::Debug for UdpSocket {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UdpSocket")
+            .field("socket_id", &self.socket_id)
+            .field("local_addr", &self.local_addr)
+            .field("connected_addr", &self.connected_addr)
+            .finish()
     }
 }
 
