@@ -1159,6 +1159,9 @@ impl Shell {
             // 1. メモリアロケータのテスト
             run_test("memory_allocator", this.test_memory_allocator());
 
+            // 1.1. スラブアロケータのテスト
+            run_test("slab_allocator", crate::slab_allocator::test_slab_allocator());
+
             // 1.5. メモリマッピングの整合性テスト
             run_test("memory_mapping", this.test_memory_mapping());
 

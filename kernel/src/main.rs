@@ -24,6 +24,7 @@ mod procfs;
 mod rtc;
 mod scheduler;
 mod serial;
+mod slab_allocator;
 mod pci;
 mod shell;
 mod syscall;

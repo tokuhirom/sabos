@@ -4,14 +4,15 @@
 // グローバルアロケータ (#[global_allocator]) が必要。
 // no_std 環境にはデフォルトのアロケータがないので、自分で用意する。
 //
-// ここでは linked_list_allocator crate を使う。
-// フリーリスト方式のアロケータで、解放されたメモリブロックを
-// リンクリストで管理する。シンプルだが実用的。
+// 自作のスラブアロケータ（slab_allocator.rs）を使う。
+// サイズクラス別にスロットを管理し、alloc/dealloc を O(1) で行う。
+// 従来の linked_list_allocator (O(n)) から自前実装に置き換え、
+// パフォーマンスの向上と学習を兼ねている。
 //
 // ヒープ領域は UEFI メモリマップの CONVENTIONAL 領域から確保する。
 // もし確保に失敗した場合は、BSS の固定領域にフォールバックする。
 
-use linked_list_allocator::LockedHeap;
+use crate::slab_allocator::LockedSlabAllocator;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapOwned, MemoryType};
 use core::alloc::Layout;
 
@@ -39,10 +40,10 @@ static mut HEAP_FROM_CONVENTIONAL: bool = false;
 /// グローバルアロケータ。
 /// #[global_allocator] で指定すると、alloc crate（Vec, Box, String 等）が
 /// このアロケータを使ってメモリを確保/解放する。
-/// LockedHeap は内部で spin lock を使うので、割り込みハンドラからの
+/// LockedSlabAllocator は内部で spin lock を使うので、割り込みハンドラからの
 /// 同時アクセスにも（一応）安全。
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: LockedSlabAllocator = LockedSlabAllocator::new();
 
 /// ヒープアロケータを初期化する。
 /// GDT/IDT の初期化後、alloc を使う前に呼ぶこと。
@@ -52,7 +53,7 @@ pub fn init(memory_map: &MemoryMapOwned) {
             HEAP_START = start;
             HEAP_SIZE = size;
             HEAP_FROM_CONVENTIONAL = true;
-            ALLOCATOR.lock().init(start as *mut u8, size as usize);
+            ALLOCATOR.init(start as usize, size as usize);
         }
         crate::kprintln!(
             "Heap region: {:#x} - {:#x} ({} MiB)",
@@ -69,9 +70,7 @@ pub fn init(memory_map: &MemoryMapOwned) {
         HEAP_START = heap_start;
         HEAP_SIZE = HEAP_SIZE_FALLBACK as u64;
         HEAP_FROM_CONVENTIONAL = false;
-        ALLOCATOR
-            .lock()
-            .init(heap_start as *mut u8, HEAP_SIZE_FALLBACK);
+        ALLOCATOR.init(heap_start as usize, HEAP_SIZE_FALLBACK);
     }
     crate::kprintln!(
         "Heap fallback: {:#x} - {:#x} ({} MiB)",

@@ -356,7 +356,9 @@ impl<D: BlockDevice> Fat32Fs<D> {
     }
 
     fn read_file_data(&mut self, entry: &DirEntry) -> Result<Vec<u8>, &'static str> {
-        let mut data = Vec::new();
+        // ファイルサイズが分かっているので、事前に容量を確保して
+        // Vec の倍々成長による一時メモリ消費を回避する
+        let mut data = Vec::with_capacity(entry.size as usize);
         let mut remaining = entry.size as usize;
         let mut cluster = entry.first_cluster;
         if cluster == 0 {
