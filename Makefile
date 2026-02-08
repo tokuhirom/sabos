@@ -73,7 +73,21 @@ patch-sysroot:
 # RUSTUP_TOOLCHAIN=nightly と -Zjson-target-spec が必要。
 # release ビルドにすることでバイナリサイズを大幅に削減する（6.4MB → 29KB）。
 # debug ビルドではカーネルヒープの OOM が発生するため release 必須。
+#
+# sysroot パッチ（rust-std-sabos/ 内のファイル）が変更された場合、
+# ビルド済みの std .rlib が古くなるため cargo clean が必要。
+# パッチファイルのハッシュを .sysroot-hash に記録して、
+# 変更を検出したら自動で cargo clean する。
+SYSROOT_HASH_FILE = user-std/.sysroot-hash
 build-user-std:
+	@NEW_HASH=$$(find rust-std-sabos/ -type f | sort | xargs sha256sum | sha256sum | cut -d' ' -f1); \
+	OLD_HASH=$$(cat $(SYSROOT_HASH_FILE) 2>/dev/null || echo ""); \
+	if [ "$$NEW_HASH" != "$$OLD_HASH" ]; then \
+		echo "sysroot パッチが変更されたため cargo clean を実行..."; \
+		cd user-std && cargo clean; \
+		cd ..; \
+		echo "$$NEW_HASH" > $(SYSROOT_HASH_FILE); \
+	fi
 	cd user-std && RUSTUP_TOOLCHAIN=nightly cargo -Zjson-target-spec build --release
 
 $(ESP_DIR):
