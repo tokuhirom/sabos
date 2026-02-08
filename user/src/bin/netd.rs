@@ -29,6 +29,10 @@ const OPCODE_TCP_RECV: u32 = 4;
 const OPCODE_TCP_CLOSE: u32 = 5;
 const OPCODE_TCP_LISTEN: u32 = 6;
 const OPCODE_TCP_ACCEPT: u32 = 7;
+const OPCODE_UDP_BIND: u32 = 8;
+const OPCODE_UDP_SEND_TO: u32 = 9;
+const OPCODE_UDP_RECV_FROM: u32 = 10;
+const OPCODE_UDP_CLOSE: u32 = 11;
 
 const IPC_BUF_SIZE: usize = 2048;
 const IPC_RECV_TIMEOUT_MS: u64 = 10;
@@ -173,6 +177,81 @@ fn netd_loop() -> ! {
                         Err(err) => {
                             status = map_netstack_error(err);
                         }
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            // ========================================
+            // UDP オペコード (8-11)
+            // ========================================
+            OPCODE_UDP_BIND => {
+                // payload: [port: u16 LE]
+                if payload.len() == 2 {
+                    let port = u16::from_le_bytes([payload[0], payload[1]]);
+                    match netstack::udp_bind(port) {
+                        Ok(socket_id) => {
+                            // レスポンス: [socket_id: u32 LE][local_port: u16 LE]
+                            let local_port = netstack::udp_local_port(socket_id).unwrap_or(port);
+                            resp_len = 6;
+                            resp[12..16].copy_from_slice(&socket_id.to_le_bytes());
+                            resp[16..18].copy_from_slice(&local_port.to_le_bytes());
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            OPCODE_UDP_SEND_TO => {
+                // payload: [socket_id: u32][dst_ip: 4B][dst_port: u16 LE][data...]
+                if payload.len() >= 10 {
+                    let socket_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let dst_ip = [payload[4], payload[5], payload[6], payload[7]];
+                    let dst_port = u16::from_le_bytes([payload[8], payload[9]]);
+                    let data = &payload[10..];
+                    if let Err(err) = netstack::udp_send_to(socket_id, dst_ip, dst_port, data) {
+                        status = map_netstack_error(err);
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            OPCODE_UDP_RECV_FROM => {
+                // payload: [socket_id: u32][max_len: u32 LE][timeout_ms: u64 LE]
+                if payload.len() == 16 {
+                    let socket_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let max_len = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+                    let timeout = u64::from_le_bytes([
+                        payload[8], payload[9], payload[10], payload[11],
+                        payload[12], payload[13], payload[14], payload[15],
+                    ]);
+                    match netstack::udp_recv_from(socket_id, timeout) {
+                        Ok((src_ip, src_port, data)) => {
+                            // レスポンス: [src_ip: 4B][src_port: u16 LE][data...]
+                            let data_cap = core::cmp::min(max_len, data.len());
+                            let data_cap = core::cmp::min(data_cap, resp.len() - 12 - 6);
+                            resp_len = 6 + data_cap;
+                            resp[12..16].copy_from_slice(&src_ip);
+                            resp[16..18].copy_from_slice(&src_port.to_le_bytes());
+                            resp[18..18 + data_cap].copy_from_slice(&data[..data_cap]);
+                        }
+                        Err(err) => {
+                            status = map_netstack_error(err);
+                        }
+                    }
+                } else {
+                    status = -1;
+                }
+            }
+            OPCODE_UDP_CLOSE => {
+                // payload: [socket_id: u32 LE]
+                if payload.len() == 4 {
+                    let socket_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if let Err(err) = netstack::udp_close(socket_id) {
+                        status = map_netstack_error(err);
                     }
                 } else {
                     status = -1;
