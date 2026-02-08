@@ -30,7 +30,7 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
 | **os** | ✅ 実装済み | exit/getpid + getcwd/temp_dir/home_dir |
 | **thread** | ❌ unsupported | `std::thread::spawn()` はエラーを返す |
 | **time** | ✅ 実装済み | SYS_CLOCK_MONOTONIC ベースの Instant（SystemTime は未対応） |
-| **process** | ❌ unsupported | `std::process::Command` はエラーを返す |
+| **process** | ✅ 実装済み | SYS_SPAWN/SYS_WAIT/SYS_KILL ベースの Command/Child（パイプ未対応） |
 | **sync** | ✅ 設定済み | `no_threads` モード（シングルスレッド用） |
 
 ## TODO リスト
@@ -100,11 +100,12 @@ Phase 9 まで完了し、`std::env::args()` + 外部クレート（`serde_json`
   - thread_local は `no_threads` → `thread_local_key` に切り替えが必要
   - 影響: `rayon`, `tokio`, `crossbeam` などの並行処理クレートが使えるようになる
 
-- [ ] **PAL process の実装**
+- [x] **PAL process の実装**
   - 難易度: ★★☆☆☆
-  - SYS_EXEC / SYS_SPAWN / SYS_WAIT が既にあるので PAL に接続するだけ
-  - `std::process::Command::new("/FOO.ELF").arg("bar").spawn()` が動くようになる
-  - `std::process::exit()` は既に動作中
+  - SYS_SPAWN / SYS_WAIT / SYS_KILL を PAL に接続
+  - `std::process::Command::new("/FOO.ELF").arg("bar").spawn()` が動作確認済み
+  - `Command::status()` / `Child::wait()` / `Child::kill()` が動作
+  - パイプ（stdin/stdout/stderr リダイレクト）は未対応
 
 - [ ] **SystemTime の実装**
   - 難易度: ★★★☆☆

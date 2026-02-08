@@ -462,6 +462,21 @@ if [ "$hellostd_ok" = true ]; then
     else
         echo -e "${RED}  net::tcp_parse FAILED${NC}"
     fi
+    if grep_after "$base" "process::status OK"; then
+        echo -e "${GREEN}  process::status OK${NC}"
+    else
+        echo -e "${RED}  process::status FAILED${NC}"
+    fi
+    if grep_after "$base" "process::spawn OK"; then
+        echo -e "${GREEN}  process::spawn OK${NC}"
+    else
+        echo -e "${RED}  process::spawn FAILED${NC}"
+    fi
+    if grep_after "$base" "process::wait OK"; then
+        echo -e "${GREEN}  process::wait OK${NC}"
+    else
+        echo -e "${RED}  process::wait FAILED${NC}"
+    fi
     if grep_after "$base" "serde::to_string OK"; then
         echo -e "${GREEN}  serde::to_string OK${NC}"
     else

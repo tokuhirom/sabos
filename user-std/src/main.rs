@@ -139,6 +139,33 @@ fn main() {
     let addr: std::net::SocketAddr = "10.0.2.2:80".parse().unwrap();
     println!("net::tcp_parse OK: {}", addr);
 
+    // === std::process テスト ===
+
+    // std::process::Command テスト（SYS_SPAWN + SYS_WAIT 経由）
+    // EXIT0.ELF は正常終了（exit code 0）するだけのプログラム
+    match std::process::Command::new("/EXIT0.ELF").status() {
+        Ok(status) => {
+            if status.success() {
+                println!("process::status OK: exit_code=0");
+            } else {
+                println!("process::status FAIL: exit_code={:?}", status.code());
+            }
+        }
+        Err(e) => println!("process::status error: {}", e),
+    }
+
+    // Command::new().arg().spawn().wait() のテスト
+    match std::process::Command::new("/EXIT0.ELF").spawn() {
+        Ok(mut child) => {
+            println!("process::spawn OK: id={}", child.id());
+            match child.wait() {
+                Ok(status) => println!("process::wait OK: success={}", status.success()),
+                Err(e) => println!("process::wait error: {}", e),
+            }
+        }
+        Err(e) => println!("process::spawn error: {}", e),
+    }
+
     // === serde_json テスト ===
 
     // 外部クレート（serde + serde_json）がビルド・動作するかの検証
