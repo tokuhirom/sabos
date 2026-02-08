@@ -1623,20 +1623,35 @@ fn cmd_lspci() {
 /// 指定した ELF ファイルを読み込んで同期実行する。
 /// プログラムが終了するまでシェルはブロックする。
 fn cmd_run(args: &str, state: &ShellState) {
-    let filename = args.trim();
-    if filename.is_empty() {
-        syscall::write_str("Usage: run <FILENAME>\n");
-        syscall::write_str("  Example: run HELLO.ELF\n");
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        syscall::write_str("Usage: run <FILENAME> [args...]\n");
+        syscall::write_str("  Example: run HELLO.ELF arg1 arg2\n");
         return;
     }
+
+    // スペースで分割: 最初の要素がパス、残りが引数
+    let mut parts = trimmed.splitn(2, ' ');
+    let filename = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
     syscall::write_str("Running ");
     syscall::write_str(&abs_path);
+    if !rest.is_empty() {
+        syscall::write_str(" ");
+        syscall::write_str(rest);
+    }
     syscall::write_str("...\n");
 
-    let result = syscall::exec(&abs_path);
+    // 引数をスペース分割して配列化
+    let result = if rest.is_empty() {
+        syscall::exec(&abs_path)
+    } else {
+        let arg_strs: Vec<&str> = rest.split_whitespace().collect();
+        syscall::exec_with_args(&abs_path, &arg_strs)
+    };
 
     if result < 0 {
         syscall::write_str("Error: Failed to run program\n");
@@ -1651,21 +1666,36 @@ fn cmd_run(args: &str, state: &ShellState) {
 /// 指定した ELF ファイルを読み込んでバックグラウンドで実行する。
 /// 即座にシェルに戻り、プログラムはスケジューラで管理される。
 fn cmd_spawn(args: &str, state: &ShellState) {
-    let filename = args.trim();
-    if filename.is_empty() {
-        syscall::write_str("Usage: spawn <FILENAME>\n");
-        syscall::write_str("  Example: spawn HELLO.ELF\n");
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        syscall::write_str("Usage: spawn <FILENAME> [args...]\n");
+        syscall::write_str("  Example: spawn HELLO.ELF arg1 arg2\n");
         syscall::write_str("  The process runs in the background. Use 'ps' to see tasks.\n");
         return;
     }
+
+    // スペースで分割: 最初の要素がパス、残りが引数
+    let mut parts = trimmed.splitn(2, ' ');
+    let filename = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
 
     let abs_path = resolve_path(&state.cwd_text, filename);
 
     syscall::write_str("Spawning ");
     syscall::write_str(&abs_path);
+    if !rest.is_empty() {
+        syscall::write_str(" ");
+        syscall::write_str(rest);
+    }
     syscall::write_str("...\n");
 
-    let result = syscall::spawn(&abs_path);
+    // 引数をスペース分割して配列化
+    let result = if rest.is_empty() {
+        syscall::spawn(&abs_path)
+    } else {
+        let arg_strs: Vec<&str> = rest.split_whitespace().collect();
+        syscall::spawn_with_args(&abs_path, &arg_strs)
+    };
 
     if result < 0 {
         syscall::write_str("Error: Failed to spawn process\n");
