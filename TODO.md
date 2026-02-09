@@ -5,10 +5,10 @@
 ## 短期目標（そろそろやりたい）
 
 ### HELLOSTD.ELF の残バグ修正
-- [ ] netd との IPC タイムアウト問題
-  - HELLOSTD.ELF から `std::net::TcpStream` や `UdpSocket` を使うと IPC recv がタイムアウトする
-  - no_std の shell selftest_net からは同じ操作が成功する
-  - 原因: HELLOSTD.ELF が前のテスト（fs, time, env）を実行した後のタイミング問題の可能性
+- [x] ~~netd との IPC タイムアウト問題~~ → IPC recv ループ修正で対応済み
+  - 原因: recv() が1回の sleep-wake サイクルで終了し、タイマー起床時に即 Timeout を返していた
+  - 修正: recv/recv_typed/recv_with_handle をタイムアウトまでループする方式に変更
+  - 注: HELLOSTD.ELF の net テストはまだフレーキー（QEMU ネットワークのタイミング問題の可能性）
 - [x] ~~HELLOSTD.ELF 後のカーネルパニック（INVALID OPCODE #UD）~~ → 修正済み
   - 原因: SAVED_RSP/SAVED_RBP がグローバル変数で、子プロセス/スレッドが上書きしていた
   - 修正: タスクごとにバックアップを取り、コンテキストスイッチ時に退避・復帰
@@ -19,15 +19,16 @@
   - PCM バッファへのオーディオデータ書き込みと再生開始が未実装
 
 ### ネットワーク selftest の安定化
-- [ ] net selftest で DNS/TCP/UDP/IPv6 テストが CI で安定して PASS するようにする
-  - 現状: net_init_netd と net_addr_types のみ PASS（2/6）
-  - DNS lookup、TCP HTTP GET、UDP DNS query、IPv6 ping が FAIL
-  - QEMU SLIRP のタイミング問題の可能性
+- [ ] net selftest で全テストが CI で安定して PASS するようにする
+  - 現状: 5/6 PASS（net_ipv6_ping のみ FAIL）
+  - IPv6 ping は QEMU の ipv6=on 設定が IPv4 と排他的に動作する問題あり
+  - HELLOSTD.ELF の net テストもフレーキー（タイミング依存）
 
 ### IPC 基盤の改善
 - [x] タイムアウト/キャンセルの改善
   - recv を Sleep/Wake 方式に改修（ポーリング廃止、CPU 浪費削減）
   - SYS_IPC_CANCEL(92) で recv 待ちをキャンセル可能に
+  - recv をタイムアウトまでループするよう修正（1回 sleep-wake で諦めていたバグを修正）
 - [x] IPC 経由の Capability 委譲の実装
   - SYS_IPC_SEND_HANDLE(93) / SYS_IPC_RECV_HANDLE(94) を追加
   - duplicate_handle でハンドルを複製して送信
