@@ -31,9 +31,11 @@
 - [ ] IPC パフォーマンスの計測と最適化
 
 ### Capability ベースの実装を日常運用に
-- [ ] ユーザーシェルをハンドル API に移行
-  - パスベース API を最小限に縮小
-  - openat + restrict_rights でサンドボックス化
+- [x] ユーザーシェルをハンドル API に移行
+  - write/rm/mkdir/rmdir を handle_create_file/handle_unlink/handle_mkdir に移行
+  - SYS_HANDLE_CREATE_FILE(140), SYS_HANDLE_UNLINK(141), SYS_HANDLE_MKDIR(142) を追加
+  - cwd_handle がフルアクセス権限（CREATE/DELETE 含む）を持つように変更
+  - openat が親ハンドルの権限を引き継ぐように修正
 - [ ] すべてのファイル操作を VFS 経由に統一
   - procfs も VFS の子として扱う
   - JSON 出力の統一

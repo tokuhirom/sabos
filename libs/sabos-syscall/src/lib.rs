@@ -24,6 +24,7 @@
 // - スレッド: 110-119
 // - Futex: 120-129
 // - 時刻: 130-139
+// - ファイルハンドル操作拡張: 140-149
 
 #![no_std]
 
@@ -152,3 +153,10 @@ pub const SYS_FUTEX: u64 = 120;         // futex(addr, op, val, timeout_ms) — 
 // 時刻 (130-139)
 // =================================================================
 pub const SYS_CLOCK_REALTIME: u64 = 130; // clock_realtime() — UNIX エポックからの秒数を返す
+
+// =================================================================
+// ファイルハンドル操作拡張 (140-149)
+// =================================================================
+pub const SYS_HANDLE_CREATE_FILE: u64 = 140; // handle_create_file(dir_handle_ptr, name_ptr, name_len, out_handle_ptr) — ディレクトリ内にファイルを作成
+pub const SYS_HANDLE_UNLINK: u64 = 141;      // handle_unlink(dir_handle_ptr, name_ptr, name_len) — ディレクトリ内のファイル/ディレクトリを削除
+pub const SYS_HANDLE_MKDIR: u64 = 142;       // handle_mkdir(dir_handle_ptr, name_ptr, name_len) — ディレクトリ内にサブディレクトリを作成

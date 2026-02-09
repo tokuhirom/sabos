@@ -365,16 +365,21 @@ fn pipeline_sed(args: &str, state: &ShellState, input: Option<&str>) -> Result<S
 
 /// ルートディレクトリのハンドルを開く
 fn open_root_dir() -> Result<syscall::Handle, syscall::SyscallResult> {
-    syscall::open("/", syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+    // フルアクセス権限で開く（CREATE/DELETE を含む）
+    // ls/cat 等の read-only 操作は handle 側の権限で制御されるため問題ない
+    syscall::open("/", syscall::HANDLE_RIGHTS_DIRECTORY)
 }
 
-/// 引数からディレクトリハンドルを開く
+/// 引数からディレクトリハンドルを開く（フルアクセス）
+///
+/// cd/pushd で cwd_handle として保持するため、CREATE/DELETE を含むフル権限で開く。
+/// ls 等の read-only 操作では開いた後に ENUM 権限のみ使うため問題ない。
 fn open_dir_from_args(state: &ShellState, args: &str) -> Result<syscall::Handle, &'static str> {
     if args.starts_with('/') {
-        syscall::open(args, syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+        syscall::open(args, syscall::HANDLE_RIGHTS_DIRECTORY)
             .map_err(|_| "Error: Failed to open directory")
     } else {
-        syscall::openat(&state.cwd_handle, args, syscall::HANDLE_RIGHTS_DIRECTORY_READ)
+        syscall::openat(&state.cwd_handle, args, syscall::HANDLE_RIGHTS_DIRECTORY)
             .map_err(|_| "Error: Failed to open directory")
     }
 }
@@ -439,6 +444,46 @@ fn normalize_path(path: &str) -> String {
         result.push_str(part);
     }
     result
+}
+
+/// パスから親ディレクトリハンドルとファイル名を分離する
+///
+/// 絶対パスなら "/" を基点に、相対パスなら cwd_handle を基点にする。
+/// "SUBDIR/FILE" のようなネストしたパスも対応する。
+///
+/// 戻り値: (dir_handle, name, need_close)
+/// need_close が true の場合、呼び出し元が dir_handle を close する責任がある。
+fn resolve_dir_and_name<'a>(state: &ShellState, path: &'a str) -> Result<(syscall::Handle, &'a str, bool), &'static str> {
+    // パスの最後の "/" で親ディレクトリとファイル名を分離
+    if let Some(pos) = path.rfind('/') {
+        let dir_part = &path[..pos];
+        let name = &path[pos + 1..];
+        if name.is_empty() {
+            return Err("Error: Empty filename");
+        }
+        // 絶対パスの場合
+        if path.starts_with('/') {
+            if dir_part.is_empty() {
+                // "/FILE" の場合 — ルートディレクトリを開く
+                let dir = syscall::open("/", syscall::HANDLE_RIGHTS_DIRECTORY)
+                    .map_err(|_| "Error: Failed to open root directory")?;
+                Ok((dir, name, true))
+            } else {
+                // "/SUBDIR/FILE" の場合
+                let dir = syscall::open(dir_part, syscall::HANDLE_RIGHTS_DIRECTORY)
+                    .map_err(|_| "Error: Failed to open directory")?;
+                Ok((dir, name, true))
+            }
+        } else {
+            // 相対パス "SUBDIR/FILE" — cwd_handle から openat
+            let dir = syscall::openat(&state.cwd_handle, dir_part, syscall::HANDLE_RIGHTS_DIRECTORY)
+                .map_err(|_| "Error: Failed to open directory")?;
+            Ok((dir, name, true))
+        }
+    } else {
+        // "/" を含まないシンプルなファイル名 — cwd_handle をそのまま使う
+        Ok((state.cwd_handle, path, false))
+    }
 }
 
 /// echo コマンド: 引数をそのまま出力
@@ -1124,7 +1169,10 @@ fn pipeline_grep(args: &str, state: &ShellState, input: Option<&str>) -> Result<
     Ok(grep_apply(text, opts.pattern, opts.case_insensitive, opts.invert, opts.count_only))
 }
 
-/// write コマンド: ファイルを作成/上書き
+/// write コマンド: ファイルを作成/上書き（ハンドルベース）
+///
+/// ディレクトリハンドルの CREATE 権限を使ってファイルを作成し、
+/// handle_write で内容を書き込み、handle_close で閉じる。
 fn cmd_write(args: &str, state: &ShellState) {
     // ファイル名とデータを分割
     let (filename, data) = split_command(args);
@@ -1134,34 +1182,75 @@ fn cmd_write(args: &str, state: &ShellState) {
         return;
     }
 
-    let abs_path = resolve_path(&state.cwd_text, filename);
+    // 親ディレクトリハンドルとファイル名を解決
+    let (dir_handle, name, need_close) = match resolve_dir_and_name(state, filename) {
+        Ok(v) => v,
+        Err(e) => {
+            syscall::write_str(e);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
-    if syscall::file_write(&abs_path, data.as_bytes()) < 0 {
-        syscall::write_str("Error: Failed to write file\n");
-        return;
+    // ファイルを作成して書き込み可能なハンドルを取得
+    let file_handle = match syscall::handle_create_file(&dir_handle, name) {
+        Ok(h) => h,
+        Err(_) => {
+            syscall::write_str("Error: Failed to create file\n");
+            if need_close { let _ = syscall::handle_close(&dir_handle); }
+            return;
+        }
+    };
+
+    // データを書き込み
+    if !data.is_empty() {
+        if syscall::handle_write(&file_handle, data.as_bytes()) < 0 {
+            syscall::write_str("Error: Failed to write data\n");
+            let _ = syscall::handle_close(&file_handle);
+            if need_close { let _ = syscall::handle_close(&dir_handle); }
+            return;
+        }
     }
+
+    // ハンドルを閉じる（フラッシュ）
+    let _ = syscall::handle_close(&file_handle);
+    if need_close { let _ = syscall::handle_close(&dir_handle); }
 
     syscall::write_str("File written successfully\n");
 }
 
-/// rm コマンド: ファイルを削除
+/// rm コマンド: ファイルを削除（ハンドルベース）
+///
+/// ディレクトリハンドルの DELETE 権限を使ってファイルを削除する。
 fn cmd_rm(args: &str, state: &ShellState) {
     if args.is_empty() {
         syscall::write_str("Usage: rm <filename>\n");
         return;
     }
 
-    let abs_path = resolve_path(&state.cwd_text, args);
+    // 親ディレクトリハンドルとファイル名を解決
+    let (dir_handle, name, need_close) = match resolve_dir_and_name(state, args) {
+        Ok(v) => v,
+        Err(e) => {
+            syscall::write_str(e);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
-    if syscall::file_delete(&abs_path) < 0 {
+    if syscall::handle_unlink(&dir_handle, name) < 0 {
         syscall::write_str("Error: Failed to delete file\n");
+        if need_close { let _ = syscall::handle_close(&dir_handle); }
         return;
     }
 
+    if need_close { let _ = syscall::handle_close(&dir_handle); }
     syscall::write_str("File deleted successfully\n");
 }
 
-/// mkdir コマンド: ディレクトリを作成
+/// mkdir コマンド: ディレクトリを作成（ハンドルベース）
+///
+/// ディレクトリハンドルの CREATE 権限を使ってサブディレクトリを作成する。
 fn cmd_mkdir(args: &str, state: &ShellState) {
     let name = args.trim();
     if name.is_empty() {
@@ -1169,17 +1258,30 @@ fn cmd_mkdir(args: &str, state: &ShellState) {
         return;
     }
 
-    let abs_path = resolve_path(&state.cwd_text, name);
+    // 親ディレクトリハンドルとディレクトリ名を解決
+    let (dir_handle, child_name, need_close) = match resolve_dir_and_name(state, name) {
+        Ok(v) => v,
+        Err(e) => {
+            syscall::write_str(e);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
-    if syscall::dir_create(&abs_path) < 0 {
+    if syscall::handle_mkdir(&dir_handle, child_name) < 0 {
         syscall::write_str("Error: Failed to create directory\n");
+        if need_close { let _ = syscall::handle_close(&dir_handle); }
         return;
     }
 
+    if need_close { let _ = syscall::handle_close(&dir_handle); }
     syscall::write_str("Directory created successfully\n");
 }
 
-/// rmdir コマンド: 空のディレクトリを削除
+/// rmdir コマンド: 空のディレクトリを削除（ハンドルベース）
+///
+/// ディレクトリハンドルの DELETE 権限を使って空ディレクトリを削除する。
+/// 内部的には handle_unlink を使用（ファイル/ディレクトリ両方に対応）。
 fn cmd_rmdir(args: &str, state: &ShellState) {
     let name = args.trim();
     if name.is_empty() {
@@ -1187,13 +1289,23 @@ fn cmd_rmdir(args: &str, state: &ShellState) {
         return;
     }
 
-    let abs_path = resolve_path(&state.cwd_text, name);
+    // 親ディレクトリハンドルとディレクトリ名を解決
+    let (dir_handle, child_name, need_close) = match resolve_dir_and_name(state, name) {
+        Ok(v) => v,
+        Err(e) => {
+            syscall::write_str(e);
+            syscall::write_str("\n");
+            return;
+        }
+    };
 
-    if syscall::dir_remove(&abs_path) < 0 {
+    if syscall::handle_unlink(&dir_handle, child_name) < 0 {
         syscall::write_str("Error: Failed to remove directory\n");
+        if need_close { let _ = syscall::handle_close(&dir_handle); }
         return;
     }
 
+    if need_close { let _ = syscall::handle_close(&dir_handle); }
     syscall::write_str("Directory removed successfully\n");
 }
 

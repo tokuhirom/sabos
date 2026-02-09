@@ -215,6 +215,29 @@ Capability-based security を実現するためのハンドル操作。
   - `whence`: 0=SEEK_SET（先頭から）, 1=SEEK_CUR（現在位置から）, 2=SEEK_END（末尾から）
   - 範囲外は 0 〜 ファイルサイズにクランプ
 
+## ファイルハンドル操作拡張 (140-149)
+
+ディレクトリハンドルの CREATE/DELETE 権限を使って、ファイルの作成・削除・ディレクトリ作成を行う。
+パスベース API（SYS_FILE_WRITE 等）のハンドルベース代替。
+
+- `140` `SYS_HANDLE_CREATE_FILE(dir_handle_ptr, name_ptr, name_len, out_handle_ptr) -> 0`
+  - ディレクトリハンドル内にファイルを作成し、RW 権限付きハンドルを返す
+  - CREATE 権限が必要
+  - ファイル名に "/" や ".." を含んではいけない
+  - 既存ファイルがあれば上書き（削除→作成）
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+
+- `141` `SYS_HANDLE_UNLINK(dir_handle_ptr, name_ptr, name_len) -> 0`
+  - ディレクトリハンドル内のファイルまたは空ディレクトリを削除
+  - DELETE 権限が必要
+  - まずファイルとして削除を試み、失敗したらディレクトリとして削除
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+
+- `142` `SYS_HANDLE_MKDIR(dir_handle_ptr, name_ptr, name_len) -> 0`
+  - ディレクトリハンドル内にサブディレクトリを作成
+  - CREATE 権限が必要
+  - /proc 配下は書き込み禁止（ReadOnly エラー）
+
 ## ブロックデバイス (80-89)
 
 - `80` `SYS_BLOCK_READ(sector, buf_ptr, len) -> n`

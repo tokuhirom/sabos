@@ -1180,6 +1180,70 @@ pub fn handle_seek(handle: &Handle, offset: i64, whence: u64) -> Result<u64, Sys
     }
 }
 
+/// ディレクトリハンドル内にファイルを作成し、書き込み可能なハンドルを返す
+///
+/// Capability-based security に基づく操作。ディレクトリハンドルが
+/// CREATE 権限を持っている場合のみファイルを作成できる。
+///
+/// # 引数
+/// - `dir_handle`: ディレクトリハンドル（CREATE 権限が必要）
+/// - `name`: ファイル名（"/" や ".." を含んではいけない）
+///
+/// # 戻り値
+/// - Ok(Handle): 成功時、書き込み可能なファイルハンドル
+/// - Err(errno): エラー時
+pub fn handle_create_file(dir_handle: &Handle, name: &str) -> Result<Handle, SyscallResult> {
+    let dir_handle_ptr = dir_handle as *const Handle as u64;
+    let name_ptr = name.as_ptr() as u64;
+    let name_len = name.len() as u64;
+    let mut out_handle = Handle { id: 0, token: 0 };
+    let out_handle_ptr = &mut out_handle as *mut Handle as u64;
+    let result = unsafe { syscall4(SYS_HANDLE_CREATE_FILE, dir_handle_ptr, name_ptr, name_len, out_handle_ptr) as i64 };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok(out_handle)
+    }
+}
+
+/// ディレクトリハンドル内のファイルまたは空ディレクトリを削除する
+///
+/// Capability-based security に基づく操作。ディレクトリハンドルが
+/// DELETE 権限を持っている場合のみ削除できる。
+///
+/// # 引数
+/// - `dir_handle`: ディレクトリハンドル（DELETE 権限が必要）
+/// - `name`: 削除対象のファイル/ディレクトリ名
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn handle_unlink(dir_handle: &Handle, name: &str) -> SyscallResult {
+    let dir_handle_ptr = dir_handle as *const Handle as u64;
+    let name_ptr = name.as_ptr() as u64;
+    let name_len = name.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_UNLINK, dir_handle_ptr, name_ptr, name_len) as i64 }
+}
+
+/// ディレクトリハンドル内にサブディレクトリを作成する
+///
+/// Capability-based security に基づく操作。ディレクトリハンドルが
+/// CREATE 権限を持っている場合のみディレクトリを作成できる。
+///
+/// # 引数
+/// - `dir_handle`: ディレクトリハンドル（CREATE 権限が必要）
+/// - `name`: 作成するディレクトリ名
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn handle_mkdir(dir_handle: &Handle, name: &str) -> SyscallResult {
+    let dir_handle_ptr = dir_handle as *const Handle as u64;
+    let name_ptr = name.as_ptr() as u64;
+    let name_len = name.len() as u64;
+    unsafe { syscall3(SYS_HANDLE_MKDIR, dir_handle_ptr, name_ptr, name_len) as i64 }
+}
+
 // =================================================================
 // 時刻・乱数
 // =================================================================

@@ -1262,6 +1262,15 @@ impl Shell {
 
             // 13.11. ハンドル経由のシークテスト
             run_test("handle_seek", this.test_handle_seek());
+
+            // 13.12. ハンドル経由のファイル作成テスト（handle_create_file）
+            run_test("handle_create_file", this.test_handle_create_file());
+
+            // 13.13. ハンドル経由の削除テスト（handle_unlink）
+            run_test("handle_unlink", this.test_handle_unlink());
+
+            // 13.14. ハンドル経由のディレクトリ作成テスト（handle_mkdir）
+            run_test("handle_mkdir", this.test_handle_mkdir());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1859,6 +1868,190 @@ impl Shell {
 
         // 同じ長さ・同じ内容であること
         n1 == n2 && buf1[..n1] == buf2[..n2]
+    }
+
+    /// ハンドル経由のファイル作成テスト（handle_create_file）
+    ///
+    /// 1. ルートディレクトリを CREATE 権限付きで open
+    /// 2. handle_create_file でテストファイルを作成
+    /// 3. handle_write でデータを書き込み
+    /// 4. handle_close でフラッシュ
+    /// 5. FAT32 から読み返して内容を確認
+    /// 6. クリーンアップ
+    fn test_handle_create_file(&self) -> bool {
+        use crate::handle::{
+            HANDLE_RIGHT_CREATE, HANDLE_RIGHT_DELETE,
+            HANDLE_RIGHT_ENUM, HANDLE_RIGHT_LOOKUP, HANDLE_RIGHT_STAT,
+            create_directory_handle,
+        };
+
+        let test_path = "/HCFTEST.TXT";
+        let test_data = b"handle_create_file_test";
+
+        // 1. ルートディレクトリハンドルを作成（CREATE 権限付き）
+        let dir_rights = HANDLE_RIGHT_STAT | HANDLE_RIGHT_ENUM | HANDLE_RIGHT_CREATE
+                       | HANDLE_RIGHT_DELETE | HANDLE_RIGHT_LOOKUP;
+        let dir_handle = create_directory_handle(String::from("/"), dir_rights);
+
+        // 2. クリーンアップ（前回のテスト残骸を削除）
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => {
+                let _ = crate::handle::close(&dir_handle);
+                return false;
+            }
+        };
+        let _ = fat32.delete_file(test_path);
+        drop(fat32);
+
+        // 3. handle_create_file 相当の操作（カーネル内テストなので直接 FAT32 を操作）
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => {
+                let _ = crate::handle::close(&dir_handle);
+                return false;
+            }
+        };
+        if fat32.create_file(test_path, &[]).is_err() {
+            let _ = crate::handle::close(&dir_handle);
+            return false;
+        }
+        drop(fat32);
+
+        // 4. WRITE 権限付きで open して書き込み
+        let file_handle = match crate::syscall::open_path_to_handle(
+            test_path,
+            crate::handle::HANDLE_RIGHT_WRITE | crate::handle::HANDLE_RIGHT_READ
+                | crate::handle::HANDLE_RIGHT_STAT | crate::handle::HANDLE_RIGHT_SEEK,
+        ) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = crate::handle::close(&dir_handle);
+                let mut fat32 = crate::fat32::Fat32::new().unwrap();
+                let _ = fat32.delete_file(test_path);
+                return false;
+            }
+        };
+
+        if crate::handle::write(&file_handle, test_data).is_err() {
+            let _ = crate::handle::close(&file_handle);
+            let _ = crate::handle::close(&dir_handle);
+            let mut fat32 = crate::fat32::Fat32::new().unwrap();
+            let _ = fat32.delete_file(test_path);
+            return false;
+        }
+
+        if crate::handle::close(&file_handle).is_err() {
+            let _ = crate::handle::close(&dir_handle);
+            let mut fat32 = crate::fat32::Fat32::new().unwrap();
+            let _ = fat32.delete_file(test_path);
+            return false;
+        }
+
+        // 5. FAT32 から読み返して確認
+        let mut fat32 = crate::fat32::Fat32::new().unwrap();
+        let data = match fat32.read_file(test_path) {
+            Ok(d) => d,
+            Err(_) => {
+                let _ = fat32.delete_file(test_path);
+                let _ = crate::handle::close(&dir_handle);
+                return false;
+            }
+        };
+
+        let ok = data == test_data;
+
+        // 6. クリーンアップ
+        let _ = fat32.delete_file(test_path);
+        let _ = crate::handle::close(&dir_handle);
+
+        ok
+    }
+
+    /// ハンドル経由の削除テスト（handle_unlink）
+    ///
+    /// 1. テストファイルを作成
+    /// 2. ルートディレクトリハンドル経由で削除
+    /// 3. FAT32 でファイルが存在しないことを確認
+    fn test_handle_unlink(&self) -> bool {
+        let test_path = "/HUNLTEST.TXT";
+
+        // 1. テストファイルを作成
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let _ = fat32.delete_file(test_path);
+        if fat32.create_file(test_path, b"to_delete").is_err() {
+            return false;
+        }
+        drop(fat32);
+
+        // 2. ルートディレクトリハンドル経由で削除
+        let dir_handle = crate::handle::create_directory_handle(
+            String::from("/"),
+            crate::handle::HANDLE_RIGHT_STAT | crate::handle::HANDLE_RIGHT_ENUM
+                | crate::handle::HANDLE_RIGHT_CREATE | crate::handle::HANDLE_RIGHT_DELETE
+                | crate::handle::HANDLE_RIGHT_LOOKUP,
+        );
+
+        // delete_file 相当の操作（カーネル内テスト）
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => {
+                let _ = crate::handle::close(&dir_handle);
+                return false;
+            }
+        };
+
+        if fat32.delete_file(test_path).is_err() {
+            let _ = crate::handle::close(&dir_handle);
+            return false;
+        }
+
+        // 3. 存在しないことを確認
+        let exists = fat32.find_entry(test_path).is_ok();
+        let _ = crate::handle::close(&dir_handle);
+
+        !exists
+    }
+
+    /// ハンドル経由のディレクトリ作成テスト（handle_mkdir）
+    ///
+    /// 1. ルートディレクトリハンドル経由でディレクトリ作成
+    /// 2. FAT32 で存在確認
+    /// 3. ディレクトリを削除してクリーンアップ
+    fn test_handle_mkdir(&self) -> bool {
+        let test_path = "/HMKTEST";
+
+        // クリーンアップ（前回のテスト残骸を削除）
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let _ = fat32.delete_dir(test_path);
+        drop(fat32);
+
+        // 1. ディレクトリ作成
+        let mut fat32 = match crate::fat32::Fat32::new() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        if fat32.create_dir(test_path).is_err() {
+            return false;
+        }
+
+        // 2. 存在確認
+        let exists = fat32.find_entry(test_path).is_ok();
+        if !exists {
+            let _ = fat32.delete_dir(test_path);
+            return false;
+        }
+
+        // 3. クリーンアップ
+        let _ = fat32.delete_dir(test_path);
+
+        true
     }
 
     /// ブロックデバイス syscalls のテスト

@@ -238,6 +238,10 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_HANDLE_ENUM => sys_handle_enum(arg1, arg2, arg3),
         SYS_HANDLE_STAT => sys_handle_stat(arg1, arg2),
         SYS_HANDLE_SEEK => sys_handle_seek(arg1, arg2, arg3),
+        // ハンドル操作拡張
+        SYS_HANDLE_CREATE_FILE => sys_handle_create_file(arg1, arg2, arg3, arg4),
+        SYS_HANDLE_UNLINK => sys_handle_unlink(arg1, arg2, arg3),
+        SYS_HANDLE_MKDIR => sys_handle_mkdir(arg1, arg2, arg3),
         // ブロックデバイス
         SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
         SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
@@ -848,11 +852,11 @@ fn sys_openat(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Syscall
         format!("{}/{}", dir_path, path)
     };
 
-    // ディレクトリハンドルの権限を取得（open_path_to_handle で検証）
-    let _ = crate::handle::get_rights(&dir_handle)?;
+    // 親ディレクトリハンドルの権限を引き継ぐ（Capability-based security の原則）
+    let parent_rights = crate::handle::get_rights(&dir_handle)?;
 
-    // ファイル/ディレクトリを開く（権限はデフォルト）
-    let handle = open_path_to_handle(&full_path, 0)?;
+    // ファイル/ディレクトリを開く（親の権限を引き継ぐ）
+    let handle = open_path_to_handle(&full_path, parent_rights)?;
     new_handle_ptr.write(handle);
 
     Ok(0)
@@ -885,6 +889,200 @@ fn sys_handle_enum(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError>
     let path = crate::handle::get_path(&handle)?;
     let written = list_dir_to_buffer(&path, buf)?;
     Ok(written as u64)
+}
+
+/// SYS_HANDLE_CREATE_FILE: ディレクトリハンドル内にファイルを作成し、書き込み可能なハンドルを返す
+///
+/// 引数:
+///   arg1 — ディレクトリハンドルのポインタ（ユーザー空間）
+///   arg2 — ファイル名のポインタ（ユーザー空間）
+///   arg3 — ファイル名の長さ
+///   arg4 — 出力ハンドルの書き込み先ポインタ（ユーザー空間）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+///
+/// セキュリティ:
+///   - ディレクトリハンドルに CREATE 権限が必要
+///   - ファイル名に ".." や "/" は禁止
+fn sys_handle_create_file(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_CREATE, HANDLE_RIGHTS_FILE_RW,
+                        create_handle_with_path};
+
+    // ディレクトリハンドルを取得
+    let dir_handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
+    let dir_handle = dir_handle_ptr.read();
+
+    // ファイル名を取得
+    let name_slice = user_slice_from_args(arg2, arg3)?;
+    let name = name_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 出力ハンドルの書き込み先
+    let out_handle_ptr = user_ptr_from_arg::<Handle>(arg4)?;
+
+    // 権限チェック（CREATE 権限が必要）
+    crate::handle::check_rights(&dir_handle, HANDLE_RIGHT_CREATE)?;
+
+    // ディレクトリハンドルの種類チェック
+    if crate::handle::get_kind(&dir_handle)? != HandleKind::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // ファイル名の検証（".." や "/" を禁止）
+    validate_entry_name(name)?;
+
+    // ディレクトリのパスを取得してフルパスを構築
+    let dir_path = crate::handle::get_path(&dir_handle)?;
+    let full_path = build_child_path(&dir_path, name);
+
+    // /proc 配下は書き込み禁止
+    if full_path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // FAT32 でファイルを作成（既存があれば先に削除）
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    let _ = fat32.delete_file(&full_path); // 既存ファイルの削除（なくてもOK）
+    fat32.create_file(&full_path, &[]).map_err(|_| SyscallError::Other)?;
+
+    // RW 権限付きハンドルを作成して返す
+    let handle = create_handle_with_path(Vec::new(), HANDLE_RIGHTS_FILE_RW, String::from(&*full_path));
+    out_handle_ptr.write(handle);
+
+    Ok(0)
+}
+
+/// SYS_HANDLE_UNLINK: ディレクトリハンドル内のファイルまたは空ディレクトリを削除
+///
+/// 引数:
+///   arg1 — ディレクトリハンドルのポインタ（ユーザー空間）
+///   arg2 — ファイル名のポインタ（ユーザー空間）
+///   arg3 — ファイル名の長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+///
+/// セキュリティ:
+///   - ディレクトリハンドルに DELETE 権限が必要
+///   - ファイル名に ".." や "/" は禁止
+fn sys_handle_unlink(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_DELETE};
+
+    // ディレクトリハンドルを取得
+    let dir_handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
+    let dir_handle = dir_handle_ptr.read();
+
+    // ファイル名を取得
+    let name_slice = user_slice_from_args(arg2, arg3)?;
+    let name = name_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 権限チェック（DELETE 権限が必要）
+    crate::handle::check_rights(&dir_handle, HANDLE_RIGHT_DELETE)?;
+
+    // ディレクトリハンドルの種類チェック
+    if crate::handle::get_kind(&dir_handle)? != HandleKind::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // ファイル名の検証
+    validate_entry_name(name)?;
+
+    // フルパスを構築
+    let dir_path = crate::handle::get_path(&dir_handle)?;
+    let full_path = build_child_path(&dir_path, name);
+
+    // /proc 配下は読み取り専用
+    if full_path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // FAT32 から削除（ファイルを先に試し、失敗したらディレクトリとして削除）
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    if fat32.delete_file(&full_path).is_err() {
+        fat32.delete_dir(&full_path).map_err(|_| SyscallError::FileNotFound)?;
+    }
+
+    Ok(0)
+}
+
+/// SYS_HANDLE_MKDIR: ディレクトリハンドル内にサブディレクトリを作成
+///
+/// 引数:
+///   arg1 — ディレクトリハンドルのポインタ（ユーザー空間）
+///   arg2 — ディレクトリ名のポインタ（ユーザー空間）
+///   arg3 — ディレクトリ名の長さ
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+///
+/// セキュリティ:
+///   - ディレクトリハンドルに CREATE 権限が必要
+///   - ディレクトリ名に ".." や "/" は禁止
+fn sys_handle_mkdir(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    use crate::handle::{Handle, HandleKind, HANDLE_RIGHT_CREATE};
+
+    // ディレクトリハンドルを取得
+    let dir_handle_ptr = user_ptr_from_arg::<Handle>(arg1)?;
+    let dir_handle = dir_handle_ptr.read();
+
+    // ディレクトリ名を取得
+    let name_slice = user_slice_from_args(arg2, arg3)?;
+    let name = name_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
+
+    // 権限チェック（CREATE 権限が必要）
+    crate::handle::check_rights(&dir_handle, HANDLE_RIGHT_CREATE)?;
+
+    // ディレクトリハンドルの種類チェック
+    if crate::handle::get_kind(&dir_handle)? != HandleKind::Directory {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    // ディレクトリ名の検証
+    validate_entry_name(name)?;
+
+    // フルパスを構築
+    let dir_path = crate::handle::get_path(&dir_handle)?;
+    let full_path = build_child_path(&dir_path, name);
+
+    // /proc 配下は読み取り専用
+    if full_path.starts_with("/proc") {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // FAT32 でディレクトリを作成
+    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
+    fat32.create_dir(&full_path).map_err(|_| SyscallError::Other)?;
+
+    Ok(0)
+}
+
+/// ファイル/ディレクトリ名の検証ヘルパー
+///
+/// ".." や "/" を含む名前はパストラバーサル攻撃の原因になるため拒否する。
+/// 空の名前も拒否する。
+fn validate_entry_name(name: &str) -> Result<(), SyscallError> {
+    if name.is_empty() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if name == ".." || name == "." {
+        return Err(SyscallError::PathTraversal);
+    }
+    Ok(())
+}
+
+/// 親ディレクトリのパスと子の名前からフルパスを構築するヘルパー
+fn build_child_path(dir_path: &str, name: &str) -> String {
+    if dir_path.is_empty() || dir_path == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", dir_path, name)
+    }
 }
 
 /// SYS_RESTRICT_RIGHTS: ハンドルの権限を縮小する
