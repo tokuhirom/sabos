@@ -87,7 +87,7 @@ patch-sysroot:
 # パッチファイルのハッシュを .sysroot-hash に記録して、
 # 変更を検出したら自動で cargo clean する。
 SYSROOT_HASH_FILE = user-std/.sysroot-hash
-build-user-std:
+build-user-std: patch-sysroot
 	@NEW_HASH=$$(find rust-std-sabos/ -type f | sort | xargs sha256sum | sha256sum | cut -d' ' -f1); \
 	OLD_HASH=$$(cat $(SYSROOT_HASH_FILE) 2>/dev/null || echo ""); \
 	if [ "$$NEW_HASH" != "$$OLD_HASH" ]; then \
