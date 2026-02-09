@@ -2072,6 +2072,10 @@ impl Shell {
     /// 自分宛に送信して受信できることを確認する
     fn test_ipc(&self) -> bool {
         let task_id = crate::scheduler::current_task_id();
+
+        // テスト前にキューを掃除（他テストからの遅延メッセージ対策）
+        while crate::ipc::try_recv(task_id).is_some() {}
+
         let data = b"ping";
         if crate::ipc::send(task_id, task_id, data.to_vec()).is_err() {
             return false;
@@ -2115,34 +2119,20 @@ impl Shell {
     fn test_ipc_cancel(&self) -> bool {
         let task_id = crate::scheduler::current_task_id();
 
+        // テスト前にキューを掃除（他テストからの遅延メッセージ対策）
+        while crate::ipc::try_recv(task_id).is_some() {}
+
         // 自分自身をキャンセル対象にする
         if crate::ipc::cancel_recv(task_id).is_err() {
             return false;
         }
 
-        // recv すると即座に Cancelled が返るはず
-        // （cancel フラグが立っているので sleep せずにキャンセルチェックで引っかかる...
-        //   実際にはフラグチェックは yield 後。ここでは try_recv → メッセージなし →
-        //   sleep → 即 wake（cancel による）→ キャンセルチェック の流れ）
-        //
-        // ただし selftest では割り込みが有効でない可能性があるので、
-        // cancel フラグは recv の中で直接チェックされるべき。
-        //
-        // 実装上: cancel_recv() → IPC_CANCELLED に追加 + wake_task
+        // recv すると Cancelled が返るはず
+        // cancel_recv() → IPC_CANCELLED に追加 + wake_task
         // recv() → try_recv(なし) → WAITERS 登録 → sleep → ダブルチェック(なし) → yield
-        //        → 起床(cancel の wake で) → WAITERS 除去 → CANCELLED チェック → Cancelled 返却
-        //
-        // しかし selftest はカーネルタスクで、割り込みなしの可能性がある。
-        // wake_task は Sleeping→Ready にするだけなので、yield_now() で即再スケジュール可能。
-        // 問題: set_current_sleeping 直後に、preempt で Ready に戻されないと yield で進まない。
-        //
-        // テスト戦略: キャンセルフラグが立っている状態で recv して Cancelled が返ることだけ確認。
-        // cancel_recv は wake_task も呼ぶので、selftest タスクは yield 後に即復帰する。
+        //        → 起床 → CANCELLED チェック → Cancelled 返却
         let result = crate::ipc::recv(task_id, 1000);
-        match result {
-            Err(crate::user_ptr::SyscallError::Cancelled) => true,
-            _ => false,
-        }
+        matches!(result, Err(crate::user_ptr::SyscallError::Cancelled))
     }
 
     /// IPC ハンドル委譲のテスト
