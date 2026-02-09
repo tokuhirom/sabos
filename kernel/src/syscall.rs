@@ -2392,11 +2392,13 @@ fn sys_net_recv_frame(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErr
     let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
 
     loop {
-        let mut drv = crate::virtio_net::VIRTIO_NET.lock();
-        if let Some(frame) = drv.as_mut().and_then(|d| d.receive_packet()) {
-            let copy_len = core::cmp::min(frame.len(), buf_len);
-            buf[..copy_len].copy_from_slice(&frame[..copy_len]);
-            return Ok(copy_len as u64);
+        {
+            let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+            if let Some(frame) = drv.as_mut().and_then(|d| d.receive_packet()) {
+                let copy_len = core::cmp::min(frame.len(), buf_len);
+                buf[..copy_len].copy_from_slice(&frame[..copy_len]);
+                return Ok(copy_len as u64);
+            }
         }
 
         if timeout_ms == 0 {
@@ -2410,7 +2412,19 @@ fn sys_net_recv_frame(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErr
             return Ok(0);
         }
 
-        crate::scheduler::yield_now();
+        // QEMU TCG モードでは、ゲスト CPU がビジーループしていると
+        // SLIRP のネットワーク I/O が処理されない。
+        //
+        // ISR ステータスの読み取り（port I/O）で QEMU のイベントループを
+        // キックし、SLIRP が受信パケットを処理できるようにする。
+        // その後 hlt で CPU を停止して、タイマー割り込みまで待機する。
+        {
+            let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+            if let Some(d) = drv.as_mut() {
+                d.read_isr_status();
+            }
+        }
+        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
 

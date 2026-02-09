@@ -357,6 +357,15 @@ impl VirtioNet {
         }
     }
 
+    /// ISR ステータスレジスタを読み取る（割り込みの確認と ACK）
+    ///
+    /// virtio-legacy の ISR status register は offset 0x13 にある。
+    /// 読み取ると割り込みフラグがクリアされる。
+    /// この port I/O は QEMU のイベントループをキックする副作用がある。
+    pub fn read_isr_status(&self) -> u8 {
+        unsafe { Port::<u8>::new(self.io_base + 0x13).read() }
+    }
+
     /// パケットを送信する
     ///
     /// data: Ethernet フレーム (ヘッダーなし virtio-net ヘッダー)
@@ -455,7 +464,6 @@ impl VirtioNet {
         if used_idx == self.rx_last_used_idx {
             return None; // 新しいパケットなし
         }
-
         // Used Ring からエントリを取得
         let ring_entry_idx = (self.rx_last_used_idx % self.queue_size) as usize;
         let used_elem_ptr = unsafe { used_ptr.add(4 + ring_entry_idx * 8) };

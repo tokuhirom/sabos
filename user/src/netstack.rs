@@ -29,6 +29,7 @@ pub const MY_IP: [u8; 4] = [10, 0, 2, 15];
 /// ループバック IP アドレス (127.0.0.1)
 pub const LOOPBACK_IP: [u8; 4] = [127, 0, 0, 1];
 
+/// DNS サーバーの IP アドレス
 /// DNS サーバーの IP アドレス (QEMU user mode デフォルト)
 pub const DNS_SERVER_IP: [u8; 4] = [10, 0, 2, 3];
 
@@ -782,13 +783,75 @@ fn calculate_checksum(data: &[u8]) -> u16 {
     !(sum as u16)
 }
 
-/// 受信パケットをポーリングして処理する
+/// UDP チェックサムを計算する
+///
+/// UDP チェックサムは疑似ヘッダーを含めて計算する:
+/// - 送信元 IP (4 bytes)
+/// - 宛先 IP (4 bytes)
+/// - 0x00 (1 byte)
+/// - プロトコル番号 (1 byte, UDP=17)
+/// - UDP 長 (2 bytes)
+/// - UDP ヘッダー + データ
+///
+/// QEMU の libslirp (v8.2+) は UDP チェックサムが 0 のパケットをドロップするため、
+/// IPv4 でも正しいチェックサムの計算が必要。
+fn calculate_udp_checksum(
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    udp_header: &UdpHeader,
+    payload: &[u8],
+) -> u16 {
+    let udp_len = 8 + payload.len();
+
+    // 疑似ヘッダー + UDP ヘッダー + データを構築
+    let mut data = Vec::with_capacity(12 + udp_len);
+
+    // 疑似ヘッダー
+    data.extend_from_slice(src_ip);
+    data.extend_from_slice(dst_ip);
+    data.push(0);
+    data.push(IP_PROTO_UDP);
+    data.extend_from_slice(&(udp_len as u16).to_be_bytes());
+
+    // UDP ヘッダー
+    data.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(udp_header as *const _ as *const u8, 8)
+    });
+
+    // ペイロード
+    data.extend_from_slice(payload);
+
+    let checksum = calculate_checksum(&data);
+    // UDP では計算結果が 0 の場合は 0xFFFF にする（0 は「チェックサムなし」を意味するため）
+    if checksum == 0 { 0xFFFF } else { checksum }
+}
+
+/// 受信パケットをポーリングして処理する（ノンブロッキング）
+///
+/// キューに溜まっているフレームを全て処理する（drain 方式）。
 pub fn poll_and_handle() {
+    poll_and_handle_timeout(0);
+}
+
+/// 受信パケットをポーリングして処理する（タイムアウト付き）
+///
+/// timeout_ms > 0 の場合、最初のフレームが到着するまで最大 timeout_ms ミリ秒待つ。
+/// フレームを 1 つ受信した後は、残りのフレームをノンブロッキングで drain する。
+pub fn poll_and_handle_timeout(timeout_ms: u64) {
     let mut buf = [0u8; 1600];
-    let n = syscall::net_recv_frame(&mut buf, 0);
+    let n = syscall::net_recv_frame(&mut buf, timeout_ms);
     if n > 0 {
         let len = n as usize;
         handle_packet(&buf[..len]);
+        // 残りのフレームを drain
+        loop {
+            let n = syscall::net_recv_frame(&mut buf, 0);
+            if n <= 0 {
+                break;
+            }
+            let len = n as usize;
+            handle_packet(&buf[..len]);
+        }
     }
 }
 
@@ -864,14 +927,19 @@ pub fn send_udp_packet(
         ethertype: ETHERTYPE_IPV4.to_be_bytes(),
     };
 
-    // UDP ヘッダー
+    // UDP ヘッダー（チェックサムは後で計算）
     let udp_length = 8 + payload.len();
     let udp_header = UdpHeader {
         src_port: src_port.to_be_bytes(),
         dst_port: dst_port.to_be_bytes(),
         length: (udp_length as u16).to_be_bytes(),
-        checksum: [0, 0], // UDP チェックサムはオプション（IPv4）
+        checksum: [0, 0], // 後で計算
     };
+
+    // UDP チェックサムを計算（疑似ヘッダー + UDP ヘッダー + データ）
+    // QEMU の libslirp は UDP チェックサムが 0 のパケットをドロップするため、
+    // IPv4 でもチェックサムを正しく計算する必要がある。
+    let udp_checksum = calculate_udp_checksum(&MY_IP, &dst_ip, &udp_header, payload);
 
     // IP ヘッダー
     let total_length = 20 + udp_length;
@@ -909,9 +977,11 @@ pub fn send_udp_packet(
         core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // UDP ヘッダー
+    // UDP ヘッダー（チェックサムを設定）
+    let mut udp_header_with_checksum = udp_header;
+    udp_header_with_checksum.checksum = udp_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
-        core::slice::from_raw_parts(&udp_header as *const _ as *const u8, 8)
+        core::slice::from_raw_parts(&udp_header_with_checksum as *const _ as *const u8, 8)
     });
 
     // UDP ペイロード
@@ -978,38 +1048,41 @@ const DNS_CLASS_IN: u16 = 1;
 /// - `Ok([u8; 4])`: 解決された IPv4 アドレス
 /// - `Err(&str)`: エラーメッセージ
 pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
-    // レスポンスバッファをクリア
-    net_state_mut().udp_response = None;
-
-    // DNS クエリを構築
     let query_id: u16 = 0x1234; // 固定 ID（簡易実装）
     let src_port: u16 = 12345; // 送信元ポート
 
     let query_packet = build_dns_query(query_id, domain)?;
 
-    // クエリを送信
-    net_debug!("dns: sending query for '{}'", domain);
-    send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet)?;
+    // 最大 2 回試行する。初回は ARP 未解決で drop される場合があるためリトライする
+    for attempt in 0..2 {
+        // レスポンスバッファをクリア
+        net_state_mut().udp_response = None;
 
-    // レスポンスを待つ（最大 3 秒）
-    for _ in 0..30 {
-        // ネットワークをポーリング
-        poll_and_handle();
-
-        // レスポンスをチェック
-        if let Some((port, ref data)) = net_state_mut().udp_response {
-            if port == src_port && data.len() >= 12 {
-                // レスポンスをパース
-                let response_id = u16::from_be_bytes([data[0], data[1]]);
-                if response_id == query_id {
-                    return parse_dns_response(data);
-                }
-            }
+        // クエリを送信
+        net_debug!("dns: sending query for '{}' (attempt {})", domain, attempt);
+        let send_result = send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet);
+        if send_result.is_err() {
+            return send_result.map(|_| [0u8; 4]);
         }
 
-        // 100ms 待機
-        for _ in 0..100000 {
-            core::hint::spin_loop();
+        // レスポンスを待つ（最大 5 秒、50 回 × 100ms ブロッキング受信）
+        // net_recv_frame のタイムアウトで待つので、カーネル内の yield/hlt で
+        // QEMU SLIRP の処理時間を確保する。
+        for _i in 0..50 {
+            // ネットワークをポーリング（100ms タイムアウト付き）
+            poll_and_handle_timeout(100);
+
+            // レスポンスをチェック
+            if let Some((port, ref data)) = net_state_mut().udp_response {
+                if port == src_port && data.len() >= 12 {
+                    // レスポンスをパース
+                    let response_id = u16::from_be_bytes([data[0], data[1]]);
+                    if response_id == query_id {
+                        return parse_dns_response(data);
+                    }
+                }
+            }
+
         }
     }
 
@@ -1505,8 +1578,9 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
         &[],
     )?;
 
-    for _ in 0..1000000 {
-        poll_and_handle();
+    // TCP 接続確立を最大 5 秒待つ（100ms × 50 = 5000ms）
+    for _ in 0..50 {
+        poll_and_handle_timeout(100);
 
         let state = net_state_mut();
         if let Some(idx) = find_conn_index_by_id(state, conn_id) {
@@ -1519,10 +1593,6 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
             }
         } else {
             break;
-        }
-
-        for _ in 0..10000 {
-            core::hint::spin_loop();
         }
     }
 
@@ -1540,22 +1610,20 @@ pub fn tcp_listen(port: u16) -> Result<(), &'static str> {
 
 /// TCP の accept を待つ（複数接続対応）
 pub fn tcp_accept(timeout_ms: u64) -> Result<u32, &'static str> {
+    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100
     let loops = if timeout_ms == 0 {
         1
     } else {
-        (timeout_ms as usize).saturating_mul(2000).max(1)
+        (timeout_ms as usize / 100).max(1)
     };
 
     for _ in 0..loops {
-        poll_and_handle();
+        poll_and_handle_timeout(100);
         {
             let state = net_state_mut();
             if let Some(id) = state.tcp_pending_accept.pop_front() {
                 return Ok(id);
             }
-        }
-        for _ in 0..1000 {
-            core::hint::spin_loop();
         }
     }
     Err("timeout")
@@ -1592,13 +1660,14 @@ pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
 pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
+    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100（デフォルト 5 秒）
     let loops = if timeout_ms == 0 {
-        500000
+        50 // 100ms × 50 = 5 秒
     } else {
-        (timeout_ms as usize).saturating_mul(2000).max(1)
+        (timeout_ms as usize / 100).max(1)
     };
     for _ in 0..loops {
-        poll_and_handle();
+        poll_and_handle_timeout(100);
 
         // 受信バッファをチェック
         {
@@ -1619,11 +1688,6 @@ pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> 
             } else {
                 return Err("no connection");
             }
-        }
-
-        // 簡単なビジーウェイト
-        for _ in 0..1000 {
-            core::hint::spin_loop();
         }
     }
 
@@ -1665,9 +1729,9 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
         &[],
     )?;
 
-    // ACK を待つ（ポーリング）
-    for _ in 0..100000 {
-        poll_and_handle();
+    // ACK を待つ（最大 5 秒: 100ms × 50）
+    for _ in 0..50 {
+        poll_and_handle_timeout(100);
 
         {
             let state = net_state_mut();
@@ -1677,10 +1741,6 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
                     break;
                 }
             }
-        }
-
-        for _ in 0..1000 {
-            core::hint::spin_loop();
         }
     }
 
@@ -1782,11 +1842,11 @@ pub fn udp_recv_from(
     timeout_ms: u64,
 ) -> Result<([u8; 4], u16, Vec<u8>), &'static str> {
     let effective_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms };
-    // ポーリングループ: 約 0.5ms ごとにチェックし、合計 timeout_ms 待つ
-    let loops = (effective_timeout as usize).saturating_mul(2000).max(1);
+    // ポーリングループ: 100ms ごとにチェックし、合計 timeout_ms 待つ
+    let loops = (effective_timeout as usize / 100).max(1);
 
     for _ in 0..loops {
-        poll_and_handle();
+        poll_and_handle_timeout(100);
 
         {
             let state = net_state_mut();
@@ -1802,10 +1862,6 @@ pub fn udp_recv_from(
                 }
                 None => return Err("no such UDP socket"),
             }
-        }
-
-        for _ in 0..1000 {
-            core::hint::spin_loop();
         }
     }
 
@@ -2293,18 +2349,15 @@ pub fn send_icmpv6_echo_request(dst_ip: &[u8; 16], id: u16, seq: u16) {
 /// - `Ok((id, seq, src_ip))`: 受信した Echo Reply の情報
 /// - `Err("timeout")`: タイムアウト
 pub fn wait_icmpv6_echo_reply(timeout_ms: u64) -> Result<(u16, u16, [u8; 16]), &'static str> {
-    let loops = (timeout_ms as usize).saturating_mul(2000).max(1);
+    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100
+    let loops = (timeout_ms as usize / 100).max(1);
 
     for _ in 0..loops {
-        poll_and_handle();
+        poll_and_handle_timeout(100);
 
         let state = net_state_mut();
         if let Some((id, seq, src_ip)) = state.icmpv6_echo_reply.take() {
             return Ok((id, seq, src_ip));
-        }
-
-        for _ in 0..1000 {
-            core::hint::spin_loop();
         }
     }
 

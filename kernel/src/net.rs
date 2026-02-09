@@ -735,14 +735,19 @@ pub fn send_udp_packet(
         ethertype: ETHERTYPE_IPV4.to_be_bytes(),
     };
 
-    // UDP ヘッダー
+    // UDP ヘッダー（チェックサムは後で計算）
     let udp_length = 8 + payload.len();
     let udp_header = UdpHeader {
         src_port: src_port.to_be_bytes(),
         dst_port: dst_port.to_be_bytes(),
         length: (udp_length as u16).to_be_bytes(),
-        checksum: [0, 0], // UDP チェックサムはオプション（IPv4）
+        checksum: [0, 0], // 後で計算
     };
+
+    // UDP チェックサムを計算（疑似ヘッダー + UDP ヘッダー + データ）
+    // QEMU の libslirp は UDP チェックサムが 0 のパケットをドロップするため、
+    // IPv4 でもチェックサムを正しく計算する必要がある。
+    let udp_checksum = calculate_udp_checksum(&MY_IP, &dst_ip, &udp_header, payload);
 
     // IP ヘッダー
     let total_length = 20 + udp_length;
@@ -780,9 +785,11 @@ pub fn send_udp_packet(
         core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // UDP ヘッダー
+    // UDP ヘッダー（チェックサムを設定）
+    let mut udp_header_with_checksum = udp_header;
+    udp_header_with_checksum.checksum = udp_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
-        core::slice::from_raw_parts(&udp_header as *const _ as *const u8, 8)
+        core::slice::from_raw_parts(&udp_header_with_checksum as *const _ as *const u8, 8)
     });
 
     // UDP ペイロード
@@ -1295,6 +1302,49 @@ fn send_tcp_packet_internal(
 
     // 送信
     drv.send_packet(&packet)
+}
+
+/// UDP チェックサムを計算する
+///
+/// UDP チェックサムは疑似ヘッダーを含めて計算する:
+/// - 送信元 IP (4 bytes)
+/// - 宛先 IP (4 bytes)
+/// - 0x00 (1 byte)
+/// - プロトコル番号 (1 byte, UDP=17)
+/// - UDP 長 (2 bytes)
+/// - UDP ヘッダー + データ
+///
+/// QEMU の libslirp (v8.2+) は UDP チェックサムが 0 のパケットをドロップするため、
+/// IPv4 でも正しいチェックサムの計算が必要。
+fn calculate_udp_checksum(
+    src_ip: &[u8; 4],
+    dst_ip: &[u8; 4],
+    udp_header: &UdpHeader,
+    payload: &[u8],
+) -> u16 {
+    let udp_len = 8 + payload.len();
+
+    // 疑似ヘッダー + UDP ヘッダー + データを構築
+    let mut data = Vec::with_capacity(12 + udp_len);
+
+    // 疑似ヘッダー
+    data.extend_from_slice(src_ip);
+    data.extend_from_slice(dst_ip);
+    data.push(0);
+    data.push(IP_PROTO_UDP);
+    data.extend_from_slice(&(udp_len as u16).to_be_bytes());
+
+    // UDP ヘッダー
+    data.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(udp_header as *const _ as *const u8, 8)
+    });
+
+    // ペイロード
+    data.extend_from_slice(payload);
+
+    let checksum = calculate_checksum(&data);
+    // UDP では計算結果が 0 の場合は 0xFFFF にする（0 は「チェックサムなし」を意味するため）
+    if checksum == 0 { 0xFFFF } else { checksum }
 }
 
 /// TCP チェックサムを計算する

@@ -1275,12 +1275,7 @@ impl Shell {
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             // 14. ネットワーク (DNS) のテスト
-            if this.netd_is_running() {
-                run_test("network_dns", true);
-                kprintln!("  (kernel DNS skipped: netd is active)");
-            } else {
-                run_test("network_dns", this.test_network_dns());
-            }
+            run_test("network_dns", this.test_network_dns());
 
             // 15. ユーザー空間 netd の DNS テスト
             run_test("network_netd_dns", this.test_network_netd_dns());
@@ -2554,11 +2549,6 @@ impl Shell {
             }
             Err(_) => false,
         }
-    }
-
-    /// netd が起動しているか確認する
-    fn netd_is_running(&self) -> bool {
-        crate::scheduler::find_task_id_by_name("NETD.ELF").is_some()
     }
 
     /// ユーザー空間 netd の DNS テスト

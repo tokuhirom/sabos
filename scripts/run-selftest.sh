@@ -53,7 +53,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive format=raw,file=fat:rw:esp \
     -drive if=virtio,format=raw,file=disk.img \
-    -netdev user,id=net0,ipv6=on -device virtio-net-pci,netdev=net0 \
+    -netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
     -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
     -serial stdio \
     -display none \

@@ -85,11 +85,11 @@ fn netd_loop() -> ! {
                 let domain = core::str::from_utf8(payload).unwrap_or("");
                 match netstack::dns_lookup(domain) {
                     Ok(ip) => {
-                    resp_len = 4;
-                    resp[12..16].copy_from_slice(&ip);
+                        resp_len = 4;
+                        resp[12..16].copy_from_slice(&ip);
                     }
-                    Err(err) => {
-                        status = map_netstack_error(err);
+                    Err(_err) => {
+                        status = map_netstack_error(_err);
                     }
                 }
             }
