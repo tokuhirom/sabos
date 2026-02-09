@@ -110,7 +110,7 @@ send_key() {
 
 send_string() {
     local s="$1"
-    local i ch
+    local i ch lower
     for ((i = 0; i < ${#s}; i++)); do
         ch="${s:i:1}"
         case "$ch" in
@@ -119,6 +119,11 @@ send_string() {
             '.') send_key dot ;;
             '-') send_key minus ;;
             '_') send_key shift-minus ;;
+            # 大文字は shift- 付きで送信する（QEMU sendkey は小文字キー名のみ受付）
+            [A-Z])
+                lower=$(echo "$ch" | tr 'A-Z' 'a-z')
+                send_key "shift-$lower"
+                ;;
             *) send_key "$ch" ;;
         esac
     done
