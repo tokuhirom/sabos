@@ -15,8 +15,6 @@
 // - /proc/meminfo: メモリ情報（JSON 形式）
 // - /proc/tasks: タスク一覧（JSON 形式）
 
-// VFS trait 実装は将来の統合で使用するため、dead_code 警告を抑制
-#![allow(dead_code)]
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -27,8 +25,6 @@ use alloc::string::String;
 
 use crate::vfs::{FileSystem, VfsNode, VfsNodeKind, VfsDirEntry, VfsError};
 
-/// procfs のルートパス
-pub const PROC_ROOT: &str = "/proc";
 /// メモリ情報ファイルのパス
 const PROC_MEMINFO: &str = "meminfo";
 /// タスク一覧ファイルのパス
@@ -91,14 +87,15 @@ impl FileSystem for ProcFs {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn VfsNode>, VfsError> {
-        // パスを正規化（先頭の "/" を除去）
+        // VFS マネージャが "/proc" プレフィックスを除去済みなので、
+        // ここに来るパスは "meminfo", "tasks" 等の相対パス。
         let path = path.trim().trim_start_matches('/');
 
         // ファイルの内容を生成
         let data = match path {
-            PROC_MEMINFO | "proc/meminfo" => generate_meminfo(),
-            PROC_TASKS | "proc/tasks" => generate_tasks(),
-            "" | "proc" | "proc/" => return Err(VfsError::NotAFile),
+            PROC_MEMINFO => generate_meminfo(),
+            PROC_TASKS => generate_tasks(),
+            "" => return Err(VfsError::NotAFile),
             _ => return Err(VfsError::NotFound),
         };
 
@@ -106,11 +103,12 @@ impl FileSystem for ProcFs {
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<VfsDirEntry>, VfsError> {
-        // パスを正規化
+        // VFS マネージャが "/proc" プレフィックスを除去済みなので、
+        // ルートディレクトリは "" or "/" で来る。
         let path = path.trim().trim_start_matches('/');
 
         // ルートディレクトリのみサポート
-        if !path.is_empty() && path != "proc" && path != "proc/" {
+        if !path.is_empty() {
             return Err(VfsError::NotFound);
         }
 
@@ -291,54 +289,3 @@ fn write_json_string(writer: &mut VecWriter<'_>, s: &str) -> core::fmt::Result {
     Ok(())
 }
 
-// =================================================================
-// syscall.rs から使用するためのヘルパー関数
-// =================================================================
-
-/// procfs のファイルを読み取る（syscall.rs からの後方互換性のため）
-///
-/// 対象ファイルが存在しない場合は FileNotFound を返す。
-pub fn procfs_read(path: &str, buf: &mut [u8]) -> Result<usize, crate::user_ptr::SyscallError> {
-    // パスを正規化
-    let path = path.trim().trim_start_matches('/');
-    let path = path.trim_start_matches("proc/");
-
-    // データを生成
-    let data = match path {
-        "meminfo" => generate_meminfo(),
-        "tasks" => generate_tasks(),
-        _ => return Err(crate::user_ptr::SyscallError::FileNotFound),
-    };
-
-    // バッファにコピー
-    let to_copy = core::cmp::min(data.len(), buf.len());
-    buf[..to_copy].copy_from_slice(&data[..to_copy]);
-    Ok(to_copy)
-}
-
-/// procfs のディレクトリ一覧を取得する（syscall.rs からの後方互換性のため）
-pub fn procfs_list_dir(path: &str, buf: &mut [u8]) -> Result<usize, crate::user_ptr::SyscallError> {
-    // パスを正規化
-    let path = path.trim().trim_start_matches('/');
-
-    if path != "proc" && path != "proc/" && !path.is_empty() {
-        return Err(crate::user_ptr::SyscallError::FileNotFound);
-    }
-
-    let mut offset = 0;
-    let entries: [&[u8]; 2] = [b"meminfo", b"tasks"];
-
-    for name in entries {
-        let needed = name.len() + 1;
-        if offset + needed > buf.len() {
-            break;
-        }
-
-        buf[offset..offset + name.len()].copy_from_slice(name);
-        offset += name.len();
-        buf[offset] = b'\n';
-        offset += 1;
-    }
-
-    Ok(offset)
-}

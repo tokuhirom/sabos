@@ -592,19 +592,9 @@ impl Shell {
     /// 引数あり: 指定パスのディレクトリを表示（例: ls /SUBDIR）
     fn cmd_ls(&self, args: &str) {
         let path = args.trim();
-
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
         let path = if path.is_empty() { "/" } else { path };
-        match fs.list_dir(path) {
+
+        match crate::vfs::list_dir(path) {
             Ok(entries) => {
                 // ディレクトリパスを表示
                 if path == "/" {
@@ -619,7 +609,7 @@ impl Shell {
                     if entry.name == "." || entry.name == ".." {
                         continue;
                     }
-                    let attr_str = if entry.attr & 0x10 != 0 {
+                    let attr_str = if entry.kind == crate::vfs::VfsNodeKind::Directory {
                         "<DIR>"
                     } else {
                         "     "
@@ -637,13 +627,13 @@ impl Shell {
             }
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error listing directory: {}", e);
+                kprintln!("Error listing directory: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
     }
 
-    /// cat コマンド: FAT32 ディスクのファイル内容を表示する。
+    /// cat コマンド: VFS 経由でファイル内容を表示する。
     fn cmd_cat(&self, args: &str) {
         let filename = args.trim();
         if filename.is_empty() {
@@ -651,17 +641,7 @@ impl Shell {
             return;
         }
 
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
-        match fs.read_file(filename) {
+        match crate::vfs::read_file(filename) {
             Ok(data) => {
                 // テキストファイルとして表示を試みる
                 match core::str::from_utf8(&data) {
@@ -676,13 +656,13 @@ impl Shell {
             }
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error: {}", e);
+                kprintln!("Error: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
     }
 
-    /// write コマンド: FAT32 ディスクに新しいファイルを作成する。
+    /// write コマンド: VFS 経由でファイルを作成する。
     ///
     /// 使い方: write <FILENAME> <TEXT>
     /// 例: write TEST.TXT Hello World
@@ -705,21 +685,11 @@ impl Shell {
         let filename = parts[0];
         let text = parts[1];
 
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
         // テキストの末尾に改行を追加
         let mut content = text.as_bytes().to_vec();
         content.push(b'\n');
 
-        match fs.create_file(filename, &content) {
+        match crate::vfs::create_file(filename, &content) {
             Ok(()) => {
                 framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
                 kprintln!("File '{}' created ({} bytes)", filename, content.len());
@@ -727,13 +697,13 @@ impl Shell {
             }
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error creating file: {}", e);
+                kprintln!("Error creating file: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
     }
 
-    /// rm コマンド: FAT32 ディスクのファイルを削除する。
+    /// rm コマンド: VFS 経由でファイルを削除する。
     fn cmd_rm(&self, args: &str) {
         let filename = args.trim();
         if filename.is_empty() {
@@ -741,17 +711,7 @@ impl Shell {
             return;
         }
 
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
-        match fs.delete_file(filename) {
+        match crate::vfs::delete_file(filename) {
             Ok(()) => {
                 framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
                 kprintln!("File '{}' deleted", filename);
@@ -759,16 +719,16 @@ impl Shell {
             }
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error deleting file: {}", e);
+                kprintln!("Error deleting file: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
             }
         }
     }
 
-    /// run コマンド: FAT32 ディスクから ELF バイナリを読み込んでユーザーモードで実行する。
+    /// run コマンド: VFS 経由で ELF バイナリを読み込んでユーザーモードで実行する。
     ///
     /// 手順:
-    ///   1. FAT32 からファイルを読み込む
+    ///   1. VFS 経由でファイルを読み込む
     ///   2. ELF パース → LOAD セグメント情報を取得
     ///   3. プロセス作成 → ページテーブル + フレーム確保 + データロード
     ///   4. Ring 3 で実行
@@ -781,23 +741,13 @@ impl Shell {
             return;
         }
 
-        // FAT32 からファイルを読み込む
+        // VFS 経由でファイルを読み込む
         kprintln!("Loading {} from disk...", filename);
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
-        let elf_data = match fs.read_file(filename) {
+        let elf_data = match crate::vfs::read_file(filename) {
             Ok(data) => data,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error reading file: {}", e);
+                kprintln!("Error reading file: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
@@ -855,7 +805,7 @@ impl Shell {
         kprintln!("Frames: before={}, after={}, reclaimed={}", before_free, after_free, after_free - before_free);
     }
 
-    /// spawn コマンド: FAT32 ディスクから ELF バイナリを読み込んで、
+    /// spawn コマンド: VFS 経由で ELF バイナリを読み込んで、
     /// バックグラウンドでユーザープロセスとして実行する。
     ///
     /// run コマンドと異なり、プロセスはブロックせずに即座に戻る。
@@ -871,23 +821,13 @@ impl Shell {
             return;
         }
 
-        // FAT32 からファイルを読み込む
+        // VFS 経由でファイルを読み込む
         kprintln!("Loading {} from disk...", filename);
-        let mut fs = match crate::fat32::Fat32::new() {
-            Ok(fs) => fs,
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("FAT32 error: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        };
-
-        let elf_data = match fs.read_file(filename) {
+        let elf_data = match crate::vfs::read_file(filename) {
             Ok(data) => data,
             Err(e) => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("Error reading file: {}", e);
+                kprintln!("Error reading file: {:?}", e);
                 framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 return;
             }
@@ -1575,33 +1515,26 @@ impl Shell {
         true
     }
 
-    /// procfs のテスト
+    /// procfs のテスト（VFS 経由）
     /// /proc の一覧と、/proc/meminfo / /proc/tasks が読めることを確認
     fn test_procfs(&self) -> bool {
-        let mut buf = [0u8; 512];
-
-        // /proc の一覧
-        let list_len = match crate::procfs::procfs_list_dir("/proc", &mut buf) {
-            Ok(n) => n,
+        // /proc の一覧を VFS 経由で取得
+        let entries = match crate::vfs::list_dir("/proc") {
+            Ok(entries) => entries,
             Err(_) => return false,
         };
-        if list_len == 0 {
-            return false;
-        }
-        let list_str = match core::str::from_utf8(&buf[..list_len]) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        if !list_str.contains("meminfo") || !list_str.contains("tasks") {
+        let has_meminfo = entries.iter().any(|e| e.name == "meminfo");
+        let has_tasks = entries.iter().any(|e| e.name == "tasks");
+        if !has_meminfo || !has_tasks {
             return false;
         }
 
-        // /proc/meminfo
-        let mem_len = match crate::procfs::procfs_read("/proc/meminfo", &mut buf) {
-            Ok(n) => n,
+        // /proc/meminfo を VFS 経由で読み取り
+        let mem_data = match crate::vfs::read_file("/proc/meminfo") {
+            Ok(data) => data,
             Err(_) => return false,
         };
-        let mem_str = match core::str::from_utf8(&buf[..mem_len]) {
+        let mem_str = match core::str::from_utf8(&mem_data) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -1609,12 +1542,12 @@ impl Shell {
             return false;
         }
 
-        // /proc/tasks
-        let task_len = match crate::procfs::procfs_read("/proc/tasks", &mut buf) {
-            Ok(n) => n,
+        // /proc/tasks を VFS 経由で読み取り
+        let task_data = match crate::vfs::read_file("/proc/tasks") {
+            Ok(data) => data,
             Err(_) => return false,
         };
-        let task_str = match core::str::from_utf8(&buf[..task_len]) {
+        let task_str = match core::str::from_utf8(&task_data) {
             Ok(s) => s,
             Err(_) => return false,
         };

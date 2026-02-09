@@ -32,7 +32,6 @@
 use core::arch::global_asm;
 use alloc::format;
 use alloc::string::String;
-use alloc::vec;
 use alloc::vec::Vec;
 use crate::user_ptr::{UserPtr, UserSlice, SyscallError};
 use x86_64::registers::control::Cr3;
@@ -658,7 +657,7 @@ fn sys_selftest() -> Result<u64, SyscallError> {
 ///   0（成功時）
 ///   負の値（エラー時）
 fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
-    use crate::handle::{Handle, HANDLE_RIGHT_WRITE};
+    use crate::handle::Handle;
 
     let rights = arg4 as u32;
 
@@ -669,11 +668,7 @@ fn sys_open(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallEr
     // Handle の書き込み先
     let handle_ptr = user_ptr_from_arg::<Handle>(arg3)?;
 
-    // /proc 配下は書き込み禁止
-    if (rights & HANDLE_RIGHT_WRITE) != 0 && path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
+    // VFS 経由で open（/proc への書き込みは VFS が ReadOnly を返す）
     let handle = open_path_to_handle(path, rights)?;
     handle_ptr.write(handle);
     Ok(0)
@@ -939,15 +934,9 @@ fn sys_handle_create_file(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<
     let dir_path = crate::handle::get_path(&dir_handle)?;
     let full_path = build_child_path(&dir_path, name);
 
-    // /proc 配下は書き込み禁止
-    if full_path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 でファイルを作成（既存があれば先に削除）
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let _ = fat32.delete_file(&full_path); // 既存ファイルの削除（なくてもOK）
-    fat32.create_file(&full_path, &[]).map_err(|_| SyscallError::Other)?;
+    // VFS 経由でファイルを作成（/proc は VFS が ReadOnly を返す）
+    let _ = crate::vfs::delete_file(&full_path); // 既存ファイルの削除（なくてもOK）
+    crate::vfs::create_file(&full_path, &[]).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     // RW 権限付きハンドルを作成して返す
     let handle = create_handle_with_path(Vec::new(), HANDLE_RIGHTS_FILE_RW, String::from(&*full_path));
@@ -996,15 +985,10 @@ fn sys_handle_unlink(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErro
     let dir_path = crate::handle::get_path(&dir_handle)?;
     let full_path = build_child_path(&dir_path, name);
 
-    // /proc 配下は読み取り専用
-    if full_path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 から削除（ファイルを先に試し、失敗したらディレクトリとして削除）
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    if fat32.delete_file(&full_path).is_err() {
-        fat32.delete_dir(&full_path).map_err(|_| SyscallError::FileNotFound)?;
+    // VFS 経由で削除（ファイルを先に試し、失敗したらディレクトリとして削除）
+    // /proc は VFS が ReadOnly を返す
+    if crate::vfs::delete_file(&full_path).is_err() {
+        crate::vfs::delete_dir(&full_path).map_err(crate::vfs::vfs_error_to_syscall)?;
     }
 
     Ok(0)
@@ -1050,14 +1034,8 @@ fn sys_handle_mkdir(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError
     let dir_path = crate::handle::get_path(&dir_handle)?;
     let full_path = build_child_path(&dir_path, name);
 
-    // /proc 配下は読み取り専用
-    if full_path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 でディレクトリを作成
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    fat32.create_dir(&full_path).map_err(|_| SyscallError::Other)?;
+    // VFS 経由でディレクトリを作成（/proc は VFS が ReadOnly を返す）
+    crate::vfs::create_dir(&full_path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     Ok(0)
 }
@@ -1312,14 +1290,8 @@ fn sys_file_delete(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
-    // /proc 配下は読み取り専用
-    if path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 からファイルを削除
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    fat32.delete_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    // VFS 経由でファイルを削除（/proc は VFS が ReadOnly を返す）
+    crate::vfs::delete_file(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     Ok(0)
 }
@@ -1342,20 +1314,14 @@ fn sys_file_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sys
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
-    // /proc 配下は読み取り専用
-    if path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
     // データを取得
     let data_slice = user_slice_from_args(arg3, arg4)?;
     let data = data_slice.as_slice();
 
-    // FAT32 でファイルを作成/上書き
+    // VFS 経由でファイルを作成/上書き（/proc は VFS が ReadOnly を返す）
     // create_file は既存ファイルがあるとエラーになるので、先に削除を試みる
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let _ = fat32.delete_file(path); // 既存ファイルの削除（なくてもOK）
-    fat32.create_file(path, data).map_err(|_| SyscallError::Other)?;
+    let _ = crate::vfs::delete_file(path); // 既存ファイルの削除（なくてもOK）
+    crate::vfs::create_file(path, data).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     Ok(0)
 }
@@ -1374,14 +1340,8 @@ fn sys_dir_create(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
-    // /proc 配下は読み取り専用
-    if path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 でディレクトリを作成
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    fat32.create_dir(path).map_err(|_| SyscallError::Other)?;
+    // VFS 経由でディレクトリを作成（/proc は VFS が ReadOnly を返す）
+    crate::vfs::create_dir(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     Ok(0)
 }
@@ -1402,14 +1362,8 @@ fn sys_dir_remove(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let path_slice = user_slice_from_args(arg1, arg2)?;
     let path = path_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
 
-    // /proc 配下は読み取り専用
-    if path.starts_with("/proc") {
-        return Err(SyscallError::ReadOnly);
-    }
-
-    // FAT32 でディレクトリを削除
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    fat32.delete_dir(path).map_err(|_| SyscallError::Other)?;
+    // VFS 経由でディレクトリを削除（/proc は VFS が ReadOnly を返す）
+    crate::vfs::delete_dir(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     Ok(0)
 }
@@ -1481,24 +1435,14 @@ fn sys_dir_list(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 
 /// ディレクトリ一覧をバッファに書き込む（共通ヘルパー）
 fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError> {
-    // /proc 配下は procfs で処理
-    if path.starts_with("/proc") {
-        let written = crate::procfs::procfs_list_dir(path, buf)?;
-        return Ok(written);
-    }
-
-    // FAT32 からディレクトリ一覧を取得
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let entries = fat32.list_dir(path).map_err(|_| SyscallError::FileNotFound)?;
-
-    // エントリ名を改行区切りでバッファに書き込む
-    // ATTR_DIRECTORY = 0x10
-    const ATTR_DIRECTORY: u8 = 0x10;
+    // VFS 経由でディレクトリ一覧を取得
+    // VFS が自動的に /proc へのルーティングやマウントポイントの追加を行う
+    let entries = crate::vfs::list_dir(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     let mut offset = 0;
     for entry in entries {
         let name = &entry.name;
-        let is_dir = (entry.attr & ATTR_DIRECTORY) != 0;
+        let is_dir = entry.kind == crate::vfs::VfsNodeKind::Directory;
 
         // 名前のバイト数 + 改行 (+ "/" for directories)
         let needed = name.len() + if is_dir { 2 } else { 1 };
@@ -1521,18 +1465,6 @@ fn list_dir_to_buffer(path: &str, buf: &mut [u8]) -> Result<usize, SyscallError>
         offset += 1;
     }
 
-    // ルートディレクトリには procfs を追加
-    if path == "/" || path.is_empty() {
-        let name = b"proc/";
-        let needed = name.len() + 1;
-        if offset + needed <= buf.len() {
-            buf[offset..offset + name.len()].copy_from_slice(name);
-            offset += name.len();
-            buf[offset] = b'\n';
-            offset += 1;
-        }
-    }
-
     Ok(offset)
 }
 
@@ -1548,33 +1480,6 @@ pub fn list_dir_to_buffer_for_test(path: &str, buf: &mut [u8]) -> Result<usize, 
 // システム情報関連システムコール
 // =================================================================
 
-// =================================================================
-// procfs 関連のヘルパー関数
-// =================================================================
-//
-// procfs モジュールへのブリッジ。syscall.rs から呼び出しやすいように
-// エラー型の変換などを行う。
-
-/// procfs のルートパス
-const PROC_ROOT: &str = "/proc";
-
-/// procfs の内容を Vec に読み取る（必要ならバッファを拡張）
-fn procfs_read_to_vec(path: &str) -> Result<Vec<u8>, SyscallError> {
-    let mut size = 256usize;
-    loop {
-        let mut buf = vec![0u8; size];
-        let written = crate::procfs::procfs_read(path, &mut buf)?;
-        if written < size {
-            buf.truncate(written);
-            return Ok(buf);
-        }
-        size = size.saturating_mul(2);
-        if size > 64 * 1024 {
-            return Err(SyscallError::Other);
-        }
-    }
-}
-
 /// パスから Handle を作成する
 pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::handle::Handle, SyscallError> {
     use crate::handle::{
@@ -1582,28 +1487,6 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
         HANDLE_RIGHT_READ, HANDLE_RIGHT_WRITE, HANDLE_RIGHTS_DIRECTORY_READ, HANDLE_RIGHTS_FILE_READ,
         HANDLE_RIGHTS_FILE_RW,
     };
-
-    // /proc ディレクトリは一覧のみ許可
-    if path == PROC_ROOT || path == "/proc/" {
-        let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
-        if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        return Ok(create_directory_handle(String::from("/proc"), dir_rights));
-    }
-
-    // /proc 配下のファイルは procfs で読み取る
-    if path.starts_with("/proc") {
-        let file_rights = if rights == 0 { HANDLE_RIGHTS_FILE_READ } else { rights };
-        if (file_rights & HANDLE_RIGHT_READ) == 0 {
-            return Err(SyscallError::InvalidArgument);
-        }
-        if (file_rights & HANDLE_RIGHT_WRITE) != 0 {
-            return Err(SyscallError::ReadOnly);
-        }
-        let data = procfs_read_to_vec(path)?;
-        return Ok(create_handle_with_path(data, file_rights, String::from(path)));
-    }
 
     // ルートディレクトリは特別扱い
     if path == "/" || path.is_empty() {
@@ -1617,36 +1500,60 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
     // WRITE 権限付きの場合: 新規ファイル作成も許可する
     let has_write = (rights & HANDLE_RIGHT_WRITE) != 0;
 
-    // FAT32 からエントリを取得して種別判定
-    let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let find_result = fat32.find_entry(path);
+    // パスを正規化してマウント先の FS を判定する
+    let normalized = crate::vfs::normalize_path(path)
+        .map_err(crate::vfs::vfs_error_to_syscall)?;
+    let is_procfs = normalized.starts_with("/proc");
 
-    match find_result {
-        Ok(entry) => {
-            // ATTR_DIRECTORY = 0x10
-            const ATTR_DIRECTORY: u8 = 0x10;
-            if (entry.attr & ATTR_DIRECTORY) != 0 {
-                // ディレクトリは書き込みオープン不可
-                if has_write {
-                    return Err(SyscallError::NotSupported);
+    // procfs 配下に WRITE 権限でオープンは不可
+    if has_write && is_procfs {
+        return Err(SyscallError::ReadOnly);
+    }
+
+    // VFS 経由でファイル/ディレクトリを開く
+    match crate::vfs::open(path) {
+        Ok(node) => {
+            let kind = node.kind();
+            match kind {
+                crate::vfs::VfsNodeKind::Directory => {
+                    // ディレクトリは書き込みオープン不可
+                    if has_write {
+                        return Err(SyscallError::NotSupported);
+                    }
+                    let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+                    if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    return Ok(create_directory_handle(String::from(path), dir_rights));
                 }
-                let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
-                if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
-                    return Err(SyscallError::InvalidArgument);
+                crate::vfs::VfsNodeKind::File => {
+                    // ファイルデータを読み取る
+                    let data = crate::vfs::read_file(path)
+                        .map_err(crate::vfs::vfs_error_to_syscall)?;
+                    let file_rights = if rights == 0 {
+                        if has_write { HANDLE_RIGHTS_FILE_RW } else { HANDLE_RIGHTS_FILE_READ }
+                    } else {
+                        rights
+                    };
+                    if !has_write && (file_rights & HANDLE_RIGHT_READ) == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    return Ok(create_handle_with_path(data, file_rights, String::from(path)));
                 }
-                return Ok(create_directory_handle(String::from(path), dir_rights));
             }
-
-            // 既存ファイル: データを読み込んでハンドル作成
-            let file_rights = if rights == 0 {
-                if has_write { HANDLE_RIGHTS_FILE_RW } else { HANDLE_RIGHTS_FILE_READ }
-            } else {
-                rights
-            };
-            let data = fat32.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
-            Ok(create_handle_with_path(data, file_rights, String::from(path)))
         }
-        Err(_) => {
+        Err(crate::vfs::VfsError::NotAFile) => {
+            // ディレクトリとして扱う（VFS がディレクトリに open() して NotAFile が返された場合）
+            if has_write {
+                return Err(SyscallError::NotSupported);
+            }
+            let dir_rights = if rights == 0 { HANDLE_RIGHTS_DIRECTORY_READ } else { rights };
+            if (dir_rights & (HANDLE_RIGHT_ENUM | HANDLE_RIGHT_LOOKUP)) == 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            return Ok(create_directory_handle(String::from(path), dir_rights));
+        }
+        Err(crate::vfs::VfsError::NotFound) => {
             // ファイルが見つからない場合
             if has_write {
                 // WRITE 権限付きなら新規ファイルとして空データでハンドル作成
@@ -1657,6 +1564,7 @@ pub(crate) fn open_path_to_handle(path: &str, rights: u32) -> Result<crate::hand
                 Err(SyscallError::FileNotFound)
             }
         }
+        Err(e) => Err(crate::vfs::vfs_error_to_syscall(e)),
     }
 }
 
@@ -1957,9 +1865,8 @@ fn exec_by_path_with_args(path: &str, extra_args: &[String]) -> Result<(), Sysca
         path.rsplit('/').next().unwrap_or(path)
     );
 
-    // FAT32 からファイルを読み込む
-    let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    // VFS 経由でファイルを読み込む
+    let elf_data = crate::vfs::read_file(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     // argv を構築: [path] + extra_args
     // path はユーザー空間メモリを指す &str なので、カーネルページテーブルに
@@ -2017,12 +1924,8 @@ pub fn exec_with_args_for_test(path: &str, args: &[&str], env_vars: &[(&str, &st
         crate::scheduler::set_env_var(key, value);
     }
 
-    // FAT32 からファイルを読み込む
-    let mut fs = match crate::fat32::Fat32::new() {
-        Ok(fs) => fs,
-        Err(_) => return false,
-    };
-    let elf_data = match fs.read_file(path) {
+    // VFS 経由でファイルを読み込む
+    let elf_data = match crate::vfs::read_file(path) {
         Ok(data) => data,
         Err(_) => return false,
     };
@@ -2086,9 +1989,8 @@ fn sys_spawn(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallE
     // 追加引数をパース
     let extra_args = parse_args_buffer(arg3, arg4)?;
 
-    // FAT32 からファイルを読み込む
-    let mut fs = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-    let elf_data = fs.read_file(path).map_err(|_| SyscallError::FileNotFound)?;
+    // VFS 経由でファイルを読み込む
+    let elf_data = crate::vfs::read_file(path).map_err(crate::vfs::vfs_error_to_syscall)?;
 
     // argv を構築: [path] + extra_args
     let mut args_vec: Vec<&str> = Vec::with_capacity(1 + extra_args.len());

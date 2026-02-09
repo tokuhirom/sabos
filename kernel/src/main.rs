@@ -275,6 +275,12 @@ fn main() -> Status {
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
     kprintln!();
 
+    // --- VFS（仮想ファイルシステム）の初期化 ---
+    // "/" に FAT32、"/proc" に ProcFs をマウントする。
+    // virtio-blk 初期化後に呼ぶ必要がある。
+    vfs::init();
+    kprintln!();
+
     // --- 起動時デモ（必要なときだけ） ---
     // デモがあると起動が遅くなるので、必要なときだけ機能フラグで有効化する。
     #[cfg(feature = "boot-demos")]
@@ -288,38 +294,29 @@ fn main() -> Status {
     kprintln!("Loading init from disk...");
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
 
-    // FAT32 から INIT.ELF を読み込む
-    match fat32::Fat32::new() {
-        Ok(mut fs) => {
-            match fs.read_file("/INIT.ELF") {
-                Ok(elf_data) => {
-                    kprintln!("Loaded INIT.ELF ({} bytes)", elf_data.len());
+    // VFS 経由で INIT.ELF を読み込む
+    match vfs::read_file("/INIT.ELF") {
+        Ok(elf_data) => {
+            kprintln!("Loaded INIT.ELF ({} bytes)", elf_data.len());
 
-                    // init をバックグラウンドで起動
-                    match scheduler::spawn_user("init", &elf_data, &[]) {
-                        Ok(task_id) => {
-                            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-                            kprintln!("Init process started (task {})", task_id);
-                            kprintln!();
-                            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                        }
-                        Err(e) => {
-                            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                            kprintln!("Failed to start init: {}", e);
-                            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                        }
-                    }
+            // init をバックグラウンドで起動
+            match scheduler::spawn_user("init", &elf_data, &[]) {
+                Ok(task_id) => {
+                    framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+                    kprintln!("Init process started (task {})", task_id);
+                    kprintln!();
+                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 }
                 Err(e) => {
                     framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                    kprintln!("Failed to load INIT.ELF: {:?}", e);
+                    kprintln!("Failed to start init: {}", e);
                     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
                 }
             }
         }
         Err(e) => {
             framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-            kprintln!("Failed to initialize FAT32: {:?}", e);
+            kprintln!("Failed to load INIT.ELF: {:?}", e);
             framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
         }
     }

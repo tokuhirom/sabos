@@ -351,10 +351,9 @@ pub fn close(handle: &Handle) -> Result<(), SyscallError> {
         table[handle.id as usize] = None;
         drop(table);
 
-        // FAT32 に書き戻し: 既存ファイルを削除してから新規作成
-        let mut fat32 = crate::fat32::Fat32::new().map_err(|_| SyscallError::Other)?;
-        let _ = fat32.delete_file(&path); // 既存ファイルがなくてもエラーにしない
-        fat32.create_file(&path, &data).map_err(|_| SyscallError::Other)?;
+        // VFS 経由で書き戻し: 既存ファイルを削除してから新規作成
+        let _ = crate::vfs::delete_file(&path); // 既存ファイルがなくてもエラーにしない
+        crate::vfs::create_file(&path, &data).map_err(|_| SyscallError::Other)?;
         return Ok(());
     }
 
