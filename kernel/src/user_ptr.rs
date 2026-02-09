@@ -48,6 +48,8 @@ pub enum SyscallError {
     InvalidHandle,
     /// タイムアウト
     Timeout,
+    /// キャンセルされた（IPC recv のキャンセル等）
+    Cancelled,
     /// 不明なシステムコール
     UnknownSyscall,
     /// 未対応
@@ -76,6 +78,7 @@ impl SyscallError {
         // 20-29: ファイル・ハンドル関連
         // 30-39: 権限・セキュリティ関連
         // 40-49: システム関連
+        // 50-59: IPC 関連
         // 99: その他
         let code: i64 = match self {
             // ポインタ・メモリ関連 (1-9)
@@ -101,6 +104,9 @@ impl SyscallError {
             SyscallError::UnknownSyscall => -40,
             SyscallError::NotSupported => -41,
             SyscallError::Timeout => -42,
+
+            // IPC 関連 (50-59)
+            SyscallError::Cancelled => -50,
 
             // その他
             SyscallError::Other => -99,

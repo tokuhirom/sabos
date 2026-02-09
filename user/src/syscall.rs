@@ -476,6 +476,58 @@ pub fn ipc_recv(sender_out: &mut u64, buf: &mut [u8], timeout_ms: u64) -> Syscal
     unsafe { syscall4(SYS_IPC_RECV, sender_ptr, buf_ptr, buf_len, timeout_ms) as i64 }
 }
 
+/// IPC recv 待ちをキャンセルする
+///
+/// # 引数
+/// - `target_task_id`: キャンセル対象のタスクID
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn ipc_cancel(target_task_id: u64) -> SyscallResult {
+    unsafe { syscall1(SYS_IPC_CANCEL, target_task_id) as i64 }
+}
+
+/// ハンドル付き IPC メッセージを送信する
+///
+/// IPC 経由で Capability（Handle）を委譲する。
+/// 送信元のハンドルは引き続き有効。カーネル側で duplicate される。
+///
+/// # 引数
+/// - `dest_task_id`: 宛先タスクID
+/// - `buf`: メッセージデータ
+/// - `handle`: 送信するハンドル
+///
+/// # 戻り値
+/// - 0（成功時）
+/// - 負の値（エラー時）
+pub fn ipc_send_handle(dest_task_id: u64, buf: &[u8], handle: &Handle) -> SyscallResult {
+    let buf_ptr = buf.as_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    let handle_ptr = handle as *const Handle as u64;
+    unsafe { syscall4(SYS_IPC_SEND_HANDLE, dest_task_id, buf_ptr, buf_len, handle_ptr) as i64 }
+}
+
+/// ハンドル付き IPC メッセージを受信する
+///
+/// タイムアウトなし。cancel_recv() でキャンセルされるまで待つ。
+///
+/// # 引数
+/// - `sender_out`: 送信元タスクIDの書き込み先
+/// - `buf`: 受信バッファ
+/// - `handle_out`: 受信したハンドルの書き込み先
+///
+/// # 戻り値
+/// - 読み取ったバイト数（成功時）
+/// - 負の値（エラー時: -50 = Cancelled）
+pub fn ipc_recv_handle(sender_out: &mut u64, buf: &mut [u8], handle_out: &mut Handle) -> SyscallResult {
+    let sender_ptr = sender_out as *mut u64 as u64;
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    let handle_out_ptr = handle_out as *mut Handle as u64;
+    unsafe { syscall4(SYS_IPC_RECV_HANDLE, sender_ptr, buf_ptr, buf_len, handle_out_ptr) as i64 }
+}
+
 // =================================================================
 // システム情報関連
 // =================================================================

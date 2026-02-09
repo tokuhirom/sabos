@@ -25,10 +25,14 @@
   - QEMU SLIRP のタイミング問題の可能性
 
 ### IPC 基盤の改善
-- [ ] タイムアウト/キャンセルの改善
-  - 現状の IPC はタイムアウト付き recv があるが、キャンセル機構がない
-- [ ] IPC 経由の Capability 委譲の実装
-- [ ] IPC パフォーマンスの計測と最適化
+- [x] タイムアウト/キャンセルの改善
+  - recv を Sleep/Wake 方式に改修（ポーリング廃止、CPU 浪費削減）
+  - SYS_IPC_CANCEL(92) で recv 待ちをキャンセル可能に
+- [x] IPC 経由の Capability 委譲の実装
+  - SYS_IPC_SEND_HANDLE(93) / SYS_IPC_RECV_HANDLE(94) を追加
+  - duplicate_handle でハンドルを複製して送信
+- [x] IPC パフォーマンスの計測と最適化
+  - ipc_bench コマンドで TSC サイクル計測
 
 ### Capability ベースの実装を日常運用に
 - [x] ユーザーシェルをハンドル API に移行

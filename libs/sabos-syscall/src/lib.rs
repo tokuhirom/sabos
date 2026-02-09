@@ -131,6 +131,9 @@ pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
 // =================================================================
 pub const SYS_IPC_SEND: u64 = 90;     // ipc_send(dest_task_id, buf_ptr, len)
 pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, timeout_ms)
+pub const SYS_IPC_CANCEL: u64 = 92;   // ipc_cancel(target_task_id) — recv 待ちをキャンセル
+pub const SYS_IPC_SEND_HANDLE: u64 = 93; // ipc_send_handle(dest, buf_ptr, len, handle_ptr) — ハンドル付きメッセージ送信
+pub const SYS_IPC_RECV_HANDLE: u64 = 94; // ipc_recv_handle(sender_ptr, buf_ptr, buf_len, handle_out_ptr) — ハンドル付きメッセージ受信
 
 // =================================================================
 // サウンド (100-109)

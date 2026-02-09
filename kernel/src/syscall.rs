@@ -248,6 +248,9 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         // IPC
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
+        SYS_IPC_CANCEL => sys_ipc_cancel(arg1),
+        SYS_IPC_SEND_HANDLE => sys_ipc_send_handle(arg1, arg2, arg3, arg4),
+        SYS_IPC_RECV_HANDLE => sys_ipc_recv_handle(arg1, arg2, arg3, arg4),
         // サウンド
         SYS_SOUND_PLAY => sys_sound_play(arg1, arg2),
         // スレッド
@@ -1224,6 +1227,73 @@ fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
     let copy_len = core::cmp::min(buf.len(), msg.data.len());
     buf[..copy_len].copy_from_slice(&msg.data[..copy_len]);
     sender_ptr.write(msg.sender);
+
+    Ok(copy_len as u64)
+}
+
+/// SYS_IPC_CANCEL: IPC recv 待ちをキャンセルする
+///
+/// 引数:
+///   arg1 — キャンセル対象のタスクID
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_ipc_cancel(arg1: u64) -> Result<u64, SyscallError> {
+    crate::ipc::cancel_recv(arg1)?;
+    Ok(0)
+}
+
+/// SYS_IPC_SEND_HANDLE: ハンドル付き IPC メッセージを送信する
+///
+/// 引数:
+///   arg1 — 宛先タスクID
+///   arg2 — バッファのポインタ（ユーザー空間）
+///   arg3 — バッファの長さ
+///   arg4 — ハンドルのポインタ（ユーザー空間、Handle 構造体）
+///
+/// 戻り値:
+///   0（成功時）
+///   負の値（エラー時）
+fn sys_ipc_send_handle(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
+    let buf = buf_slice.as_slice();
+
+    let handle_ptr = user_ptr_from_arg::<crate::handle::Handle>(arg4)?;
+    let handle = handle_ptr.read();
+
+    let sender = crate::scheduler::current_task_id();
+    crate::ipc::send_with_handle(sender, arg1, buf.to_vec(), &handle)?;
+    Ok(0)
+}
+
+/// SYS_IPC_RECV_HANDLE: ハンドル付き IPC メッセージを受信する
+///
+/// 引数:
+///   arg1 — 送信元タスクIDの書き込み先（ユーザー空間）
+///   arg2 — 受信バッファのポインタ（ユーザー空間）
+///   arg3 — 受信バッファの長さ
+///   arg4 — ハンドルの書き込み先（ユーザー空間、Handle 構造体）
+///
+/// 戻り値:
+///   読み取ったバイト数（成功時）
+///   負の値（エラー時）
+fn sys_ipc_recv_handle(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // IPC 受信は待ちに入る可能性があるため、割り込みを有効化してタイマ割り込みを許可する
+    x86_64::instructions::interrupts::enable();
+
+    let sender_ptr = user_ptr_from_arg::<u64>(arg1)?;
+    let buf_slice = user_slice_from_args(arg2, arg3)?;
+    let buf = buf_slice.as_mut_slice();
+    let handle_out_ptr = user_ptr_from_arg::<crate::handle::Handle>(arg4)?;
+
+    let task_id = crate::scheduler::current_task_id();
+    let msg = crate::ipc::recv_with_handle(task_id)?;
+
+    let copy_len = core::cmp::min(buf.len(), msg.data.len());
+    buf[..copy_len].copy_from_slice(&msg.data[..copy_len]);
+    sender_ptr.write(msg.sender);
+    handle_out_ptr.write(msg.handle);
 
     Ok(copy_len as u64)
 }

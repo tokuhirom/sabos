@@ -111,6 +111,7 @@ impl Shell {
             "dns" => self.cmd_dns(args),
             "http" => self.cmd_http(args),
             "selftest" => self.cmd_selftest(args),
+            "ipc_bench" => self.cmd_ipc_bench(args),
             "beep" => self.cmd_beep(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
@@ -150,6 +151,7 @@ impl Shell {
         kprintln!("  dns <domain>    - Resolve domain name to IP address");
         kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
         kprintln!("  selftest [target] - Run automated self-tests (target: all/base/core/fs/net/gui/service/list)");
+        kprintln!("  ipc_bench [n]   - IPC round-trip benchmark (default: 1000 iterations)");
         kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
@@ -1233,6 +1235,12 @@ impl Shell {
 
             // 11.14. スレッド構造体のテスト
             run_test("thread_struct", this.test_thread_struct());
+
+            // 11.15. IPC cancel のテスト
+            run_test("ipc_cancel", this.test_ipc_cancel());
+
+            // 11.16. IPC ハンドル委譲のテスト
+            run_test("ipc_handle", this.test_ipc_handle());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2098,6 +2106,92 @@ impl Shell {
         };
 
         msg.sender == task_id && msg.data == data
+    }
+
+    /// IPC cancel のテスト
+    ///
+    /// cancel_recv が正しく Cancelled エラーを返すことを確認する。
+    /// selftest は単一タスクなので、送信前に cancel フラグを立ててから recv する。
+    fn test_ipc_cancel(&self) -> bool {
+        let task_id = crate::scheduler::current_task_id();
+
+        // 自分自身をキャンセル対象にする
+        if crate::ipc::cancel_recv(task_id).is_err() {
+            return false;
+        }
+
+        // recv すると即座に Cancelled が返るはず
+        // （cancel フラグが立っているので sleep せずにキャンセルチェックで引っかかる...
+        //   実際にはフラグチェックは yield 後。ここでは try_recv → メッセージなし →
+        //   sleep → 即 wake（cancel による）→ キャンセルチェック の流れ）
+        //
+        // ただし selftest では割り込みが有効でない可能性があるので、
+        // cancel フラグは recv の中で直接チェックされるべき。
+        //
+        // 実装上: cancel_recv() → IPC_CANCELLED に追加 + wake_task
+        // recv() → try_recv(なし) → WAITERS 登録 → sleep → ダブルチェック(なし) → yield
+        //        → 起床(cancel の wake で) → WAITERS 除去 → CANCELLED チェック → Cancelled 返却
+        //
+        // しかし selftest はカーネルタスクで、割り込みなしの可能性がある。
+        // wake_task は Sleeping→Ready にするだけなので、yield_now() で即再スケジュール可能。
+        // 問題: set_current_sleeping 直後に、preempt で Ready に戻されないと yield で進まない。
+        //
+        // テスト戦略: キャンセルフラグが立っている状態で recv して Cancelled が返ることだけ確認。
+        // cancel_recv は wake_task も呼ぶので、selftest タスクは yield 後に即復帰する。
+        let result = crate::ipc::recv(task_id, 1000);
+        match result {
+            Err(crate::user_ptr::SyscallError::Cancelled) => true,
+            _ => false,
+        }
+    }
+
+    /// IPC ハンドル委譲のテスト
+    ///
+    /// ファイルハンドルを IPC 経由で自分自身に送信し、受信したハンドルで
+    /// 同じデータが読めることを確認する。
+    fn test_ipc_handle(&self) -> bool {
+        use crate::handle;
+        use alloc::vec;
+
+        let task_id = crate::scheduler::current_task_id();
+
+        // テスト用ファイルハンドルを作成
+        let test_data = b"IPC handle test data";
+        let src_handle = handle::create_handle(test_data.to_vec(), handle::HANDLE_RIGHTS_FILE_READ);
+
+        // ハンドル付きメッセージを自分自身に送信
+        let msg_data = b"handle-msg";
+        if crate::ipc::send_with_handle(task_id, task_id, msg_data.to_vec(), &src_handle).is_err() {
+            return false;
+        }
+
+        // 受信
+        let msg = match crate::ipc::try_recv_with_handle(task_id) {
+            Some(m) => m,
+            None => return false,
+        };
+
+        // メッセージデータの確認
+        if msg.data != msg_data || msg.sender != task_id {
+            return false;
+        }
+
+        // 受信したハンドルで読み取り
+        let mut buf = vec![0u8; 64];
+        let n = match handle::read(&msg.handle, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        // 元のデータと一致するか
+        if &buf[..n] != test_data {
+            return false;
+        }
+
+        // クリーンアップ
+        let _ = handle::close(&src_handle);
+        let _ = handle::close(&msg.handle);
+        true
     }
 
     /// 文字列置換ユーティリティのテスト
@@ -2987,6 +3081,58 @@ impl Shell {
         }
     }
 
+    /// ipc_bench コマンド: IPC ラウンドトリップのベンチマーク
+    ///
+    /// 自分自身に N 回 send+recv して、TSC サイクル数で
+    /// min/avg/max と推定スループットを表示する。
+    ///
+    /// # 使い方
+    /// - `ipc_bench` — デフォルト (1000 回)
+    /// - `ipc_bench 500` — 500 回
+    fn cmd_ipc_bench(&self, args: &str) {
+        let n: usize = args.trim().parse().unwrap_or(1000);
+        if n == 0 {
+            kprintln!("Error: n must be > 0");
+            return;
+        }
+
+        let task_id = crate::scheduler::current_task_id();
+        let data = b"bench";
+
+        // ウォームアップ: 10 回
+        for _ in 0..10 {
+            let _ = crate::ipc::send(task_id, task_id, data.to_vec());
+            let _ = crate::ipc::recv(task_id, 1000);
+        }
+
+        let mut min_cycles: u64 = u64::MAX;
+        let mut max_cycles: u64 = 0;
+        let mut total_cycles: u64 = 0;
+
+        for _ in 0..n {
+            let start = rdtsc();
+            let _ = crate::ipc::send(task_id, task_id, data.to_vec());
+            let _ = crate::ipc::recv(task_id, 1000);
+            let end = rdtsc();
+            let elapsed = end.wrapping_sub(start);
+            total_cycles += elapsed;
+            if elapsed < min_cycles {
+                min_cycles = elapsed;
+            }
+            if elapsed > max_cycles {
+                max_cycles = elapsed;
+            }
+        }
+
+        let avg_cycles = total_cycles / (n as u64);
+        kprintln!("=== IPC Benchmark ===");
+        kprintln!("  iterations: {}", n);
+        kprintln!("  min: {} cycles", min_cycles);
+        kprintln!("  avg: {} cycles", avg_cycles);
+        kprintln!("  max: {} cycles", max_cycles);
+        kprintln!("  total: {} cycles", total_cycles);
+    }
+
     /// panic コマンド: 意図的にカーネルパニックを発生させる。
     /// panic ハンドラのテスト用。シリアルと画面に赤字で panic 情報が表示されるはず。
     fn cmd_panic(&self) {
@@ -3003,6 +3149,19 @@ impl Shell {
             x86_64::instructions::hlt();
         }
     }
+}
+
+/// rdtsc 命令で TSC (Time Stamp Counter) を読み取る。
+///
+/// IPC ベンチマーク等のサイクル計測で使用する。
+#[inline]
+fn rdtsc() -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi, options(nomem, nostack));
+    }
+    ((hi as u64) << 32) | (lo as u64)
 }
 
 /// カーネル側から selftest を実行するための公開関数。

@@ -245,8 +245,33 @@ Capability-based security を実現するためのハンドル操作。
 
 ## IPC (90-99)
 
+recv は Sleep/Wake 方式で実装されており、ポーリングではなくタスクを Sleeping 状態にして
+メッセージ到着時に wake_task で起床させる。CPU サイクルの浪費を防ぎ、レイテンシも改善する。
+
 - `90` `SYS_IPC_SEND(dest_task_id, buf_ptr, len) -> 0`
+  - メッセージを dest タスクの受信キューに追加する
+  - dest が recv 待ち（Sleeping）の場合は自動的に起床させる
+
 - `91` `SYS_IPC_RECV(sender_ptr, buf_ptr, buf_len, timeout_ms) -> n`
+  - メッセージを受信する（Sleep/Wake 方式）
+  - `timeout_ms == 0`: 無期限待ち
+  - キャンセルされた場合は -50 (Cancelled) を返す
+
+- `92` `SYS_IPC_CANCEL(target_task_id) -> 0`
+  - 対象タスクの IPC recv 待ちをキャンセルする
+  - 対象タスクが Sleeping 状態なら起床させ、recv は -50 (Cancelled) を返す
+  - エラー: -10 (タスクが存在しない)
+
+- `93` `SYS_IPC_SEND_HANDLE(dest_task_id, buf_ptr, len, handle_ptr) -> 0`
+  - ハンドル（Capability）付きメッセージを送信する
+  - `handle_ptr`: 送信する Handle 構造体のポインタ
+  - カーネル内部でハンドルを duplicate（元ハンドルは送信元が引き続き使用可能）
+  - dest が recv 待ちの場合は自動的に起床させる
+
+- `94` `SYS_IPC_RECV_HANDLE(sender_ptr, buf_ptr, buf_len, handle_out_ptr) -> n`
+  - ハンドル付きメッセージを受信する（タイムアウトなし、cancel で中断）
+  - `handle_out_ptr`: 受信した Handle 構造体の書き込み先
+  - キャンセルされた場合は -50 (Cancelled) を返す
 
 ## サウンド (100-109)
 
@@ -346,6 +371,12 @@ SABOS 独自のエラーコード体系。POSIX 互換は目指さない。
 | -40 | UNKNOWN_SYSCALL | 未知のシステムコール |
 | -41 | NOT_SUPPORTED | 未対応の操作 |
 | -42 | TIMEOUT | タイムアウト |
+
+### IPC 関連 (50-59)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -50 | CANCELLED | 操作がキャンセルされた（IPC recv のキャンセル等） |
 
 ### その他
 

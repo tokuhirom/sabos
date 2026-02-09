@@ -210,6 +210,38 @@ fn insert_entry(entry: HandleEntry, token: u64) -> Handle {
     }
 }
 
+/// 既存のハンドルを複製する（IPC 経由の Capability 委譲用）
+///
+/// 元ハンドルと同じ rights/kind/path/data を持つ新ハンドルを作成する。
+/// token は新規生成、pos は 0 にリセットする。
+///
+/// # 引数
+/// - `handle`: 複製元のハンドル
+///
+/// # 戻り値
+/// 新しい Handle（独立した token を持つ）
+///
+/// # エラー
+/// - `InvalidHandle`: ハンドルが無効
+pub fn duplicate_handle(handle: &Handle) -> Result<Handle, SyscallError> {
+    let table = HANDLE_TABLE.lock();
+    let entry = get_entry(&table, handle)?;
+
+    let new_token = next_token();
+    let new_entry = HandleEntry {
+        token: new_token,
+        rights: entry.rights,
+        kind: entry.kind,
+        path: entry.path.clone(),
+        data: entry.data.clone(),
+        pos: 0,     // ポジションは先頭にリセット
+        dirty: false,
+    };
+
+    drop(table); // ロックを解放してから insert_entry を呼ぶ
+    Ok(insert_entry(new_entry, new_token))
+}
+
 // =================================================================
 // Handle の操作
 // =================================================================
