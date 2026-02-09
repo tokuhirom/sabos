@@ -41,15 +41,16 @@
   - SYS_HANDLE_CREATE_FILE(140), SYS_HANDLE_UNLINK(141), SYS_HANDLE_MKDIR(142) を追加
   - cwd_handle がフルアクセス権限（CREATE/DELETE 含む）を持つように変更
   - openat が親ハンドルの権限を引き継ぐように修正
-- [ ] すべてのファイル操作を VFS 経由に統一
-  - procfs も VFS の子として扱う
-  - JSON 出力の統一
+- [x] すべてのファイル操作を VFS 経由に統一
+  - VFS マネージャ（マウントテーブル）を導入、"/" に Fat32、"/proc" に ProcFs をマウント
+  - syscall.rs / handle.rs / shell.rs の Fat32 直接呼び出しと /proc 分岐を除去
+  - procfs も VFS の子として自動ルーティング
 
 ## 中期目標（いつかやりたい）
 
 ### ファイルシステムのユーザー空間移行
 - [ ] FAT32 ドライバをユーザー空間で動かす（サービス化）
-- [ ] VFS (Virtual File System) 層の設計・拡充
+- [ ] VFS (Virtual File System) 層の拡充（マウントテーブルは実装済み、ユーザー空間移行が次の課題）
 - [ ] ファイルシステムがクラッシュしてもカーネルは生き残る
 - [ ] procfs をユーザー空間サービス化
 
