@@ -96,6 +96,21 @@ pub fn try_recv(task_id: u64) -> Option<IpcMessage> {
     q.pop_front()
 }
 
+/// タスク終了時に IPC キューをクリーンアップする。
+///
+/// タスクが終了すると、そのタスク宛の未読メッセージは誰も読まないので
+/// メモリリークになる。この関数でキューを丸ごと削除して解放する。
+pub fn cleanup_task(task_id: u64) {
+    {
+        let mut queues = IPC_QUEUES.lock();
+        queues.remove(&task_id);
+    }
+    {
+        let mut queues = TYPED_IPC_QUEUES.lock();
+        queues.remove(&task_id);
+    }
+}
+
 // =================================================================
 // 型安全 IPC (カーネル内プロトタイプ)
 // =================================================================

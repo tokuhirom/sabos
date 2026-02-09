@@ -38,8 +38,10 @@ const SLAB_UNITS: [usize; 7] = [1, 1, 1, 1, 1, 1, 1];
 /// ヒープ全体を何分割するか
 ///
 /// 各サイズクラスに 1 ユニットずつ（計 7）、残りは大オブジェクト用。
-/// 32 分割にすることで各スラブのサイズを小さくし、大オブジェクトに多く配分する。
-const TOTAL_UNITS: usize = 32;
+/// 64 分割にすることで各スラブのサイズを 256 KiB に抑え、
+/// 大オブジェクト（ELF ロードやタスクスタック等）に多く配分する。
+/// スラブの実使用率は 1% 未満なので 256 KiB で十分。
+const TOTAL_UNITS: usize = 64;
 
 // =============================================================================
 // FreeNode — 解放済みスロットの intrusive linked list ノード
@@ -413,14 +415,14 @@ impl SlabAllocator {
     ///
     /// | クラス | ユニット数 | 16MiB 時のサイズ |
     /// |--------|-----------|----------------|
-    /// | 32B    | 1         | 512 KiB        |
-    /// | 64B    | 1         | 512 KiB        |
-    /// | 128B   | 1         | 512 KiB        |
-    /// | 256B   | 1         | 512 KiB        |
-    /// | 512B   | 1         | 512 KiB        |
-    /// | 1024B  | 1         | 512 KiB        |
-    /// | 2048B  | 1         | 512 KiB        |
-    /// | Large  | 25        | 12.5 MiB       |
+    /// | 32B    | 1         | 256 KiB        |
+    /// | 64B    | 1         | 256 KiB        |
+    /// | 128B   | 1         | 256 KiB        |
+    /// | 256B   | 1         | 256 KiB        |
+    /// | 512B   | 1         | 256 KiB        |
+    /// | 1024B  | 1         | 256 KiB        |
+    /// | 2048B  | 1         | 256 KiB        |
+    /// | Large  | 57        | 14.25 MiB      |
     fn new(heap_start: usize, heap_size: usize) -> Self {
         let unit_size = heap_size / TOTAL_UNITS;
         let mut offset = heap_start;
@@ -554,6 +556,40 @@ impl LockedSlabAllocator {
     pub fn init(&self, heap_start: usize, heap_size: usize) {
         let mut inner = self.inner.lock();
         *inner = Some(SlabAllocator::new(heap_start, heap_size));
+    }
+
+    /// ヒープ使用状況をシリアルに出力する（デバッグ用）。
+    ///
+    /// 各スラブと大オブジェクト領域の使用状況を表示する。
+    pub fn dump_stats(&self) {
+        let inner = self.inner.lock();
+        if let Some(allocator) = inner.as_ref() {
+            for (i, slab) in allocator.slabs.iter().enumerate() {
+                let total_slots = (slab.region_end - slab.region_start) / slab.slot_size;
+                crate::serial_println!(
+                    "[heap] slab[{}] size={:>5} alloc={:>5}/{:>5}",
+                    i, slab.slot_size, slab.allocated_count, total_slots
+                );
+            }
+            let large = &allocator.large;
+            let total = large.region_end - large.region_start;
+            let bump_used = large.next_uninit - large.region_start;
+            // フリーリストの合計サイズを計算
+            let mut free_bytes = 0usize;
+            let mut free_blocks = 0usize;
+            let mut current = large.free_list;
+            while !current.is_null() {
+                unsafe {
+                    free_bytes += (*current).size;
+                    free_blocks += 1;
+                    current = (*current).next;
+                }
+            }
+            crate::serial_println!(
+                "[heap] large: bump={}/{} free_list={} bytes in {} blocks",
+                bump_used, total, free_bytes, free_blocks
+            );
+        }
     }
 }
 

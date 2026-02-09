@@ -160,6 +160,9 @@ fn alloc_error_handler(layout: Layout) -> ! {
         free
     );
 
+    // ヒープ使用状況の詳細を出力
+    ALLOCATOR.dump_stats();
+
     panic!("Out of memory");
 }
 

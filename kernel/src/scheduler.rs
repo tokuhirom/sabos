@@ -153,6 +153,8 @@ extern "C" fn task_exit_handler() {
     };
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
+    // IPC キューをクリーンアップ（未読メッセージを解放）
+    crate::ipc::cleanup_task(task_id);
     // 他のタスクに切り替える
     yield_now();
     // ここに戻ることはないはず（Finished タスクはスケジュールされない）
@@ -1010,7 +1012,10 @@ pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitE
                 let exit_code = sched.tasks[idx].exit_code;
                 // 同じ終了を繰り返し返さないように回収済みにする
                 sched.tasks[idx].reaped = true;
-                // TODO: 将来的にはここでタスクエントリをクリーンアップする
+                // リソースを解放: タスクスタック（16KB）と環境変数を解放して
+                // ヒープの圧迫を防ぐ。タスクエントリ自体は ID 参照のために残す。
+                sched.tasks[idx]._stack = None;
+                sched.tasks[idx].env_vars = Vec::new();
                 return Ok(exit_code);
             }
 
@@ -1096,6 +1101,9 @@ pub fn wait_for_thread(thread_id: u64, timeout_ms: u64) -> Result<i32, WaitError
                     if t.state == TaskState::Finished && !t.reaped {
                         let exit_code = t.exit_code;
                         t.reaped = true;
+                        // リソースを解放
+                        t._stack = None;
+                        t.env_vars = Vec::new();
                         return Ok(exit_code);
                     }
                     if t.state == TaskState::Finished && t.reaped {
@@ -1181,6 +1189,8 @@ pub fn kill_task(task_id: u64) -> Result<(), &'static str> {
 
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
+    // IPC キューをクリーンアップ（未読メッセージを解放）
+    crate::ipc::cleanup_task(task_id);
 
     // ロック外でリソースを解放する
     if let Some(info) = user_process_info {
@@ -1265,6 +1275,8 @@ pub fn abort_current_user_task_from_exception() -> ! {
 
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
+    // IPC キューをクリーンアップ（未読メッセージを解放）
+    crate::ipc::cleanup_task(task_id);
 
     // ユーザープロセスのリソースを解放
     if let Some(info) = user_process_info {
@@ -1368,6 +1380,8 @@ extern "C" fn user_task_exit_handler() {
 
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
+    // IPC キューをクリーンアップ（未読メッセージを解放）
+    crate::ipc::cleanup_task(task_id);
 
     // ユーザープロセスのリソースを解放
     if let Some(info) = user_process_info {
@@ -1722,6 +1736,8 @@ extern "C" fn thread_exit_handler() {
     };
     // キーボードフォーカスを持っていたら自動解放する
     crate::console::release_keyboard(task_id);
+    // IPC キューをクリーンアップ（未読メッセージを解放）
+    crate::ipc::cleanup_task(task_id);
     // 他のタスクに切り替える
     yield_now();
     // ここに戻ることはないはず（Finished タスクはスケジュールされない）
