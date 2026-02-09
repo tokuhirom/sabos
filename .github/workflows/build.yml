@@ -7,6 +7,7 @@ on:
     branches: [main]
 
 jobs:
+  # 高速コンパイルチェック（QEMU 不要、早い段階でビルドエラーを検出）
   build:
     runs-on: ubuntu-latest
     steps:
@@ -26,9 +27,9 @@ jobs:
       - name: Build kernel
         run: cd kernel && cargo build --target x86_64-unknown-uefi
 
+  # base テスト（build と並列実行）
   test:
     runs-on: ubuntu-latest
-    needs: build  # build が成功してからテスト実行
     steps:
       - uses: actions/checkout@v4
 
@@ -36,29 +37,21 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: x86_64-unknown-uefi,x86_64-unknown-none
+          components: rust-src
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools netcat-openbsd
-
-      - name: Build
-        run: make build
-
-      - name: Create disk image
-        run: make disk-img
-
-      - name: Create ESP directory
-        run: mkdir -p esp/EFI/BOOT
 
       - name: Run selftest
         env:
           SELFTEST_TARGET: base
         run: make test
 
+  # GUI テスト（build と並列実行）
   test-gui:
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - uses: actions/checkout@v4
 
@@ -66,20 +59,12 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: x86_64-unknown-uefi,x86_64-unknown-none
+          components: rust-src
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools netcat-openbsd
-
-      - name: Build
-        run: make build
-
-      - name: Create disk image
-        run: make disk-img
-
-      - name: Create ESP directory
-        run: mkdir -p esp/EFI/BOOT
 
       - name: Run selftest (GUI)
         env:
