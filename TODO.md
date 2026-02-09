@@ -9,13 +9,9 @@
   - HELLOSTD.ELF から `std::net::TcpStream` や `UdpSocket` を使うと IPC recv がタイムアウトする
   - no_std の shell selftest_net からは同じ操作が成功する
   - 原因: HELLOSTD.ELF が前のテスト（fs, time, env）を実行した後のタイミング問題の可能性
-- [ ] HELLOSTD.ELF 後のカーネルパニック（INVALID OPCODE #UD）
-  - ネットワークテストのタイムアウト後に発生
-  - アドレス 0x7c0100b (Ring 0) で発生しているのでカーネル側のバグ
-
-### grep コマンドの修正
-- [ ] シェルの grep コマンドがファイル検索で正しく動作しない
-  - `grep ello .` でエラーになる（ディレクトリ指定での検索が未対応？）
+- [x] ~~HELLOSTD.ELF 後のカーネルパニック（INVALID OPCODE #UD）~~ → 修正済み
+  - 原因: SAVED_RSP/SAVED_RBP がグローバル変数で、子プロセス/スレッドが上書きしていた
+  - 修正: タスクごとにバックアップを取り、コンテキストスイッチ時に退避・復帰
 
 ### AC97 音声出力の実装
 - [ ] AC97 ドライバで実際に音を鳴らす
