@@ -95,30 +95,10 @@ global_asm!(
     "ret",
 );
 
-global_asm!(
-    "context_switch_enable:",
-    "push rbp",
-    "push rbx",
-    "push rdi",
-    "push rsi",
-    "push r12",
-    "push r13",
-    "push r14",
-    "push r15",
-    "mov [rcx], rsp",   // 現在の rsp を保存
-    "mov rsp, rdx",     // 新しい rsp に切り替え
-    "mov cr3, r8",      // CR3 を切り替え（TLB フラッシュ）
-    "pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop rsi",
-    "pop rdi",
-    "pop rbx",
-    "pop rbp",
-    "sti",              // 協調的 yield のみ割り込みを再有効化
-    "ret",
-);
+// context_switch_enable は廃止。
+// yield_now() でも context_switch を使い、SAVED_RSP/SAVED_RBP の復帰後に
+// 明示的に interrupts::enable() で割り込みを有効化する。
+// 新しいタスクのトランポリンは自前で sti するため問題ない。
 
 // =================================================================
 // タスクトランポリン（アセンブリ）
@@ -159,7 +139,6 @@ unsafe extern "C" {
     /// アセンブリで実装されたコンテキストスイッチ関数。
     /// new_cr3 には切り替え先タスクの CR3 値（ページテーブルの物理アドレス）を渡す。
     fn context_switch(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64);
-    fn context_switch_enable(old_rsp_ptr: *mut u64, new_rsp: u64, new_cr3: u64);
 }
 
 /// タスクのエントリ関数が return した後に呼ばれるハンドラ。
@@ -293,6 +272,13 @@ pub struct Task {
     /// spawn_thread() で作られたスレッドは Some(leader_id)。
     /// スレッドはリーダーと同じ CR3（アドレス空間）を共有する。
     pub process_leader_id: Option<u64>,
+    /// ユーザータスクの exit_usermode 用 SAVED_RSP バックアップ。
+    /// コンテキストスイッチ時にグローバルの SAVED_RSP を退避・復帰するために使う。
+    /// SAVED_RSP/SAVED_RBP はグローバル変数のため、複数のユーザータスクが
+    /// jump_to_usermode() を呼ぶと上書きされてしまう問題への対策。
+    pub exit_saved_rsp: u64,
+    /// ユーザータスクの exit_usermode 用 SAVED_RBP バックアップ。
+    pub exit_saved_rbp: u64,
 }
 
 // =================================================================
@@ -353,6 +339,8 @@ pub fn init() {
         reaped: false,                // wait() は不要
         env_vars: Vec::new(),         // カーネルタスクに環境変数はない
         process_leader_id: None,      // カーネルタスクはプロセスリーダーではない
+        exit_saved_rsp: 0,
+        exit_saved_rbp: 0,
     });
     sched.current = 0;
 }
@@ -441,6 +429,8 @@ pub fn spawn(name: &'static str, entry: fn()) {
         reaped: false,                // wait() は不要
         env_vars: Vec::new(),         // カーネルタスクに環境変数はない
         process_leader_id: None,      // カーネルタスクはスレッドではない
+        exit_saved_rsp: 0,
+        exit_saved_rbp: 0,
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -513,7 +503,16 @@ pub fn yield_now() {
                         ks_ptr + ks_len
                     });
 
-                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top))
+                // SAVED_RSP/SAVED_RBP をタスクごとにバックアップする。
+                // jump_to_usermode() がグローバル変数に保存した RSP/RBP を
+                // 退避しておき、コンテキストスイッチ後に復帰する。
+                // これにより、他のタスクが jump_to_usermode() でグローバルを
+                // 上書きしても、このタスクの exit_usermode() が正しい値を使える。
+                let (saved_rsp, saved_rbp) = crate::usermode::get_saved_usermode_context();
+                sched.tasks[current].exit_saved_rsp = saved_rsp;
+                sched.tasks[current].exit_saved_rbp = saved_rbp;
+
+                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top, current))
             }
         }
     }; // Mutex はここで drop される（context_switch 前にロックを解放）
@@ -527,7 +526,7 @@ pub fn yield_now() {
             // タイマー割り込みが発火すると preempt() が Sleeping タスクの起床をチェックする。
             x86_64::instructions::interrupts::enable_and_hlt();
         }
-        Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)) => {
+        Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top, my_idx)) => {
             // ユーザープロセスへの切り替え時は TSS rsp0 を更新する。
             // ユーザーモードで割り込み/システムコールが発生したとき、
             // CPU は TSS rsp0 のアドレスをカーネルスタックとして使用する。
@@ -542,10 +541,31 @@ pub fn yield_now() {
             // CR3 も同時に切り替えることで、新しいタスクのアドレス空間になる。
             // この関数から「戻ってきた」時点で、このタスクは
             // 別のタスクの yield_now() から再スケジュールされている。
+            //
+            // context_switch_enable ではなく context_switch を使う。
+            // context_switch_enable は sti + ret でインカミングタスクの割り込みを
+            // 有効化するが、sti 後の ret と次の命令の間にプリエンプションが入ると
+            // SAVED_RSP/SAVED_RBP の復帰前に再度コンテキストスイッチされる危険がある。
+            // context_switch は割り込み無効のまま戻るので、復帰完了まで安全。
             unsafe {
-                context_switch_enable(old_rsp_ptr, new_rsp, new_cr3);
+                context_switch(old_rsp_ptr, new_rsp, new_cr3);
             }
             // 戻ってきた = このタスクが再び Running になった
+            // （割り込みは無効のまま）
+
+            // SAVED_RSP/SAVED_RBP をこのタスクのバックアップから復帰する。
+            // 他のタスクが jump_to_usermode() でグローバル変数を上書きしている可能性があるため、
+            // コンテキストスイッチ前に退避した値を書き戻す。
+            // 割り込み無効状態なのでプリエンプションに邪魔されない。
+            {
+                let sched = SCHEDULER.lock();
+                let task = &sched.tasks[my_idx];
+                crate::usermode::set_saved_usermode_context(
+                    task.exit_saved_rsp,
+                    task.exit_saved_rbp,
+                );
+            }
+
             x86_64::instructions::interrupts::enable();
         }
     }
@@ -638,12 +658,18 @@ pub fn preempt() {
                         ks_ptr + ks_len
                     });
 
-                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top))
+                // SAVED_RSP/SAVED_RBP をタスクごとにバックアップする。
+                // （yield_now() と同じ理由 — 詳細はそちらのコメントを参照）
+                let (saved_rsp, saved_rbp) = crate::usermode::get_saved_usermode_context();
+                sched.tasks[current].exit_saved_rsp = saved_rsp;
+                sched.tasks[current].exit_saved_rbp = saved_rbp;
+
+                Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top, current))
             }
         }
     }; // Mutex はここで drop
 
-    if let Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top)) = switch_info {
+    if let Some((old_rsp_ptr, new_rsp, new_cr3, new_kernel_stack_top, my_idx)) = switch_info {
         PREEMPT_SWITCH_COUNT.fetch_add(1, Ordering::Relaxed);
 
         // ユーザープロセスへの切り替え時は TSS rsp0 を更新。
@@ -660,6 +686,18 @@ pub fn preempt() {
             context_switch(old_rsp_ptr, new_rsp, new_cr3);
         }
         // 戻ってきた = このタスクが再び Running になった
+
+        // SAVED_RSP/SAVED_RBP をこのタスクのバックアップから復帰する。
+        // 割り込みハンドラ内（割り込み無効）なのでプリエンプションに邪魔されない。
+        {
+            let sched = SCHEDULER.lock();
+            let task = &sched.tasks[my_idx];
+            crate::usermode::set_saved_usermode_context(
+                task.exit_saved_rsp,
+                task.exit_saved_rbp,
+            );
+        }
+
         // （割り込みハンドラ内なので iretq で割り込みが再有効化される）
     }
 }
@@ -1408,6 +1446,17 @@ extern "C" fn user_task_entry_wrapper(task_id: u64) {
     }
 
     // ここに到達 = exit_usermode() 経由で Ring 3 から戻ってきた（SYS_EXIT）
+    //
+    // CR3 をカーネルのページテーブルに復帰する。
+    // jump_to_usermode() 実行中はプロセスの CR3 がアクティブだが、
+    // この後 user_task_exit_handler() → destroy_user_process() でプロセスの
+    // ページテーブルが解放される。CR3 が解放済みフレームを指したまま
+    // 実行を続けると、TLB ミスで解放済みメモリを参照して #UD 等のクラッシュが発生する。
+    // run_in_usermode() と同様に、戻ったらすぐカーネル CR3 に切り替える。
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+
     // この後、user_task_trampoline に戻り、user_task_exit_handler が呼ばれる
 }
 
@@ -1538,6 +1587,8 @@ pub fn spawn_user(name: &str, elf_data: &[u8], args: &[&str]) -> Result<u64, &'s
         reaped: false,                // wait() が呼ばれるまで未回収
         env_vars: parent_env_vars,    // 親プロセスの環境変数を継承
         process_leader_id: None,      // プロセスリーダー（メインスレッド）
+        exit_saved_rsp: 0,
+        exit_saved_rbp: 0,
     });
 
     crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);
@@ -1647,6 +1698,14 @@ extern "C" fn thread_entry_wrapper(task_id: u64) {
     }
 
     // ここに到達 = exit_usermode() 経由で Ring 3 から戻ってきた
+
+    // CR3 をカーネルのページテーブルに復帰する。
+    // user_task_entry_wrapper と同様に、プロセス CR3 のままだと
+    // 後続の thread_exit_handler → yield_now で問題が起きる可能性がある。
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+
     // thread_task_trampoline に戻り、thread_exit_handler が呼ばれる
 }
 
@@ -1751,6 +1810,8 @@ pub fn spawn_thread(entry_point: u64, user_stack_top: u64, arg: u64) -> Result<u
         reaped: false,
         env_vars: parent_env_vars,
         process_leader_id: Some(leader_id),  // スレッドグループのリーダー
+        exit_saved_rsp: 0,
+        exit_saved_rbp: 0,
     });
 
     // カーネルスタックの所有権をリーダープロセスに移管する。

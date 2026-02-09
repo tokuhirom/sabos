@@ -142,8 +142,28 @@ pub fn destroy_user_process(process: UserProcess) {
 /// run_in_usermode() のカーネルスタック状態を保存するグローバル変数。
 /// SYS_EXIT システムコールで、ここに保存した RSP/RBP を復元して
 /// run_in_usermode() の呼び出し元に return する（setjmp/longjmp パターン）。
+///
+/// 注意: この変数はグローバルに1つしかないため、複数のユーザータスクが
+/// jump_to_usermode() を呼ぶと互いに上書きしてしまう。
+/// コンテキストスイッチ時にタスクごとにバックアップを取る必要がある。
+/// → scheduler.rs の yield_now() / preempt() で退避・復帰している。
 static mut SAVED_RSP: u64 = 0;
 static mut SAVED_RBP: u64 = 0;
+
+/// SAVED_RSP/SAVED_RBP の現在値を取得する。
+/// コンテキストスイッチ前にタスクごとのバックアップに退避するために使う。
+pub fn get_saved_usermode_context() -> (u64, u64) {
+    unsafe { (SAVED_RSP, SAVED_RBP) }
+}
+
+/// SAVED_RSP/SAVED_RBP を設定する。
+/// コンテキストスイッチ後にタスクごとのバックアップから復帰するために使う。
+pub fn set_saved_usermode_context(rsp: u64, rbp: u64) {
+    unsafe {
+        SAVED_RSP = rsp;
+        SAVED_RBP = rbp;
+    }
+}
 
 /// ユーザーモード遷移時にレジスタ経由で渡す argc/argv/envp の値。
 /// jump_to_usermode のアセンブリがこの値を rdi/rsi/rdx にセットしてから iretq する。
