@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR/.."
 # 一時ファイル
 LOG_FILE="/tmp/sabos-selftest-$$.log"
 MONITOR_PORT=55582
-KEY_DELAY=0.8
+KEY_DELAY=0.3
 TEST_DIR="t"
 TEST_DIR_FALLBACK="u"
 GUI_SCREENSHOT_PATH_FILE="scripts/gui-screenshot-path.txt"
