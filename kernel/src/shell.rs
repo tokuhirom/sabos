@@ -465,8 +465,8 @@ impl Shell {
             }
         };
 
-        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-        let drv = match drv.as_mut() {
+        let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+        let drv = match devs.get_mut(0) {
             Some(d) => d,
             None => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -544,8 +544,8 @@ impl Shell {
             buf[i] = ((sector + i as u64) & 0xFF) as u8;
         }
 
-        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-        let drv = match drv.as_mut() {
+        let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+        let drv = match devs.get_mut(0) {
             Some(d) => d,
             None => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
@@ -2376,8 +2376,8 @@ impl Shell {
     /// virtio-blk のテスト
     /// セクタ 0 を読み取り、ブートシグネチャ (0x55AA) を確認
     fn test_virtio_blk(&self) -> bool {
-        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-        if let Some(ref mut d) = *drv {
+        let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+        if let Some(d) = devs.get_mut(0) {
             let mut buf = [0u8; 512];
             match d.read_sector(0, &mut buf) {
                 Ok(()) => {

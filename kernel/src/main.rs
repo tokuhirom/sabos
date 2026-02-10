@@ -225,10 +225,14 @@ fn main() -> Status {
     kprint!("Initializing virtio-blk... ");
     virtio_blk::init();
     {
-        let drv = virtio_blk::VIRTIO_BLK.lock();
-        if let Some(ref d) = *drv {
+        let devs = virtio_blk::VIRTIO_BLKS.lock();
+        let count = devs.len();
+        if count > 0 {
             framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-            kprintln!("OK ({} sectors, {} MiB)", d.capacity(), d.capacity() * 512 / 1024 / 1024);
+            kprintln!("OK ({} device(s))", count);
+            for (i, d) in devs.iter().enumerate() {
+                kprintln!("  [{}] {} sectors ({} MiB)", i, d.capacity(), d.capacity() * 512 / 1024 / 1024);
+            }
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found");

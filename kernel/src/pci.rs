@@ -166,17 +166,17 @@ pub fn enumerate_bus() -> Vec<PciDevice> {
 ///   ※ transitional デバイスの場合 device_id = 0x1042 の場合もあるが、
 ///     QEMU のデフォルト (-drive if=virtio) は legacy の 0x1001 を使う。
 ///
-/// 見つかった最初のデバイスを返す。見つからなければ None。
-pub fn find_virtio_blk() -> Option<PciDevice> {
+/// PCI バスから全ての virtio-blk デバイスを探す。
+///
+/// QEMU で複数の `-drive if=virtio` を指定すると、
+/// 複数の virtio-blk デバイス (device_id=0x1001) が PCI バス上に現れる。
+/// 見つかった全デバイスを Vec で返す。
+pub fn find_all_virtio_blk() -> alloc::vec::Vec<PciDevice> {
     let devices = enumerate_bus();
-    for dev in devices {
-        // virtio vendor ID = 0x1AF4
-        // virtio-blk legacy device ID = 0x1001
-        if dev.vendor_id == 0x1AF4 && dev.device_id == 0x1001 {
-            return Some(dev);
-        }
-    }
-    None
+    devices
+        .into_iter()
+        .filter(|dev| dev.vendor_id == 0x1AF4 && dev.device_id == 0x1001)
+        .collect()
 }
 
 /// PCI Configuration Space に 32 ビット値を書き込む。

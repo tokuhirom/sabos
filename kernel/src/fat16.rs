@@ -113,8 +113,8 @@ impl Fat16 {
         // セクタ 0（ブートセクタ）を読み取る
         let mut buf = [0u8; SECTOR_SIZE];
         {
-            let mut drv = virtio_blk::VIRTIO_BLK.lock();
-            let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+            let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+            let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
             drv.read_sector(0, &mut buf)?;
         }
 
@@ -191,8 +191,8 @@ impl Fat16 {
         for sect_offset in 0..self.root_dir_sectors {
             let sector = self.root_dir_start_sector + sect_offset;
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 
@@ -223,8 +223,8 @@ impl Fat16 {
             for sect_offset in 0..(self.bpb.sectors_per_cluster as u32) {
                 let sector = first_sector_of_cluster + sect_offset;
                 {
-                    let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                    let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                    let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                    let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                     drv.read_sector(sector as u64, &mut buf)?;
                 }
 
@@ -481,8 +481,8 @@ impl Fat16 {
                 let sector = first_sector_of_cluster + sect_offset;
                 let mut buf = [0u8; SECTOR_SIZE];
                 {
-                    let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                    let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                    let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                    let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                     drv.read_sector(sector as u64, &mut buf)?;
                 }
 
@@ -512,8 +512,8 @@ impl Fat16 {
 
         let mut buf = [0u8; SECTOR_SIZE];
         {
-            let mut drv = virtio_blk::VIRTIO_BLK.lock();
-            let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+            let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+            let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
             drv.read_sector(fat_sector as u64, &mut buf)?;
         }
 
@@ -529,8 +529,8 @@ impl Fat16 {
 
     /// セクタにデータを書き込む（内部用ヘルパー）。
     fn write_sector(&self, sector: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
-        let mut drv = virtio_blk::VIRTIO_BLK.lock();
-        let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+        let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+        let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
         drv.write_sector(sector as u64, buf)
     }
 
@@ -551,8 +551,8 @@ impl Fat16 {
             // セクタを読み込んで更新
             let mut buf = [0u8; SECTOR_SIZE];
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(fat_sector as u64, &mut buf)?;
             }
 
@@ -577,8 +577,8 @@ impl Fat16 {
         for sect_offset in 0..(self.bpb.fat_size_16 as u32) {
             let sector = self.fat_start_sector + sect_offset;
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 
@@ -648,8 +648,8 @@ impl Fat16 {
         for sect_offset in 0..self.root_dir_sectors {
             let sector = self.root_dir_start_sector + sect_offset;
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 
@@ -815,8 +815,8 @@ impl Fat16 {
         for sect_offset in 0..self.root_dir_sectors {
             let sector = self.root_dir_start_sector + sect_offset;
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 
@@ -980,8 +980,8 @@ impl Fat16 {
         for sect_offset in 0..self.root_dir_sectors {
             let sector = self.root_dir_start_sector + sect_offset;
             {
-                let mut drv = virtio_blk::VIRTIO_BLK.lock();
-                let drv = drv.as_mut().ok_or("virtio-blk not available")?;
+                let mut devs = virtio_blk::VIRTIO_BLKS.lock();
+                let drv = devs.get_mut(0).ok_or("virtio-blk not available")?;
                 drv.read_sector(sector as u64, &mut buf)?;
             }
 

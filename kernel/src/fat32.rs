@@ -30,14 +30,18 @@ pub struct DirEntry {
     pub size: u32,
 }
 
-/// カーネル用のブロックデバイス
+/// カーネル用のブロックデバイス。
+/// dev_index で使用する virtio-blk デバイスを指定する。
+/// 0 = 最初のデバイス（disk.img）、1 = 2台目（ホスト共有用）、...
 #[derive(Clone, Copy)]
-pub(crate) struct KernelBlockDevice;
+pub(crate) struct KernelBlockDevice {
+    pub(crate) dev_index: usize,
+}
 
 impl BlockDevice for KernelBlockDevice {
     fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), BlockError> {
-        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-        if let Some(ref mut d) = *drv {
+        let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+        if let Some(d) = devs.get_mut(self.dev_index) {
             d.read_sector(sector, buf).map_err(|_| BlockError::IoError)
         } else {
             Err(BlockError::IoError)
@@ -45,8 +49,8 @@ impl BlockDevice for KernelBlockDevice {
     }
 
     fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), BlockError> {
-        let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-        if let Some(ref mut d) = *drv {
+        let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+        if let Some(d) = devs.get_mut(self.dev_index) {
             d.write_sector(sector, buf).map_err(|_| BlockError::IoError)
         } else {
             Err(BlockError::IoError)
@@ -69,18 +73,26 @@ pub struct Fat32Fs<D: BlockDevice> {
 pub type Fat32 = Fat32Fs<KernelBlockDevice>;
 
 impl Fat32 {
+    /// デバイスインデックス 0（最初の virtio-blk）で Fat32 を初期化する。
     pub fn new() -> Result<Self, &'static str> {
-        Fat32Fs::new_with_device(KernelBlockDevice)
+        Self::new_with_index(0)
     }
 
-    /// VFS マネージャのファクトリ関数から呼ばれる。
-    /// FileSystem trait の各メソッドは内部で Fat32::new() を呼ぶため、
-    /// ここではダミーインスタンスを返すだけ（即座にフィールドを使わない）。
+    /// 指定したデバイスインデックスの virtio-blk で Fat32 を初期化する。
+    pub fn new_with_index(dev_index: usize) -> Result<Self, &'static str> {
+        Fat32Fs::new_with_device(KernelBlockDevice { dev_index })
+    }
+
+    /// VFS マネージャのファクトリ関数から呼ばれる（デバイスインデックス 0）。
     pub fn new_fs() -> Self {
-        // FileSystem trait の実装では各メソッド内で Fat32::new() を改めて呼ぶので、
-        // ここではパニックしないダミーインスタンスを返す。
-        // ただし BPB の解析が必要なため、実際に初期化する。
         Fat32::new().expect("Fat32::new_fs: virtio-blk not initialized")
+    }
+
+    /// 指定デバイスインデックスの VFS マネージャ用ファクトリ関数。
+    /// Step 2（ホストディレクトリの VFS マウント）で使用予定。
+    #[allow(dead_code)]
+    pub fn new_fs_with_index(dev_index: usize) -> Self {
+        Fat32::new_with_index(dev_index).expect("Fat32::new_fs_with_index: virtio-blk not initialized")
     }
 }
 
@@ -789,7 +801,7 @@ impl FileSystem for Fat32 {
     }
 
     fn open(&self, path: &str) -> Result<Box<dyn VfsNode>, VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         if path == "/" || path.is_empty() {
             return Err(VfsError::NotAFile);
         }
@@ -800,7 +812,7 @@ impl FileSystem for Fat32 {
     }
 
     fn list_dir(&self, path: &str) -> Result<Vec<VfsDirEntry>, VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         let entries = Fat32Fs::<KernelBlockDevice>::list_dir(&mut fs, path)
             .map_err(|_| VfsError::NotFound)?;
         Ok(entries
@@ -818,25 +830,25 @@ impl FileSystem for Fat32 {
     }
 
     fn create_file(&self, path: &str, data: &[u8]) -> Result<(), VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         Fat32Fs::<KernelBlockDevice>::create_file(&mut fs, path, data)
             .map_err(|_| VfsError::IoError)
     }
 
     fn delete_file(&self, path: &str) -> Result<(), VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         Fat32Fs::<KernelBlockDevice>::delete_file(&mut fs, path)
             .map_err(|_| VfsError::NotFound)
     }
 
     fn create_dir(&self, path: &str) -> Result<(), VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         Fat32Fs::<KernelBlockDevice>::create_dir(&mut fs, path)
             .map_err(|_| VfsError::IoError)
     }
 
     fn delete_dir(&self, path: &str) -> Result<(), VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         Fat32Fs::<KernelBlockDevice>::delete_dir(&mut fs, path)
             .map_err(|_| VfsError::IoError)
     }
@@ -846,7 +858,7 @@ impl FileSystem for Fat32 {
     /// open() → VfsNode::read() を使うと二重にメモリを確保してしまうため、
     /// Fat32 の read_file() を直接呼んでコピーを 1 回に抑える。
     fn read_file(&self, path: &str) -> Result<Vec<u8>, VfsError> {
-        let mut fs = Fat32::new().map_err(|_| VfsError::IoError)?;
+        let mut fs = Fat32::new_with_index(self.dev.dev_index).map_err(|_| VfsError::IoError)?;
         Fat32Fs::<KernelBlockDevice>::read_file(&mut fs, path)
             .map_err(|_| VfsError::NotFound)
     }

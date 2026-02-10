@@ -1121,8 +1121,8 @@ pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sys
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
-    let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-    let drv = drv.as_mut().ok_or(SyscallError::Other)?;
+    let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+    let drv = devs.get_mut(0).ok_or(SyscallError::Other)?;
     // ユーザー空間のバッファは物理アドレスではないため、
     // DMA 先に直接渡すと壊れる。カーネルバッファに読み取ってから
     // ユーザー空間にコピーする。
@@ -1151,8 +1151,8 @@ pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sy
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_slice();
 
-    let mut drv = crate::virtio_blk::VIRTIO_BLK.lock();
-    let drv = drv.as_mut().ok_or(SyscallError::Other)?;
+    let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
+    let drv = devs.get_mut(0).ok_or(SyscallError::Other)?;
     // DMA 先は物理アドレス前提なので、カーネルバッファにコピーしてから書き込む。
     let mut kernel_buf = [0u8; 512];
     kernel_buf.copy_from_slice(buf);

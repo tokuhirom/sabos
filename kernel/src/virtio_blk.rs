@@ -55,6 +55,7 @@
 //
 // ステータス: 0 = OK, 1 = IOERR, 2 = UNSUPPORTED
 
+use alloc::vec::Vec;
 use crate::pci;
 use crate::serial_println;
 use core::alloc::Layout;
@@ -62,20 +63,35 @@ use core::sync::atomic::{fence, Ordering};
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-/// グローバルな virtio-blk ドライバインスタンス。
-/// init() で初期化される。デバイスが見つからなかった場合は None のまま。
-pub static VIRTIO_BLK: Mutex<Option<VirtioBlk>> = Mutex::new(None);
+/// グローバルな virtio-blk ドライバインスタンスのリスト。
+/// init() で初期化される。QEMU で複数の `-drive if=virtio` を指定すると
+/// 複数のデバイスがここに格納される。
+/// インデックス 0 が最初に発見されたデバイス（通常は disk.img）。
+pub static VIRTIO_BLKS: Mutex<Vec<VirtioBlk>> = Mutex::new(Vec::new());
 
 /// virtio-blk ドライバを初期化する。
-/// PCI バスから virtio-blk デバイスを探して、見つかれば VIRTIO_BLK にセットする。
+/// PCI バスから全ての virtio-blk デバイスを探して初期化する。
 pub fn init() {
-    let driver = VirtioBlk::new();
-    if driver.is_some() {
-        serial_println!("virtio-blk driver initialized successfully");
-    } else {
-        serial_println!("virtio-blk device not found or initialization failed");
+    let pci_devices = pci::find_all_virtio_blk();
+    let mut drivers = Vec::new();
+    for dev in pci_devices {
+        if let Some(driver) = VirtioBlk::from_pci_device(dev) {
+            drivers.push(driver);
+        }
     }
-    *VIRTIO_BLK.lock() = driver;
+    if drivers.is_empty() {
+        serial_println!("virtio-blk device not found or initialization failed");
+    } else {
+        serial_println!("virtio-blk: {} device(s) initialized", drivers.len());
+    }
+    *VIRTIO_BLKS.lock() = drivers;
+}
+
+/// 検出された virtio-blk デバイスの数を返す。
+/// Step 2（ホストディレクトリの VFS マウント）で使用予定。
+#[allow(dead_code)]
+pub fn device_count() -> usize {
+    VIRTIO_BLKS.lock().len()
 }
 
 // ============================================================
@@ -155,7 +171,7 @@ unsafe impl Send for VirtioBlk {}
 unsafe impl Sync for VirtioBlk {}
 
 impl VirtioBlk {
-    /// PCI バスから virtio-blk デバイスを探し、初期化する。
+    /// 指定された PCI デバイスから virtio-blk ドライバを初期化する。
     ///
     /// 初期化手順（virtio legacy specification に従う）:
     ///   1. デバイスリセット（Status = 0）
@@ -164,9 +180,7 @@ impl VirtioBlk {
     ///   4. Feature negotiation（今回は全ビット 0 = 最小構成）
     ///   5. Virtqueue のセットアップ
     ///   6. DRIVER_OK ステータスをセット
-    pub fn new() -> Option<Self> {
-        // PCI バスから virtio-blk デバイスを探す
-        let dev = pci::find_virtio_blk()?;
+    pub fn from_pci_device(dev: pci::PciDevice) -> Option<Self> {
         serial_println!(
             "virtio-blk found at PCI {:02x}:{:02x}.{}",
             dev.bus, dev.device, dev.function
