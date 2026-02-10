@@ -7,7 +7,7 @@ unexport RUSTUP_TOOLCHAIN
 # -Zjson-target-spec は nightly 専用フラグのため、toolchain 指定が必須。
 NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
 
-.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img hostfs-update test check-syscall
+.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img hostfs-update test test-bin check-syscall
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -236,3 +236,12 @@ check-syscall:
 test: check-syscall build build-user-std $(ESP_DIR) disk-img $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh
+
+# 特定のユーザーバイナリを /host/ 経由でテスト実行する。
+# disk.img の再作成をスキップし、hostfs.img のみインクリメンタル更新する。
+# 使い方: make test-bin BIN=shell
+# 引数付き: make test-bin BIN=shell BIN_ARGS="arg1 arg2"
+test-bin: build hostfs-update $(ESP_DIR)
+	@if [ ! -f "$(DISK_IMG)" ]; then echo "Error: $(DISK_IMG) not found. Run 'make disk-img' first."; exit 1; fi
+	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
+	./scripts/run-test-bin.sh $(BIN) $(BIN_ARGS)

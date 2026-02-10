@@ -43,7 +43,7 @@ cp kernel/target/x86_64-unknown-uefi/debug/sabos.efi esp/EFI/BOOT/BOOTX64.EFI
 
 echo "Starting QEMU..."
 
-# QEMU を起動
+# QEMU を起動（disk.img + hostfs.img の 2 台構成）
 qemu-system-x86_64 \
     -nodefaults \
     -machine q35 \
@@ -53,6 +53,7 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
     -drive format=raw,file=fat:rw:esp \
     -drive if=virtio,format=raw,file=disk.img \
+    -drive if=virtio,format=raw,file=hostfs.img \
     -netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
     -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
     -serial stdio \
@@ -607,14 +608,54 @@ if [ -n "$SABOS_SAVE_LOG" ] && [ -f "$LOG_FILE" ]; then
     echo "QEMU log saved: $SABOS_SAVE_LOG"
 fi
 
-# 結果を検証
-if grep -q "SELFTEST END:.*PASSED" "$LOG_FILE"; then
-    echo -e "${GREEN}All tests PASSED!${NC}"
-    exit 0
-else
-    echo -e "${RED}Some tests FAILED!${NC}"
+# 結果を検証（JSON サマリーを優先的に使用する）
+# 以前の grep ベース判定では selftest_net の "NET SELFTEST END:...PASSED" が
+# 誤マッチする問題があったため、JSON パースで正確に判定する。
+# シリアル出力は \r\n を使うため、tr -d '\r' で除去してからパースする
+json_line=$(grep "SELFTEST JSON" "$LOG_FILE" | tail -1 | tr -d '\r' | sed 's/.*SELFTEST JSON //' | sed 's/ ===//' || true)
+
+if [ -n "$json_line" ] && command -v python3 &>/dev/null; then
+    # JSON サマリーが見つかった場合: python3 で正確にパースする
+    # set -e 下で python3 の非ゼロ exit code によるスクリプト中断を防ぐ
+    json_exit=0
+    result=$(echo "$json_line" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+total = data['total']
+passed = data['passed']
+failed = data['failed']
+print(f'Total: {total}, Passed: {passed}, Failed: {failed}')
+if failed > 0:
+    print('Failed tests:')
+    for r in data['results']:
+        if not r['pass']:
+            print(f'  - {r[\"name\"]}')
+sys.exit(1 if failed > 0 else 0)
+" 2>&1) || json_exit=$?
+    echo "$result"
     echo ""
-    echo "Full log:"
-    cat "$LOG_FILE"
-    exit 1
+    if [ $json_exit -eq 0 ]; then
+        echo -e "${GREEN}All tests PASSED!${NC}"
+        exit 0
+    else
+        echo -e "${RED}Some tests FAILED!${NC}"
+        echo ""
+        echo "Full log:"
+        cat "$LOG_FILE"
+        exit 1
+    fi
+else
+    # JSON が見つからない場合: フォールバックとして grep で判定する。
+    # "=== SELFTEST END:" で始まる行のみをチェックし、
+    # selftest_net の "NET SELFTEST END" との誤マッチを防ぐ。
+    if grep -q "^=== SELFTEST END:.*PASSED ===" "$LOG_FILE"; then
+        echo -e "${GREEN}All tests PASSED!${NC}"
+        exit 0
+    else
+        echo -e "${RED}Some tests FAILED!${NC}"
+        echo ""
+        echo "Full log:"
+        cat "$LOG_FILE"
+        exit 1
+    fi
 fi

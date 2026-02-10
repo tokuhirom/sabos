@@ -1087,6 +1087,9 @@ impl Shell {
 
         let mut passed = 0;
         let mut failed = 0;
+        // テスト結果を収集して最後に JSON サマリーを出力するための Vec。
+        // クロージャのライフタイム制約により &str は使えないため String で保持する。
+        let mut results: alloc::vec::Vec<(alloc::string::String, bool)> = alloc::vec::Vec::new();
         let mut run_test = |name: &str, ok: bool| {
             if ok {
                 Self::print_pass(name);
@@ -1095,6 +1098,7 @@ impl Shell {
                 Self::print_fail(name);
                 failed += 1;
             }
+            results.push((alloc::string::String::from(name), ok));
         };
 
         let run_core = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1273,6 +1277,19 @@ impl Shell {
 
         // サマリー出力
         let total = passed + failed;
+
+        // JSON サマリー出力（ホスト側スクリプトで構造化パース可能）
+        // 1 行で出力することで grep で抽出しやすくする。
+        // 形式: === SELFTEST JSON {"total":N,"passed":N,"failed":N,"results":[...]} ===
+        kprint!("=== SELFTEST JSON {{\"total\":{},\"passed\":{},\"failed\":{},\"results\":[", total, passed, failed);
+        for (i, (name, ok)) in results.iter().enumerate() {
+            if i > 0 {
+                kprint!(",");
+            }
+            kprint!("{{\"name\":\"{}\",\"pass\":{}}}", name, ok);
+        }
+        kprintln!("]}} ===");
+
         if failed == 0 {
             framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
             kprintln!("=== SELFTEST END: {}/{} PASSED ===", passed, total);
