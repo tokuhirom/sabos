@@ -147,9 +147,12 @@ Phase 1-3 完了済み（バディアロケータ + スラブアロケータ）�
 - [ ] OOM Killer（メモリ不足時のプロセス選択終了）
 
 ### プロセス管理の洗練
-- [ ] wait() が終了タスク ID も返せるようにする（waitpid 的な機能）
+- [x] wait() が終了タスク ID も返せるようにする（waitpid 的な機能）
+  - SYS_WAITPID(7) を追加: 戻り値で child_task_id を返し、exit_code はポインタ経由
+  - WNOHANG フラグでノンブロッキング待ちも可能
 - [ ] サービス監視のポリシー（再起動回数/バックオフ）
-- [ ] パイプ（stdin/stdout/stderr リダイレクト）
+- [x] パイプ（stdin/stdout リダイレクト）
+  - カーネルパイプ + SYS_SPAWN_REDIRECTED で外部コマンドのパイプ対応
 
 ### std ライブラリの改善
 - [ ] thread_local を `thread_local_key` モードに切り替え

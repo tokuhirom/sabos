@@ -312,7 +312,12 @@ fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> 
             "cat" => pipeline_cat(args, state, input.as_deref())?,
             "sed" => pipeline_sed(args, state, input.as_deref())?,
             "grep" => pipeline_grep(args, state, input.as_deref())?,
-            _ => return Err("Error: pipeline supports only echo/cat/sed/grep for builtin"),
+            "ls" => pipeline_ls(args, state)?,
+            "ps" => pipeline_ps()?,
+            "mem" => pipeline_mem()?,
+            "ip" => pipeline_ip()?,
+            "df" => pipeline_df()?,
+            _ => return Err("Error: unsupported command in pipeline"),
         };
 
         if i + 1 == parts.len() {
@@ -353,71 +358,86 @@ fn execute_pipeline_external(parts: &[&str], state: &ShellState) -> Result<(), &
         // stdout: 最後のステージは None（コンソール）、それ以前は次のパイプの write 端
         let stdout_handle = if i < n - 1 { Some(&pipes[i].1) } else { None };
 
-        match cmd {
+        // 外部コマンドの判定: "run" コマンド、または "/" で始まるパス、".ELF"/".elf" で終わるファイル名
+        let is_external = cmd == "run"
+            || cmd.starts_with('/')
+            || cmd.ends_with(".ELF")
+            || cmd.ends_with(".elf");
+
+        if is_external {
             // 外部コマンド: spawn_redirected でプロセス起動
-            "run" => {
+            //
+            // "run /FOO.ELF arg1" の場合: cmd="run", args="/FOO.ELF arg1"
+            // "/FOO.ELF arg1" の場合: cmd="/FOO.ELF", args="arg1"（暗黙 run）
+            let (filename, rest) = if cmd == "run" {
                 let trimmed = args.trim();
                 if trimmed.is_empty() {
                     return Err("Error: run requires a filename");
                 }
-                // スペースで分割: 最初の要素がパス、残りが引数
                 let mut cmd_parts = trimmed.splitn(2, ' ');
-                let filename = cmd_parts.next().unwrap_or("");
-                let rest = cmd_parts.next().unwrap_or("").trim();
-                let abs_path = resolve_path(&state.cwd_text, filename);
+                let f = cmd_parts.next().unwrap_or("");
+                let r = cmd_parts.next().unwrap_or("").trim();
+                (f, r)
+            } else {
+                // 暗黙 run: cmd 自体がファイル名
+                (cmd, args.trim())
+            };
+            let abs_path = resolve_path(&state.cwd_text, filename);
 
-                let arg_strs: Vec<&str> = if rest.is_empty() {
-                    Vec::new()
-                } else {
-                    rest.split_whitespace().collect()
-                };
+            let arg_strs: Vec<&str> = if rest.is_empty() {
+                Vec::new()
+            } else {
+                rest.split_whitespace().collect()
+            };
 
-                let task_id = syscall::spawn_redirected(
-                    &abs_path, &arg_strs, stdin_handle, stdout_handle,
-                );
-                if task_id < 0 {
-                    return Err("Error: failed to spawn process");
-                }
-                child_ids.push(task_id as u64);
+            let task_id = syscall::spawn_redirected(
+                &abs_path, &arg_strs, stdin_handle, stdout_handle,
+            );
+            if task_id < 0 {
+                return Err("Error: failed to spawn process");
             }
-
+            child_ids.push(task_id as u64);
+        } else {
             // ビルトインコマンド: パイプからデータを読んでビルトインを実行し、結果をパイプに書く
-            _ => {
-                // stdin パイプから入力を読み取り
-                let input_str = if let Some(rh) = stdin_handle {
-                    let mut data = Vec::new();
-                    let mut buf = [0u8; 1024];
-                    loop {
-                        let n = syscall::handle_read(rh, &mut buf);
-                        if n <= 0 { break; }
-                        data.extend_from_slice(&buf[..n as usize]);
-                    }
-                    // パイプの read 端を閉じる（EOF を受信した側）
-                    if i > 0 {
-                        syscall::handle_close(&pipes[i - 1].0);
-                    }
-                    Some(String::from_utf8_lossy(&data).into_owned())
-                } else {
-                    None
-                };
-
-                let output = match cmd {
-                    "echo" => pipeline_echo(args),
-                    "cat" => pipeline_cat(args, state, input_str.as_deref())?,
-                    "sed" => pipeline_sed(args, state, input_str.as_deref())?,
-                    "grep" => pipeline_grep(args, state, input_str.as_deref())?,
-                    _ => return Err("Error: unknown command in pipeline"),
-                };
-
-                // stdout パイプに出力を書き込み
-                if let Some(wh) = stdout_handle {
-                    syscall::handle_write(wh, output.as_bytes());
-                    // パイプの write 端を閉じる（下流にEOFを通知）
-                    syscall::handle_close(&pipes[i].1);
-                } else {
-                    // 最終ステージ: コンソールに出力
-                    syscall::write_str(&output);
+            // stdin パイプから入力を読み取り
+            let input_str = if let Some(rh) = stdin_handle {
+                let mut data = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = syscall::handle_read(rh, &mut buf);
+                    if n <= 0 { break; }
+                    data.extend_from_slice(&buf[..n as usize]);
                 }
+                // パイプの read 端を閉じる（EOF を受信した側）
+                if i > 0 {
+                    syscall::handle_close(&pipes[i - 1].0);
+                }
+                Some(String::from_utf8_lossy(&data).into_owned())
+            } else {
+                None
+            };
+
+            let output = match cmd {
+                "echo" => pipeline_echo(args),
+                "cat" => pipeline_cat(args, state, input_str.as_deref())?,
+                "sed" => pipeline_sed(args, state, input_str.as_deref())?,
+                "grep" => pipeline_grep(args, state, input_str.as_deref())?,
+                "ls" => pipeline_ls(args, state)?,
+                "ps" => pipeline_ps()?,
+                "mem" => pipeline_mem()?,
+                "ip" => pipeline_ip()?,
+                "df" => pipeline_df()?,
+                _ => return Err("Error: unknown command in pipeline"),
+            };
+
+            // stdout パイプに出力を書き込み
+            if let Some(wh) = stdout_handle {
+                syscall::handle_write(wh, output.as_bytes());
+                // パイプの write 端を閉じる（下流にEOFを通知）
+                syscall::handle_close(&pipes[i].1);
+            } else {
+                // 最終ステージ: コンソールに出力
+                syscall::write_str(&output);
             }
         }
     }
@@ -431,9 +451,10 @@ fn execute_pipeline_external(parts: &[&str], state: &ShellState) -> Result<(), &
         let _ = syscall::handle_close(&pipes[i].1);
     }
 
-    // 全子プロセスの完了を待つ
+    // 全子プロセスの完了を waitpid で待つ
+    // waitpid なら child_task_id が返るので、将来的にエラーハンドリングも可能
     for task_id in &child_ids {
-        syscall::wait(*task_id, 0);  // タイムアウトなし（完了まで待つ）
+        let (_child_id, _exit_code) = syscall::waitpid(*task_id, 0);
     }
 
     Ok(())
@@ -1301,6 +1322,237 @@ fn pipeline_grep(args: &str, state: &ShellState, input: Option<&str>) -> Result<
     };
 
     Ok(grep_apply(text, opts.pattern, opts.case_insensitive, opts.invert, opts.count_only))
+}
+
+/// パイプライン用: 数値を String に追加するヘルパー
+fn push_number(out: &mut String, n: u64) {
+    if n == 0 {
+        out.push('0');
+        return;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = 0;
+    let mut num = n;
+    while num > 0 {
+        buf[i] = b'0' + (num % 10) as u8;
+        num /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        out.push(buf[i] as char);
+    }
+}
+
+/// パイプライン用: 文字列を指定幅で String に追加（左寄せ、スペース埋め）
+fn push_padded(out: &mut String, s: &str, width: usize) {
+    out.push_str(s);
+    if s.len() < width {
+        for _ in 0..(width - s.len()) {
+            out.push(' ');
+        }
+    }
+}
+
+/// パイプライン用 ls: ディレクトリ一覧を String で返す
+fn pipeline_ls(args: &str, state: &ShellState) -> Result<String, &'static str> {
+    let target = args.trim();
+    let (handle, need_close) = if target.is_empty() {
+        (state.cwd_handle, false)
+    } else {
+        match open_dir_from_args(state, target) {
+            Ok(h) => (h, true),
+            Err(msg) => return Err(msg),
+        }
+    };
+
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let n = syscall::handle_enum(&handle, &mut buf);
+    if need_close {
+        let _ = syscall::handle_close(&handle);
+    }
+    if n < 0 {
+        return Err("Error: Failed to list directory");
+    }
+
+    let len = n as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| "Error: invalid UTF-8")?;
+    let mut out = String::from(s);
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// パイプライン用 ps: タスク一覧を String で返す
+fn pipeline_ps() -> Result<String, &'static str> {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_task_list(&mut buf);
+    if result < 0 {
+        return Err("Error: Failed to get task list");
+    }
+
+    let len = result as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| "Error: invalid UTF-8")?;
+
+    let mut out = String::new();
+    out.push_str("  ID  STATE       TYPE    NAME\n");
+    out.push_str("  --  ----------  ------  ----------\n");
+
+    let Some((tasks_start, tasks_end)) = json::json_find_array_bounds(s, "tasks") else {
+        return Ok(out);
+    };
+
+    let mut i = tasks_start;
+    while i < tasks_end {
+        let bytes = s.as_bytes();
+        while i < tasks_end && bytes[i] != b'{' && bytes[i] != b']' {
+            i += 1;
+        }
+        if i >= tasks_end || bytes[i] == b']' {
+            break;
+        }
+
+        let Some(obj_end) = json::find_matching_brace(s, i) else {
+            break;
+        };
+        if obj_end > tasks_end {
+            break;
+        }
+
+        let obj = &s[i + 1..obj_end];
+        let id = json::json_find_u64(obj, "id");
+        let state = json::json_find_str(obj, "state");
+        let ty = json::json_find_str(obj, "type");
+        let name = json::json_find_str(obj, "name");
+
+        if let (Some(id), Some(state), Some(ty), Some(name)) = (id, state, ty, name) {
+            out.push_str("  ");
+            push_number(&mut out, id);
+            out.push_str("  ");
+            push_padded(&mut out, state, 10);
+            out.push_str("  ");
+            push_padded(&mut out, ty, 6);
+            out.push_str("  ");
+            out.push_str(name);
+            out.push('\n');
+        }
+
+        i = obj_end + 1;
+    }
+
+    Ok(out)
+}
+
+/// パイプライン用 mem: メモリ情報を String で返す
+fn pipeline_mem() -> Result<String, &'static str> {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_mem_info(&mut buf);
+    if result < 0 {
+        return Err("Error: Failed to get memory info");
+    }
+
+    let len = result as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| "Error: invalid UTF-8")?;
+
+    let mut out = String::new();
+    out.push_str("Memory Information:\n");
+
+    if let Some(v) = json::json_find_u64(s, "total_frames") {
+        out.push_str("  Total frames:     ");
+        push_number(&mut out, v);
+        out.push('\n');
+    }
+    if let Some(v) = json::json_find_u64(s, "allocated_frames") {
+        out.push_str("  Allocated frames: ");
+        push_number(&mut out, v);
+        out.push('\n');
+    }
+    if let Some(v) = json::json_find_u64(s, "free_frames") {
+        out.push_str("  Free frames:      ");
+        push_number(&mut out, v);
+        out.push('\n');
+    }
+    if let Some(v) = json::json_find_u64(s, "free_kib") {
+        out.push_str("  Free memory:      ");
+        push_number(&mut out, v);
+        out.push_str(" KiB\n");
+    }
+
+    Ok(out)
+}
+
+/// パイプライン用 ip: ネットワーク情報を String で返す
+fn pipeline_ip() -> Result<String, &'static str> {
+    let mut buf = [0u8; FILE_BUFFER_SIZE];
+    let result = syscall::get_net_info(&mut buf);
+    if result < 0 {
+        return Err("Error: Failed to get network info");
+    }
+
+    let len = result as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| "Error: invalid UTF-8")?;
+
+    let mut out = String::new();
+    out.push_str("IP Configuration:\n");
+
+    for line in s.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "ip" => {
+                    out.push_str("  IP Address: ");
+                    out.push_str(value);
+                    out.push('\n');
+                }
+                "gateway" => {
+                    out.push_str("  Gateway:    ");
+                    out.push_str(value);
+                    out.push('\n');
+                }
+                "dns" => {
+                    out.push_str("  DNS:        ");
+                    out.push_str(value);
+                    out.push('\n');
+                }
+                "mac" => {
+                    out.push_str("  MAC:        ");
+                    out.push_str(value);
+                    out.push('\n');
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// パイプライン用 df: ファイルシステム統計を String で返す
+fn pipeline_df() -> Result<String, &'static str> {
+    let mut buf = [0u8; 512];
+    let n = syscall::fs_stat(&mut buf);
+    if n < 0 {
+        return Err("Error: Failed to get filesystem stats");
+    }
+
+    let len = n as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| "Error: invalid UTF-8")?;
+
+    let mut out = String::new();
+    let total = json::json_find_u64(s, "total_bytes").unwrap_or(0);
+    let used = json::json_find_u64(s, "used_bytes").unwrap_or(0);
+    let free = json::json_find_u64(s, "free_bytes").unwrap_or(0);
+
+    out.push_str("Filesystem      Total       Used       Free\n");
+    out.push_str("/               ");
+    push_number(&mut out, total / 1024);
+    out.push_str(" KiB   ");
+    push_number(&mut out, used / 1024);
+    out.push_str(" KiB   ");
+    push_number(&mut out, free / 1024);
+    out.push_str(" KiB\n");
+
+    Ok(out)
 }
 
 /// write コマンド: ファイルを作成/上書き（ハンドルベース）

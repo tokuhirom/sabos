@@ -136,35 +136,41 @@ fn start_services() {
 }
 
 /// supervisor ループ — 子プロセスの終了を監視して必要に応じて再起動
+///
+/// waitpid(0, 0) で任意の子プロセスの終了を待ち、戻り値の child_task_id から
+/// どのサービスが終了したかを正確に特定する。
+/// 従来は wait() で exit_code しか返されず、全サービスを総当たりで確認していたが、
+/// waitpid により O(1) でサービスを特定できるようになった。
 fn supervisor_loop() -> ! {
     loop {
-        // 任意の子プロセスの終了を待つ（タイムアウトなし）
-        let exit_code = syscall::wait(0, 0);
+        // 任意の子プロセスの終了を waitpid で待つ
+        let (child_id, _exit_code) = syscall::waitpid(0, 0);
 
-        if exit_code < 0 {
+        if child_id < 0 {
             // エラー（子プロセスがいない、など）
             // 子プロセスがいない場合は idle として待機
             syscall::sleep(1000);
             continue;
         }
 
-        // どのサービスが終了したか確認
+        let child_id = child_id as u64;
+
+        // waitpid で返された child_id からどのサービスが終了したか特定
+        let mut found = false;
         for service in SERVICES.iter() {
             let task_id = service.task_id.load(Ordering::Relaxed);
-            if task_id == 0 {
+            if task_id != child_id {
                 continue;
             }
-
-            // このサービスがまだ生きているか確認
-            // wait が返ってきたので、いずれかのサービスが終了したはず
-            // TODO: wait から終了したタスク ID を取得できるようにする
-            // 現状は単純に全サービスの生存確認をする
+            found = true;
 
             // サービスを再起動するかどうか判断
             if service.restart {
                 syscall::write_str("[init] Service ");
                 syscall::write_str(service.name);
-                syscall::write_str(" exited, restarting...\n");
+                syscall::write_str(" (PID ");
+                write_number(child_id);
+                syscall::write_str(") exited, restarting...\n");
 
                 let result = syscall::spawn(service.path);
                 if result < 0 {
@@ -184,9 +190,19 @@ fn supervisor_loop() -> ! {
             } else {
                 syscall::write_str("[init] Service ");
                 syscall::write_str(service.name);
-                syscall::write_str(" exited (no restart)\n");
+                syscall::write_str(" (PID ");
+                write_number(child_id);
+                syscall::write_str(") exited (no restart)\n");
                 service.task_id.store(0, Ordering::Relaxed);
             }
+            break;
+        }
+
+        if !found {
+            // 未知の子プロセスが終了した（SERVICES に登録されていない）
+            syscall::write_str("[init] Unknown child PID ");
+            write_number(child_id);
+            syscall::write_str(" exited\n");
         }
     }
 }
