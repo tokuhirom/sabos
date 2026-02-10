@@ -109,16 +109,40 @@ make screenshot SCREENSHOT_OUT=docs/images/foo.png SCREENSHOT_WAIT=10
 
 # 自動テストを実行
 make test
+
+# ユーザーランドバイナリをホスト共有ディスクに更新（disk.img 再作成不要）
+make hostfs-update
 ```
 
 ## Project Structure
 
 - `kernel/` - カーネル本体（Rust, no_std, UEFI target）
 - `user/` - ユーザープログラム（ELF バイナリ、x86_64-unknown-none target）
+- `user-std/` - std 対応ユーザープログラム（カスタム target、release ビルド）
+- `libs/` - 共有ライブラリ（sabos-syscall 等）
 - `scripts/` - テストスクリプト等
+- `rust-std-sabos/` - Rust std の SABOS 向けパッチ（PAL 層）
 - `docs/diary/YYYY-MM-DD.md` - 開発日記（スクショも貼る）
 - `docs/images/` - スクリーンショット置き場
 - `docs/spec/` - 仕様ドキュメント置き場
+
+### ディスクイメージ
+
+- `disk.img` - システムディスク（FAT32、64MB）。`make disk-img` で全体再作成
+- `hostfs.img` - ホスト共有ディスク（FAT32、64MB）。`make hostfs-update` でインクリメンタル更新
+- いずれも `.gitignore` で管理対象外
+
+### VFS アーキテクチャ
+
+全ファイル操作は VFS マネージャ経由で行う。マウントテーブル（BTreeMap）でパスの最長一致ルーティングを行う。
+
+| マウントポイント | ファイルシステム | デバイス |
+|----------------|----------------|---------|
+| `/` | FAT32 | virtio-blk[0]（disk.img） |
+| `/proc` | ProcFs | なし（疑似ファイルシステム） |
+| `/host` | FAT32 | virtio-blk[1]（hostfs.img） |
+
+QEMU は 2 台の virtio-blk デバイスを接続する。カーネルは PCI バスをスキャンして全 virtio-blk デバイスを検出・初期化する。
 
 ## ドキュメント一覧
 
@@ -168,22 +192,24 @@ make test
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT16、DNS
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン等（47 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする:
+シェルで `selftest` を実行すると各サブシステムをテストする（47 項目）:
 
 ```
 sabos> selftest
 === SELFTEST START ===
 [PASS] memory_allocator
+[PASS] slab_allocator
+[PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 6/6 PASSED ===
+=== SELFTEST END: 47/47 PASSED ===
 ```
 
 ## CI/CD
@@ -272,16 +298,17 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果:**
+**期待される selftest 結果（47 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
+[PASS] slab_allocator
+[PASS] memory_mapping
 [PASS] paging
-[PASS] scheduler
-[PASS] virtio_blk
-[PASS] fat16
-[PASS] network_dns
-=== SELFTEST END: 6/6 PASSED ===
+[PASS] pci_enum
+...（省略）...
+[PASS] httpd_dirlist
+=== SELFTEST END: 47/47 PASSED ===
 ```
 
 ### シェルの起動フロー
@@ -295,6 +322,24 @@ exit コマンド
     ↓
 カーネルシェルにフォールバック (sabos>)
 ```
+
+### ユーザーランド開発ワークフロー
+
+ユーザーランドバイナリの変更を素早くテストするには `hostfs-update` を使う:
+
+```bash
+# 1. ユーザープログラムを変更・ビルド
+make build-user
+
+# 2. hostfs.img にインクリメンタルコピー（disk.img 再作成不要）
+make hostfs-update
+
+# 3. QEMU 再起動して /host/ 経由でアクセス
+make run-gui
+# ゲスト内: run /host/SHELL.ELF
+```
+
+`/host` はゲスト内で VFS を通じて 2 台目の virtio-blk デバイス（hostfs.img）にマウントされる。`mcopy -o` による上書きコピーなので `dd + mkfs.fat` の全体再作成より高速。
 
 ### トラブルシューティング
 
