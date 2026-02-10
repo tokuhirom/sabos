@@ -77,12 +77,15 @@
   - run-selftest.sh が python3 で JSON パースし正確に判定
   - selftest_net の "NET SELFTEST END:...PASSED" 誤マッチバグも修正
 
-#### Step 4: ISA debug exit の活用（カーネル + QEMU）
-- [ ] QEMU に `-device isa-debug-exit,iobase=0xf4,iosize=0x04` を追加
-  - ゲストが I/O ポート 0xf4 に書き込むと QEMU が指定した exit code で終了
-- [ ] カーネルにシステムコール `SYS_EXIT_QEMU` を追加（または halt 拡張）
-  - テスト成功 = exit 0、失敗 = exit 1 をホストに伝搬
-  - CI スクリプトが exit code だけで成否判定できるようになる
+#### Step 4: ISA debug exit の活用（カーネル + QEMU） ✓
+- [x] QEMU に `-device isa-debug-exit,iobase=0xf4,iosize=0x04` を追加
+  - 全 QEMU 起動オプション（QEMU_COMMON, run-gui, スクリプト）に設定
+- [x] `kernel/src/qemu.rs` に `debug_exit(code)` 関数を実装
+  - `exit_qemu [code]` シェルコマンド + `selftest --exit` フラグで利用
+  - SYS_SELFTEST syscall に auto_exit 引数を追加（ユーザーシェルから --exit を渡せる）
+- [x] run-selftest.sh を QEMU exit code ベースの判定に改善
+  - selftest --exit → QEMU 自動終了 → exit code 1=成功, 3=失敗
+  - kill 不要のクリーンシャットダウン
 
 #### 将来: virtio-9p ドライバ（QEMU 再起動不要化）
 - [ ] 9P2000.L プロトコルの実装
