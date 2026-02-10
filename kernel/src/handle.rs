@@ -96,6 +96,10 @@ pub enum HandleKind {
     File,
     /// ディレクトリ
     Directory,
+    /// パイプの読み取り端
+    PipeRead,
+    /// パイプの書き込み端
+    PipeWrite,
 }
 
 /// ハンドルの中身（カーネル内）
@@ -114,6 +118,8 @@ struct HandleEntry {
     pos: usize,
     /// 書き込みがあったかどうか（close 時に FAT32 に書き戻す）
     dirty: bool,
+    /// パイプ ID（PipeRead / PipeWrite の場合のみ使用）
+    pipe_id: Option<usize>,
 }
 
 lazy_static! {
@@ -158,6 +164,7 @@ pub fn create_handle_with_path(data: Vec<u8>, rights: u32, path: String) -> Hand
         data,
         pos: 0,
         dirty: false,
+        pipe_id: None,
     };
 
     insert_entry(entry, token)
@@ -181,6 +188,7 @@ pub fn create_directory_handle(path: String, rights: u32) -> Handle {
         data: Vec::new(),
         pos: 0,
         dirty: false,
+        pipe_id: None,
     };
 
     insert_entry(entry, token)
@@ -236,6 +244,7 @@ pub fn duplicate_handle(handle: &Handle) -> Result<Handle, SyscallError> {
         data: entry.data.clone(),
         pos: 0,     // ポジションは先頭にリセット
         dirty: false,
+        pipe_id: entry.pipe_id,
     };
 
     drop(table); // ロックを解放してから insert_entry を呼ぶ
@@ -265,6 +274,17 @@ pub fn read(handle: &Handle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     // 権限チェック
     if (entry.rights & HANDLE_RIGHT_READ) == 0 {
         return Err(SyscallError::PermissionDenied);
+    }
+
+    // パイプの読み取りはパイプモジュールに委譲
+    if entry.kind == HandleKind::PipeRead {
+        let pipe_id = entry.pipe_id.ok_or(SyscallError::InvalidHandle)?;
+        drop(table); // パイプモジュールのロックを取る前にハンドルテーブルのロックを解放
+        return match crate::pipe::read(pipe_id, buf) {
+            Ok(n) => Ok(n),
+            Err(crate::pipe::PipeError::WouldBlock) => Err(SyscallError::WouldBlock),
+            Err(_) => Err(SyscallError::Other),
+        };
     }
 
     // ファイルのみ読み取り可能
@@ -308,6 +328,17 @@ pub fn write(handle: &Handle, buf: &[u8]) -> Result<usize, SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
 
+    // パイプの書き込みはパイプモジュールに委譲
+    if entry.kind == HandleKind::PipeWrite {
+        let pipe_id = entry.pipe_id.ok_or(SyscallError::InvalidHandle)?;
+        drop(table); // パイプモジュールのロックを取る前にハンドルテーブルのロックを解放
+        return match crate::pipe::write(pipe_id, buf) {
+            Ok(n) => Ok(n),
+            Err(crate::pipe::PipeError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+            Err(_) => Err(SyscallError::Other),
+        };
+    }
+
     // ファイルのみ書き込み可能
     if entry.kind != HandleKind::File {
         return Err(SyscallError::NotSupported);
@@ -340,6 +371,25 @@ pub fn write(handle: &Handle, buf: &[u8]) -> Result<usize, SyscallError> {
 pub fn close(handle: &Handle) -> Result<(), SyscallError> {
     let mut table = HANDLE_TABLE.lock();
     let entry = get_entry(&table, handle)?;
+
+    // パイプの場合はパイプモジュールに閉鎖を委譲
+    match entry.kind {
+        HandleKind::PipeRead => {
+            let pipe_id = entry.pipe_id.ok_or(SyscallError::InvalidHandle)?;
+            table[handle.id as usize] = None;
+            drop(table);
+            crate::pipe::close_reader(pipe_id);
+            return Ok(());
+        }
+        HandleKind::PipeWrite => {
+            let pipe_id = entry.pipe_id.ok_or(SyscallError::InvalidHandle)?;
+            table[handle.id as usize] = None;
+            drop(table);
+            crate::pipe::close_writer(pipe_id);
+            return Ok(());
+        }
+        _ => {}
+    }
 
     // dirty なファイルを FAT32 に書き戻す
     let needs_flush = entry.dirty && !entry.path.is_empty();
@@ -403,6 +453,7 @@ pub fn restrict_rights(handle: &Handle, new_rights: u32) -> Result<Handle, Sysca
         data: entry.data.clone(),
         pos: entry.pos,
         dirty: false,
+        pipe_id: entry.pipe_id,
     };
 
     drop(table); // ロックを解放してから insert_entry を呼ぶ
@@ -535,6 +586,8 @@ pub fn stat(handle: &Handle) -> Result<HandleStat, SyscallError> {
         kind: match entry.kind {
             HandleKind::File => 0,
             HandleKind::Directory => 1,
+            HandleKind::PipeRead => 2,
+            HandleKind::PipeWrite => 3,
         },
         rights: entry.rights as u64,
     })
@@ -625,6 +678,51 @@ fn get_entry_mut<'a>(
         Some(entry) if entry.token == handle.token => Ok(entry),
         _ => Err(SyscallError::InvalidHandle),
     }
+}
+
+// =================================================================
+// パイプハンドルの作成
+// =================================================================
+
+/// パイプを作成し、読み取り用と書き込み用の Handle ペアを返す
+///
+/// 内部で pipe::create() を呼んで pipe_id を取得し、
+/// PipeRead / PipeWrite の 2 つのハンドルを作成する。
+///
+/// # 戻り値
+/// (read_handle, write_handle) のタプル
+pub fn create_pipe_handles() -> (Handle, Handle) {
+    let pipe_id = crate::pipe::create();
+
+    // 読み取り用ハンドル
+    let read_token = next_token();
+    let read_entry = HandleEntry {
+        token: read_token,
+        rights: HANDLE_RIGHT_READ,
+        kind: HandleKind::PipeRead,
+        path: String::new(),
+        data: Vec::new(),
+        pos: 0,
+        dirty: false,
+        pipe_id: Some(pipe_id),
+    };
+    let read_handle = insert_entry(read_entry, read_token);
+
+    // 書き込み用ハンドル
+    let write_token = next_token();
+    let write_entry = HandleEntry {
+        token: write_token,
+        rights: HANDLE_RIGHT_WRITE,
+        kind: HandleKind::PipeWrite,
+        path: String::new(),
+        data: Vec::new(),
+        pos: 0,
+        dirty: false,
+        pipe_id: Some(pipe_id),
+    };
+    let write_handle = insert_entry(write_entry, write_token);
+
+    (read_handle, write_handle)
 }
 
 /// token を生成（単調カウンタ + 定数）

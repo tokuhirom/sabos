@@ -281,6 +281,10 @@ pub struct Task {
     pub exit_saved_rsp: u64,
     /// ユーザータスクの exit_usermode 用 SAVED_RBP バックアップ。
     pub exit_saved_rbp: u64,
+    /// stdin リダイレクト先のパイプハンドル（None = コンソール）
+    pub stdin_handle: Option<crate::handle::Handle>,
+    /// stdout リダイレクト先のパイプハンドル（None = コンソール）
+    pub stdout_handle: Option<crate::handle::Handle>,
 }
 
 // =================================================================
@@ -343,6 +347,8 @@ pub fn init() {
         process_leader_id: None,      // カーネルタスクはプロセスリーダーではない
         exit_saved_rsp: 0,
         exit_saved_rbp: 0,
+        stdin_handle: None,
+        stdout_handle: None,
     });
     sched.current = 0;
 }
@@ -433,6 +439,8 @@ pub fn spawn(name: &'static str, entry: fn()) {
         process_leader_id: None,      // カーネルタスクはスレッドではない
         exit_saved_rsp: 0,
         exit_saved_rbp: 0,
+        stdin_handle: None,
+        stdout_handle: None,
     });
 
     crate::serial_println!("[scheduler] spawned task {} '{}'", id, name);
@@ -830,6 +838,22 @@ pub fn process_mem_list() -> Vec<ProcessMemInfo> {
 pub fn current_task_id() -> u64 {
     let sched = SCHEDULER.lock();
     sched.tasks[sched.current].id
+}
+
+/// 現在のタスクの stdin リダイレクトハンドルを取得する
+///
+/// None = コンソール直結、Some = パイプにリダイレクト
+pub fn current_stdin_handle() -> Option<crate::handle::Handle> {
+    let sched = SCHEDULER.lock();
+    sched.tasks[sched.current].stdin_handle
+}
+
+/// 現在のタスクの stdout リダイレクトハンドルを取得する
+///
+/// None = コンソール直結、Some = パイプにリダイレクト
+pub fn current_stdout_handle() -> Option<crate::handle::Handle> {
+    let sched = SCHEDULER.lock();
+    sched.tasks[sched.current].stdout_handle
 }
 
 /// 現在のタスクを参照して処理する（デバッグ用）
@@ -1603,11 +1627,50 @@ pub fn spawn_user(name: &str, elf_data: &[u8], args: &[&str]) -> Result<u64, &'s
         process_leader_id: None,      // プロセスリーダー（メインスレッド）
         exit_saved_rsp: 0,
         exit_saved_rbp: 0,
+        stdin_handle: None,
+        stdout_handle: None,
     });
 
     crate::serial_println!("[scheduler] spawned user task {} '{}' (entry: {:#x}, parent: {:?})", id, name, entry_point, parent_id);
 
     Ok(id)
+}
+
+/// stdin/stdout リダイレクト付きでユーザープロセスを起動する
+///
+/// spawn_user() と同じだが、stdin/stdout のリダイレクト先ハンドルを指定できる。
+/// パイプラインの各ステージで使用する。
+///
+/// # 引数
+/// - `name`: プロセス名
+/// - `elf_data`: ELF バイナリデータ
+/// - `args`: コマンドライン引数
+/// - `stdin_handle`: stdin のリダイレクト先（None = コンソール）
+/// - `stdout_handle`: stdout のリダイレクト先（None = コンソール）
+pub fn spawn_user_redirected(
+    name: &str,
+    elf_data: &[u8],
+    args: &[&str],
+    stdin_handle: Option<crate::handle::Handle>,
+    stdout_handle: Option<crate::handle::Handle>,
+) -> Result<u64, &'static str> {
+    // まず通常の spawn_user でプロセスを作成
+    let task_id = spawn_user(name, elf_data, args)?;
+
+    // stdin/stdout ハンドルを設定
+    if stdin_handle.is_some() || stdout_handle.is_some() {
+        let mut sched = SCHEDULER.lock();
+        // task_id で対象タスクを検索
+        for task in sched.tasks.iter_mut() {
+            if task.id == task_id {
+                task.stdin_handle = stdin_handle;
+                task.stdout_handle = stdout_handle;
+                break;
+            }
+        }
+    }
+
+    Ok(task_id)
 }
 
 // =================================================================
@@ -1828,6 +1891,8 @@ pub fn spawn_thread(entry_point: u64, user_stack_top: u64, arg: u64) -> Result<u
         process_leader_id: Some(leader_id),  // スレッドグループのリーダー
         exit_saved_rsp: 0,
         exit_saved_rbp: 0,
+        stdin_handle: None,
+        stdout_handle: None,
     });
 
     // カーネルスタックの所有権をリーダープロセスに移管する。

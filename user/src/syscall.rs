@@ -735,6 +735,96 @@ pub fn spawn_with_args(path: &str, args: &[&str]) -> SyscallResult {
     unsafe { syscall4(SYS_SPAWN, path_ptr, path_len, buf.as_ptr() as u64, len as u64) as i64 }
 }
 
+/// パイプを作成する
+///
+/// # 戻り値
+/// (read_handle, write_handle) のタプル
+///
+/// 読み取り用と書き込み用の Handle ペアを作成して返す。
+/// read_handle からデータを読み、write_handle にデータを書く。
+/// write_handle を閉じると reader は EOF を検出する。
+pub fn pipe() -> Result<(Handle, Handle), SyscallResult> {
+    let mut read_handle = Handle { id: 0, token: 0 };
+    let mut write_handle = Handle { id: 0, token: 0 };
+    let result = unsafe {
+        syscall2(
+            SYS_PIPE,
+            &mut read_handle as *mut Handle as u64,
+            &mut write_handle as *mut Handle as u64,
+        ) as i64
+    };
+    if result < 0 {
+        Err(result)
+    } else {
+        Ok((read_handle, write_handle))
+    }
+}
+
+/// stdin/stdout リダイレクト付きでプロセスを起動する（引数付き）
+///
+/// # 引数
+/// - `path`: 実行する ELF ファイルのパス
+/// - `args`: コマンドライン引数のスライス
+/// - `stdin`: stdin のリダイレクト先ハンドル（None = コンソール）
+/// - `stdout`: stdout のリダイレクト先ハンドル（None = コンソール）
+///
+/// # 戻り値
+/// - タスク ID（成功時）
+/// - 負の値（エラー時）
+pub fn spawn_redirected(
+    path: &str,
+    args: &[&str],
+    stdin: Option<&Handle>,
+    stdout: Option<&Handle>,
+) -> SyscallResult {
+    /// カーネルに渡す引数構造体
+    #[repr(C)]
+    struct SpawnRedirectArgs {
+        path_ptr: u64,
+        path_len: u64,
+        args_ptr: u64,
+        args_len: u64,
+        stdin_handle_id: u64,
+        stdin_handle_token: u64,
+        stdout_handle_id: u64,
+        stdout_handle_token: u64,
+    }
+
+    let mut args_buf = [0u8; ARGS_BUF_SIZE];
+    let args_buf_len = if args.is_empty() {
+        0
+    } else {
+        build_args_buffer(args, &mut args_buf)
+    };
+
+    let spawn_args = SpawnRedirectArgs {
+        path_ptr: path.as_ptr() as u64,
+        path_len: path.len() as u64,
+        args_ptr: if args_buf_len > 0 { args_buf.as_ptr() as u64 } else { 0 },
+        args_len: args_buf_len as u64,
+        stdin_handle_id: match stdin {
+            Some(h) => h.id,
+            None => u64::MAX,
+        },
+        stdin_handle_token: match stdin {
+            Some(h) => h.token,
+            None => 0,
+        },
+        stdout_handle_id: match stdout {
+            Some(h) => h.id,
+            None => u64::MAX,
+        },
+        stdout_handle_token: match stdout {
+            Some(h) => h.token,
+            None => 0,
+        },
+    };
+
+    unsafe {
+        syscall1(SYS_SPAWN_REDIRECTED, &spawn_args as *const SpawnRedirectArgs as u64) as i64
+    }
+}
+
 /// 引数バッファの最大サイズ（1KB — コマンドライン引数の合計がこれを超えると切り捨て）
 const ARGS_BUF_SIZE: usize = 1024;
 

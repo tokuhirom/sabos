@@ -20,6 +20,7 @@ mod memory;
 mod mouse;
 mod paging;
 mod panic;
+mod pipe;
 mod procfs;
 mod rtc;
 mod scheduler;

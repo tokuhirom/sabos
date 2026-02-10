@@ -269,10 +269,22 @@ fn split_command(line: &str) -> (&str, &str) {
     }
 }
 
-/// パイプラインを実行（簡易版）
+/// パイプラインに外部コマンド（run）が含まれるか判定する
+fn pipeline_has_external(line: &str) -> bool {
+    for part in line.split('|') {
+        let p = part.trim();
+        let (cmd, _) = split_command(p);
+        if cmd == "run" || cmd.starts_with('/') || cmd.ends_with(".ELF") || cmd.ends_with(".elf") {
+            return true;
+        }
+    }
+    false
+}
+
+/// パイプラインを実行
 ///
-/// 対応コマンド: echo / cat / sed / grep
-/// 入出力は UTF-8 テキスト前提で扱う。
+/// ビルトインコマンド（echo/cat/sed/grep）のみの場合はインメモリ String で中継する。
+/// 外部コマンド（run）を含む場合はカーネルパイプを使ってプロセス間 I/O リダイレクトする。
 fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> {
     let mut parts: Vec<&str> = Vec::new();
     for part in line.split('|') {
@@ -286,6 +298,12 @@ fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> 
         return Err("Error: invalid pipeline");
     }
 
+    // 外部コマンドを含む場合はカーネルパイプを使用
+    if pipeline_has_external(line) {
+        return execute_pipeline_external(&parts, state);
+    }
+
+    // ビルトインのみ: インメモリ String で中継（従来動作）
     let mut input: Option<String> = None;
     for (i, part) in parts.iter().enumerate() {
         let (cmd, args) = split_command(part);
@@ -294,7 +312,7 @@ fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> 
             "cat" => pipeline_cat(args, state, input.as_deref())?,
             "sed" => pipeline_sed(args, state, input.as_deref())?,
             "grep" => pipeline_grep(args, state, input.as_deref())?,
-            _ => return Err("Error: pipeline supports only echo/cat/sed/grep"),
+            _ => return Err("Error: pipeline supports only echo/cat/sed/grep for builtin"),
         };
 
         if i + 1 == parts.len() {
@@ -302,6 +320,120 @@ fn execute_pipeline(line: &str, state: &ShellState) -> Result<(), &'static str> 
         } else {
             input = Some(output);
         }
+    }
+
+    Ok(())
+}
+
+/// 外部コマンドを含むパイプラインをカーネルパイプで実行する
+///
+/// 各ステージ間にパイプを作成し、spawn_redirected で子プロセスの
+/// stdin/stdout をパイプに接続する。ビルトインコマンドが混在する場合は
+/// ビルトインはシェルプロセス内で実行し、パイプ経由でデータを受け渡す。
+fn execute_pipeline_external(parts: &[&str], state: &ShellState) -> Result<(), &'static str> {
+    let n = parts.len();
+
+    // ステージ間のパイプを作成: pipes[i] = (read_handle, write_handle)
+    // ステージ i の stdout → pipes[i].write_handle
+    // ステージ i+1 の stdin → pipes[i].read_handle
+    let mut pipes: Vec<(syscall::Handle, syscall::Handle)> = Vec::new();
+    for _ in 0..n - 1 {
+        let (r, w) = syscall::pipe().map_err(|_| "Error: failed to create pipe")?;
+        pipes.push((r, w));
+    }
+
+    // 子プロセスの task_id を記録（後で wait するため）
+    let mut child_ids: Vec<u64> = Vec::new();
+
+    for i in 0..n {
+        let (cmd, args) = split_command(parts[i]);
+
+        // stdin: 最初のステージは None（コンソール）、それ以降は前のパイプの read 端
+        let stdin_handle = if i > 0 { Some(&pipes[i - 1].0) } else { None };
+        // stdout: 最後のステージは None（コンソール）、それ以前は次のパイプの write 端
+        let stdout_handle = if i < n - 1 { Some(&pipes[i].1) } else { None };
+
+        match cmd {
+            // 外部コマンド: spawn_redirected でプロセス起動
+            "run" => {
+                let trimmed = args.trim();
+                if trimmed.is_empty() {
+                    return Err("Error: run requires a filename");
+                }
+                // スペースで分割: 最初の要素がパス、残りが引数
+                let mut cmd_parts = trimmed.splitn(2, ' ');
+                let filename = cmd_parts.next().unwrap_or("");
+                let rest = cmd_parts.next().unwrap_or("").trim();
+                let abs_path = resolve_path(&state.cwd_text, filename);
+
+                let arg_strs: Vec<&str> = if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    rest.split_whitespace().collect()
+                };
+
+                let task_id = syscall::spawn_redirected(
+                    &abs_path, &arg_strs, stdin_handle, stdout_handle,
+                );
+                if task_id < 0 {
+                    return Err("Error: failed to spawn process");
+                }
+                child_ids.push(task_id as u64);
+            }
+
+            // ビルトインコマンド: パイプからデータを読んでビルトインを実行し、結果をパイプに書く
+            _ => {
+                // stdin パイプから入力を読み取り
+                let input_str = if let Some(rh) = stdin_handle {
+                    let mut data = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        let n = syscall::handle_read(rh, &mut buf);
+                        if n <= 0 { break; }
+                        data.extend_from_slice(&buf[..n as usize]);
+                    }
+                    // パイプの read 端を閉じる（EOF を受信した側）
+                    if i > 0 {
+                        syscall::handle_close(&pipes[i - 1].0);
+                    }
+                    Some(String::from_utf8_lossy(&data).into_owned())
+                } else {
+                    None
+                };
+
+                let output = match cmd {
+                    "echo" => pipeline_echo(args),
+                    "cat" => pipeline_cat(args, state, input_str.as_deref())?,
+                    "sed" => pipeline_sed(args, state, input_str.as_deref())?,
+                    "grep" => pipeline_grep(args, state, input_str.as_deref())?,
+                    _ => return Err("Error: unknown command in pipeline"),
+                };
+
+                // stdout パイプに出力を書き込み
+                if let Some(wh) = stdout_handle {
+                    syscall::handle_write(wh, output.as_bytes());
+                    // パイプの write 端を閉じる（下流にEOFを通知）
+                    syscall::handle_close(&pipes[i].1);
+                } else {
+                    // 最終ステージ: コンソールに出力
+                    syscall::write_str(&output);
+                }
+            }
+        }
+    }
+
+    // 外部コマンドのステージが使った後、残っているパイプハンドルを閉じる
+    // （シェルプロセスが所有しているハンドルの後始末）
+    for i in 0..pipes.len() {
+        // 外部コマンドに渡した read/write 端はもう不要なので閉じる
+        // ビルトインが既に閉じた分は二重 close になるが、InvalidHandle エラーが返るだけ
+        let _ = syscall::handle_close(&pipes[i].0);
+        let _ = syscall::handle_close(&pipes[i].1);
+    }
+
+    // 全子プロセスの完了を待つ
+    for task_id in &child_ids {
+        syscall::wait(*task_id, 0);  // タイムアウトなし（完了まで待つ）
     }
 
     Ok(())

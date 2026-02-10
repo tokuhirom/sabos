@@ -58,6 +58,10 @@ pub enum SyscallError {
     PermissionDenied,
     /// パストラバーサル試行（".." を含むパス）
     PathTraversal,
+    /// パイプにデータがまだない（yield して再試行すべき）
+    WouldBlock,
+    /// パイプの読み取り端が閉じている（BrokenPipe）
+    BrokenPipe,
     /// その他のエラー
     Other,
 }
@@ -107,6 +111,10 @@ impl SyscallError {
 
             // IPC 関連 (50-59)
             SyscallError::Cancelled => -50,
+
+            // パイプ関連 (60-69)
+            SyscallError::WouldBlock => -60,
+            SyscallError::BrokenPipe => -61,
 
             // その他
             SyscallError::Other => -99,

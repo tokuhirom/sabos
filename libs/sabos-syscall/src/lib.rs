@@ -36,6 +36,8 @@ pub const SYS_WRITE: u64 = 1;        // write(buf_ptr, len) — 文字列をカ�
 pub const SYS_CLEAR_SCREEN: u64 = 2; // clear_screen() — 画面をクリア
 pub const SYS_KEY_READ: u64 = 3;     // key_read(buf_ptr, len) — ノンブロッキングキー読み取り
 pub const SYS_CONSOLE_GRAB: u64 = 4; // console_grab(grab) — キーボードフォーカス取得/解放
+pub const SYS_PIPE: u64 = 5;          // pipe(read_handle_ptr, write_handle_ptr) — パイプ作成
+pub const SYS_SPAWN_REDIRECTED: u64 = 6; // spawn_redirected(args_struct_ptr) — stdio リダイレクト付きプロセス起動
 
 // =================================================================
 // テスト/デバッグ (10-11)

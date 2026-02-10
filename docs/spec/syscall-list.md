@@ -13,7 +13,9 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 - `0` `SYS_READ(buf_ptr, len) -> n`
   - フォーカス対応: キーボードフォーカスが設定されている場合、フォーカス外のタスクはフォーカス解放まで待機する
+  - stdin がパイプにリダイレクトされている場合はパイプから読み取り（WouldBlock 時は yield + retry）
 - `1` `SYS_WRITE(buf_ptr, len) -> n`
+  - stdout がパイプにリダイレクトされている場合はパイプに書き込み
 - `2` `SYS_CLEAR_SCREEN() -> 0`
 - `3` `SYS_KEY_READ(buf_ptr, len) -> n`
   - ノンブロッキングでキーボード入力を読み取る（`SYS_MOUSE_READ` と同パターン）
@@ -23,6 +25,15 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
   - `grab == 1`: キーボードフォーカスを取得（他タスクの SYS_READ をブロック）
   - `grab == 0`: キーボードフォーカスを解放
   - タスク終了時に自動解放される
+- `5` `SYS_PIPE(read_handle_ptr, write_handle_ptr) -> 0`
+  - パイプを作成し、読み取り用と書き込み用の Handle ペアをユーザー空間に書き込む
+  - read_handle で読み取り、write_handle で書き込む
+  - write_handle を閉じると reader は EOF を検出する
+  - reader を閉じると writer は BrokenPipe エラーになる
+- `6` `SYS_SPAWN_REDIRECTED(args_struct_ptr) -> task_id`
+  - stdin/stdout リダイレクト付きでプロセスを起動する
+  - 構造体ベース: `SpawnRedirectArgs { path_ptr, path_len, args_ptr, args_len, stdin_handle_id, stdin_handle_token, stdout_handle_id, stdout_handle_token }`
+  - handle_id が `u64::MAX` の場合はリダイレクトなし（コンソール直結）
 
 ## テスト/デバッグ (10-11)
 
@@ -377,6 +388,13 @@ SABOS 独自のエラーコード体系。POSIX 互換は目指さない。
 | コード | 名前 | 意味 |
 |--------|------|------|
 | -50 | CANCELLED | 操作がキャンセルされた（IPC recv のキャンセル等） |
+
+### パイプ関連 (60-69)
+
+| コード | 名前 | 意味 |
+|--------|------|------|
+| -60 | WOULD_BLOCK | パイプにデータがまだない（yield して再試行すべき） |
+| -61 | BROKEN_PIPE | パイプの読み取り端が閉じている |
 
 ### その他
 

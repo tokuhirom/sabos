@@ -1198,6 +1198,9 @@ impl Shell {
 
             // 11.16. IPC ハンドル委譲のテスト
             run_test("ipc_handle", this.test_ipc_handle());
+
+            // 11.17. パイプのテスト
+            run_test("pipe", crate::pipe::test_pipe());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
