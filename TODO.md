@@ -68,13 +68,14 @@
   - ゲスト内から `run /host/SHELL.ELF` でホスト側のバイナリを直接実行可能
   - QEMU 再起動は必要だが、disk.img の再作成は不要
 
-#### Step 3: テストランナーの改善（スクリプト）
-- [ ] 特定バイナリを指定してテスト実行するスクリプト
-  - 例: `make test-bin BIN=shell` → QEMU 起動 → `/host/shell` 実行 → 結果取得
-  - ディスクイメージの再作成をスキップし、QEMU 起動を高速化
-- [ ] テスト結果の構造化出力
-  - テスト結果を JSON でシリアル出力 → ホスト側スクリプトでパース
-  - 現在の grep ベースの判定をより堅牢に
+#### Step 3: テストランナーの改善（スクリプト） ✓
+- [x] 特定バイナリを指定してテスト実行するスクリプト
+  - `make test-bin BIN=shell` → QEMU 起動 → `/host/SHELL.ELF` 実行 → 結果取得
+  - `scripts/run-test-bin.sh` を新規作成、disk.img 再作成なしで高速テスト
+- [x] テスト結果の構造化出力
+  - selftest が JSON サマリー行を出力: `=== SELFTEST JSON {...} ===`
+  - run-selftest.sh が python3 で JSON パースし正確に判定
+  - selftest_net の "NET SELFTEST END:...PASSED" 誤マッチバグも修正
 
 #### Step 4: ISA debug exit の活用（カーネル + QEMU）
 - [ ] QEMU に `-device isa-debug-exit,iobase=0xf4,iosize=0x04` を追加
