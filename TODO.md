@@ -55,23 +55,18 @@
 - テスト実行は QEMU + sendkey で手動的
 - virtio-blk は 1 台しかサポートしておらず、ホストのディレクトリを直接マウントできない
 
-#### Step 1: 複数 virtio-blk デバイスのサポート（カーネル）
-- [ ] `pci::find_all_virtio_blk()` で全 virtio-blk デバイスを返すように拡張
-  - 現在の `find_virtio_blk()` は最初の 1 台のみ返す
-- [ ] `VIRTIO_BLK` をデバイスリスト（`Vec<VirtioBlk>` or 固定配列）に拡張
-  - デバイスインデックスで個別にアクセス可能にする
-- [ ] `KernelBlockDevice` にデバイスインデックスを持たせる
-  - `KernelBlockDevice(0)` = 既存の disk.img、`KernelBlockDevice(1)` = ホスト共有用
+#### Step 1: 複数 virtio-blk デバイスのサポート（カーネル） ✓
+- [x] `pci::find_all_virtio_blk()` で全 virtio-blk デバイスを返すように拡張
+- [x] `VIRTIO_BLK` → `VIRTIO_BLKS: Vec<VirtioBlk>` に拡張
+- [x] `KernelBlockDevice` に `dev_index` フィールドを追加
+  - `KernelBlockDevice { dev_index: 0 }` = disk.img、`1` = hostfs.img
 
-#### Step 2: ホストディレクトリの VFS マウント（カーネル + QEMU）
-- [ ] QEMU 起動オプションに 2 台目の virtio-blk を追加
-  - `-drive if=virtio,format=raw,file=fat:rw:user/target/x86_64-unknown-none/debug/`
-  - ホストのビルドディレクトリを FAT として直接公開
-- [ ] `vfs::init()` で 2 台目のデバイスを `/host` にマウント
-  - VFS マウントテーブルは実装済みなので、マウント追加は容易
-  - ゲスト内から `run /host/shell` でホスト側のバイナリを直接実行可能
-- [ ] 注意: QEMU の `fat:rw:dir` は起動時にスナップショットを作るため、
-  ホスト側でファイルを変更した場合は QEMU 再起動が必要（disk.img 再作成は不要）
+#### Step 2: ホストディレクトリの VFS マウント（カーネル + QEMU） ✓
+- [x] QEMU 起動オプションに 2 台目の virtio-blk を追加（hostfs.img）
+- [x] `vfs::init()` で 2 台目のデバイスを `/host` にマウント
+- [x] `make hostfs-update` で `mcopy -o` によるインクリメンタル更新
+  - ゲスト内から `run /host/SHELL.ELF` でホスト側のバイナリを直接実行可能
+  - QEMU 再起動は必要だが、disk.img の再作成は不要
 
 #### Step 3: テストランナーの改善（スクリプト）
 - [ ] 特定バイナリを指定してテスト実行するスクリプト
