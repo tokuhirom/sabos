@@ -38,6 +38,10 @@ pub const SYS_KEY_READ: u64 = 3;     // key_read(buf_ptr, len) — ノンブロ�
 pub const SYS_CONSOLE_GRAB: u64 = 4; // console_grab(grab) — キーボードフォーカス取得/解放
 pub const SYS_PIPE: u64 = 5;          // pipe(read_handle_ptr, write_handle_ptr) — パイプ作成
 pub const SYS_SPAWN_REDIRECTED: u64 = 6; // spawn_redirected(args_struct_ptr) — stdio リダイレクト付きプロセス起動
+pub const SYS_WAITPID: u64 = 7;       // waitpid(target_task_id, exit_code_ptr, flags) — 子プロセスの終了を待つ（拡張版）
+
+/// WNOHANG フラグ: 終了済みの子がいなければブロックせず即座に 0 を返す
+pub const WNOHANG: u64 = 1;
 
 // =================================================================
 // テスト/デバッグ (10-11)

@@ -1201,6 +1201,9 @@ impl Shell {
 
             // 11.17. パイプのテスト
             run_test("pipe", crate::pipe::test_pipe());
+
+            // 11.18. waitpid のテスト（spawn → waitpid で task_id と exit_code を検証）
+            run_test("waitpid", this.test_waitpid());
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2979,6 +2982,46 @@ impl Shell {
 
     /// httpd のディレクトリリスティングが動作する前提条件をテストする
     ///
+    /// waitpid のテスト
+    ///
+    /// EXIT0.ELF を spawn して waitpid で回収し、
+    /// 戻り値の (task_id, exit_code) が正しいことを確認する。
+    /// また WNOHANG で子プロセスがない場合のエラーも確認する。
+    fn test_waitpid(&self) -> bool {
+        use crate::scheduler;
+
+        // 1. EXIT0.ELF を spawn して waitpid(task_id, 0) で回収
+        let spawn_result = crate::syscall::exec_spawn_for_test("/EXIT0.ELF");
+        let spawned_task_id = match spawn_result {
+            Ok(id) => id,
+            Err(_) => return false,
+        };
+
+        // waitpid で指定した子プロセスの終了を待つ
+        match scheduler::waitpid(spawned_task_id, 0) {
+            Ok((child_id, exit_code)) => {
+                // 返ってきた child_id が spawn した task_id と一致するか
+                if child_id != spawned_task_id {
+                    return false;
+                }
+                // exit_code が 0（正常終了）であるか
+                if exit_code != 0 {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+
+        // 2. WNOHANG テスト: 子プロセスがいない状態で waitpid(0, WNOHANG) を呼ぶ
+        //    子がいない場合は NoChild エラーになるはず
+        match scheduler::waitpid(0, sabos_syscall::WNOHANG) {
+            Err(scheduler::WaitError::NoChild) => {}
+            _ => return false,
+        }
+
+        true
+    }
+
     /// httpd はルートディレクトリを開いてエントリ一覧を HTML で返す。
     /// ここでは同じ list_dir_to_buffer を呼んで、
     /// ルートの一覧に HELLO.TXT が含まれることを確認する。

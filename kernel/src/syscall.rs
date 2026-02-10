@@ -215,6 +215,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_YIELD => sys_yield(),
         SYS_SLEEP => sys_sleep(arg1),
         SYS_WAIT => sys_wait(arg1, arg2),
+        SYS_WAITPID => sys_waitpid(arg1, arg2, arg3),
         SYS_GETPID => sys_getpid(),
         SYS_KILL => sys_kill(arg1),
         SYS_GETENV => sys_getenv(arg1, arg2, arg3, arg4),
@@ -2058,6 +2059,39 @@ pub fn exec_for_test(path: &str) -> bool {
     exec_by_path(path).is_ok()
 }
 
+/// selftest 用: ELF を spawn してタスク ID を返す（waitpid テスト用）
+///
+/// exec_by_path と同じロジックだが、wait_for_child を呼ばずに
+/// spawn だけして task_id を返す。呼び出し元で waitpid を使って回収する。
+pub fn exec_spawn_for_test(path: &str) -> Result<u64, SyscallError> {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use x86_64::registers::control::Cr3;
+
+    let process_name = String::from(
+        path.rsplit('/').next().unwrap_or(path)
+    );
+
+    let elf_data = crate::vfs::read_file(path).map_err(crate::vfs::vfs_error_to_syscall)?;
+
+    let args_vec: Vec<&str> = alloc::vec![path];
+
+    let (current_cr3, current_flags) = Cr3::read();
+    unsafe {
+        crate::paging::switch_to_kernel_page_table();
+    }
+    let task_id = match crate::scheduler::spawn_user(&process_name, &elf_data, &args_vec) {
+        Ok(id) => id,
+        Err(_) => {
+            unsafe { Cr3::write(current_cr3, current_flags); }
+            return Err(SyscallError::Other);
+        }
+    };
+    unsafe { Cr3::write(current_cr3, current_flags); }
+
+    Ok(task_id)
+}
+
 /// selftest 用: 引数・環境変数付きで exec を実行する
 ///
 /// 指定したパスの ELF を args と env_vars 付きで spawn し、終了を待つ。
@@ -2222,6 +2256,46 @@ fn sys_wait(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let result = crate::scheduler::wait_for_child(target_task_id, timeout_ms);
     match result {
         Ok(exit_code) => Ok(exit_code as u64),
+        Err(crate::scheduler::WaitError::NoChild) => Err(SyscallError::InvalidArgument),
+        Err(crate::scheduler::WaitError::NotChild) => Err(SyscallError::PermissionDenied),
+        Err(crate::scheduler::WaitError::Timeout) => Err(SyscallError::Timeout),
+    }
+}
+
+/// SYS_WAITPID: 子プロセスの終了を待つ（拡張版）
+///
+/// 引数:
+///   arg1 — 待つ子プロセスのタスク ID (0 なら任意の子)
+///   arg2 — 終了コードの書き込み先ユーザー空間ポインタ (0 なら無視)
+///   arg3 — フラグ（WNOHANG=1: 終了済みの子がいなければ即座に 0 を返す）
+///
+/// 戻り値:
+///   終了した子プロセスのタスク ID（成功時）
+///   0（WNOHANG で終了済みの子がいなかった場合）
+///   負の値（エラー時）
+///
+/// 動作:
+///   - SYS_WAIT との違い: どの子が終了したかの task_id を戻り値で返し、
+///     exit_code はユーザー空間ポインタ経由で書き込む
+///   - WNOHANG フラグでノンブロッキング待ちが可能
+fn sys_waitpid(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    let target_task_id = arg1;
+    let exit_code_ptr_raw = arg2;
+    let flags = arg3;
+
+    // 割り込みを有効化（ポーリング中にタイマー割り込みが必要）
+    x86_64::instructions::interrupts::enable();
+
+    let result = crate::scheduler::waitpid(target_task_id, flags);
+    match result {
+        Ok((child_id, exit_code)) => {
+            // exit_code_ptr が 0 でなければ、ユーザー空間に終了コードを書き込む
+            if exit_code_ptr_raw != 0 {
+                let exit_code_ptr = user_ptr_from_arg::<i64>(exit_code_ptr_raw)?;
+                exit_code_ptr.write(exit_code as i64);
+            }
+            Ok(child_id)
+        }
         Err(crate::scheduler::WaitError::NoChild) => Err(SyscallError::InvalidArgument),
         Err(crate::scheduler::WaitError::NotChild) => Err(SyscallError::PermissionDenied),
         Err(crate::scheduler::WaitError::Timeout) => Err(SyscallError::Timeout),

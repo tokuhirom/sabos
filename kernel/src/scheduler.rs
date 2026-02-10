@@ -1083,6 +1083,84 @@ pub fn wait_for_child(target_task_id: u64, timeout_ms: u64) -> Result<i32, WaitE
     }
 }
 
+/// 子プロセスの終了を待つ（拡張版: task_id も返す）
+///
+/// # 引数
+/// - `target_task_id`: 待つ子プロセスのタスク ID (0 なら任意の子)
+/// - `flags`: フラグ（WNOHANG=1: 終了済みの子がいなければ即座に戻る）
+///
+/// # 戻り値
+/// - Ok((child_task_id, exit_code)): 終了した子プロセスの ID と終了コード
+/// - Ok((0, 0)): WNOHANG 指定で終了済みの子がいなかった
+/// - Err(WaitError): エラー
+///
+/// # 動作
+/// wait_for_child() と同じロジックだが、終了した子の task_id も返す。
+/// WNOHANG フラグが設定されている場合、終了済みの子がいなければ
+/// ブロッキングせずに Ok((0, 0)) を返す。
+pub fn waitpid(target_task_id: u64, flags: u64) -> Result<(u64, i32), WaitError> {
+    let my_id = current_task_id();
+    let wnohang = (flags & sabos_syscall::WNOHANG) != 0;
+
+    loop {
+        {
+            let mut sched = SCHEDULER.lock();
+
+            // 子プロセスの中で Finished かつ未回収のものを探す
+            let finished_child_idx = sched.tasks.iter().position(|t| {
+                let is_my_child = t.parent_id == Some(my_id);
+                let is_finished = t.state == TaskState::Finished;
+                let is_not_reaped = !t.reaped;
+                let is_target = target_task_id == 0 || t.id == target_task_id;
+
+                is_my_child && is_finished && is_not_reaped && is_target
+            });
+
+            if let Some(idx) = finished_child_idx {
+                // 子プロセスが終了している
+                let child_id = sched.tasks[idx].id;
+                let exit_code = sched.tasks[idx].exit_code;
+                sched.tasks[idx].reaped = true;
+                // リソースを解放
+                sched.tasks[idx]._stack = None;
+                sched.tasks[idx].env_vars = Vec::new();
+                return Ok((child_id, exit_code));
+            }
+
+            // target_task_id が指定されている場合、そのタスクが自分の子かどうか確認
+            if target_task_id > 0 {
+                let target = sched.tasks.iter().find(|t| t.id == target_task_id);
+                match target {
+                    None => return Err(WaitError::NoChild),
+                    Some(t) if t.parent_id != Some(my_id) => return Err(WaitError::NotChild),
+                    Some(t) if t.state == TaskState::Finished && t.reaped => {
+                        return Err(WaitError::NoChild);
+                    }
+                    Some(_) => {} // 子だが、まだ終了していない
+                }
+            } else {
+                // target_task_id == 0 の場合、未回収の子プロセスが一つもいなければエラー
+                let has_child = sched.tasks.iter().any(|t| {
+                    let is_my_child = t.parent_id == Some(my_id);
+                    let is_unreaped = !(t.state == TaskState::Finished && t.reaped);
+                    is_my_child && is_unreaped
+                });
+                if !has_child {
+                    return Err(WaitError::NoChild);
+                }
+            }
+        }
+
+        // WNOHANG: 終了済みの子がいなければブロッキングせずに戻る
+        if wnohang {
+            return Ok((0, 0));
+        }
+
+        // まだ終了していないので、yield して待つ
+        yield_now();
+    }
+}
+
 /// スレッドの終了を待つ。
 ///
 /// wait_for_child() に似ているが、同じプロセスグループ内のスレッドを待つ。

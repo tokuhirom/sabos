@@ -34,6 +34,15 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
   - stdin/stdout リダイレクト付きでプロセスを起動する
   - 構造体ベース: `SpawnRedirectArgs { path_ptr, path_len, args_ptr, args_len, stdin_handle_id, stdin_handle_token, stdout_handle_id, stdout_handle_token }`
   - handle_id が `u64::MAX` の場合はリダイレクトなし（コンソール直結）
+- `7` `SYS_WAITPID(target_task_id, exit_code_ptr, flags) -> child_task_id`
+  - 子プロセスの終了を待つ（拡張版: どの子が終了したかも返す）
+  - `target_task_id > 0`: 指定した子プロセスの終了を待つ
+  - `target_task_id == 0`: 任意の子プロセスの終了を待つ
+  - `exit_code_ptr`: 終了コードの書き込み先（ユーザー空間ポインタ、0 なら無視）
+  - `flags`: `WNOHANG(1)` — 終了済みの子がいなければ即座に 0 を返す
+  - 戻り値: 終了した子の task_id（成功時）、0（WNOHANG で未終了）
+  - SYS_WAIT(34) との違い: task_id を戻り値で返し、exit_code はポインタ経由
+  - エラー: -10 (子がいない), -30 (子ではない)
 
 ## テスト/デバッグ (10-11)
 

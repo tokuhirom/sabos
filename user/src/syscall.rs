@@ -891,6 +891,31 @@ pub fn wait(task_id: u64, timeout_ms: u64) -> SyscallResult {
     unsafe { syscall2(SYS_WAIT, task_id, timeout_ms) as i64 }
 }
 
+/// 子プロセスの終了を待つ（拡張版: どの子が終了したかも返す）
+///
+/// # 引数
+/// - `task_id`: 待つ子プロセスのタスク ID (0 なら任意の子)
+/// - `flags`: フラグ（`WNOHANG`: 終了済みの子がいなければ即座に戻る）
+///
+/// # 戻り値
+/// `(child_task_id, exit_code)` のタプル:
+/// - `child_task_id > 0`: 終了した子プロセスのタスク ID
+/// - `child_task_id == 0`: WNOHANG 指定で終了済みの子がいなかった
+/// - `child_task_id < 0`: エラー（errno）
+///   - -10: 子プロセスがない、または指定したタスクが存在しない
+///   - -30: 指定したタスクは子プロセスではない
+///
+/// # 動作
+/// - `task_id > 0`: 指定した子プロセスの終了を待つ
+/// - `task_id == 0`: 任意の子プロセスの終了を待つ
+/// - `flags & WNOHANG`: 終了済みの子がいなければブロックせず即座に戻る
+pub fn waitpid(task_id: u64, flags: u64) -> (i64, i64) {
+    let mut exit_code: i64 = 0;
+    let exit_code_ptr = &mut exit_code as *mut i64 as u64;
+    let child_id = unsafe { syscall3(SYS_WAITPID, task_id, exit_code_ptr, flags) };
+    (child_id as i64, exit_code)
+}
+
 /// 自分のタスク ID を取得
 ///
 /// # 戻り値
