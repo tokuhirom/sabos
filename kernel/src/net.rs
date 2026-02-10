@@ -852,44 +852,67 @@ const DNS_CLASS_IN: u16 = 1;
 /// - `Ok([u8; 4])`: 解決された IPv4 アドレス
 /// - `Err(&str)`: エラーメッセージ
 pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
-    // レスポンスバッファをクリア
-    {
-        let mut buf = UDP_RESPONSE_BUFFER.lock();
-        *buf = None;
-    }
-
-    // DNS クエリを構築
     let query_id: u16 = 0x1234; // 固定 ID（簡易実装）
     let src_port: u16 = 12345; // 送信元ポート
 
     let query_packet = build_dns_query(query_id, domain)?;
 
-    // クエリを送信
-    serial_println!("dns: sending query for '{}'", domain);
-    send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet)?;
-
-    // レスポンスを待つ（最大 3 秒）
-    for _ in 0..30 {
-        // ネットワークをポーリング
-        poll_and_handle();
-
-        // レスポンスをチェック
+    // 最大 3 回リトライする。
+    // netd（ユーザー空間）も virtio-net の受信キューからパケットを取るため、
+    // カーネルの poll_and_handle() が DNS 応答を取れない場合がある。
+    // リトライすることで、netd とのパケット取得レースに負けても回復できる。
+    for attempt in 0..3 {
+        // レスポンスバッファをクリア
         {
-            let buf = UDP_RESPONSE_BUFFER.lock();
-            if let Some((port, ref data)) = *buf {
-                if port == src_port && data.len() >= 12 {
-                    // レスポンスをパース
-                    let response_id = u16::from_be_bytes([data[0], data[1]]);
-                    if response_id == query_id {
-                        return parse_dns_response(data);
+            let mut buf = UDP_RESPONSE_BUFFER.lock();
+            *buf = None;
+        }
+
+        // クエリを送信
+        if attempt == 0 {
+            serial_println!("dns: sending query for '{}'", domain);
+        } else {
+            serial_println!("dns: retrying query for '{}' (attempt {})", domain, attempt + 1);
+        }
+        if let Err(e) = send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet) {
+            return Err(e);
+        }
+
+        // レスポンスを待つ（各試行 2 秒）
+        // PIT タイマーティック（約 55ms/tick）を使って正確にタイムアウトを計測する。
+        let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let timeout_ticks: u64 = 2 * 182 / 10; // 2秒 ≈ 36 ticks
+
+        loop {
+            // 受信キューのパケットをすべて処理する
+            // （1パケットずつだと他のパケットに埋もれる）
+            for _ in 0..64 {
+                poll_and_handle();
+            }
+
+            // レスポンスをチェック
+            {
+                let buf = UDP_RESPONSE_BUFFER.lock();
+                if let Some((port, ref data)) = *buf {
+                    if port == src_port && data.len() >= 12 {
+                        let response_id = u16::from_be_bytes([data[0], data[1]]);
+                        if response_id == query_id {
+                            return parse_dns_response(data);
+                        }
                     }
                 }
             }
-        }
 
-        // 100ms 待機
-        for _ in 0..100000 {
-            core::hint::spin_loop();
+            // タイムアウトチェック（PIT タイマー基準）
+            let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(start_tick) >= timeout_ticks {
+                break; // この試行はタイムアウト → 次のリトライへ
+            }
+
+            // 短い待機（CPU を少し休ませる）
+            for _ in 0..10000 {
+                core::hint::spin_loop();
+            }
         }
     }
 
