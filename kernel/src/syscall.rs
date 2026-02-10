@@ -188,7 +188,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_KEY_READ => sys_key_read(arg1, arg2),
         SYS_CONSOLE_GRAB => sys_console_grab(arg1),
         // テスト/デバッグ
-        SYS_SELFTEST => sys_selftest(),
+        SYS_SELFTEST => sys_selftest(arg1),
         // ファイルシステム
         SYS_FILE_DELETE => sys_file_delete(arg1, arg2),
         SYS_DIR_LIST => sys_dir_list(arg1, arg2, arg3, arg4),
@@ -632,12 +632,13 @@ fn sys_draw_text(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysc
 
 /// SYS_SELFTEST: カーネル selftest を実行する
 ///
-/// 引数: なし
+/// 引数:
+///   arg1: auto_exit フラグ（0 = 通常実行、1 = 完了後に ISA debug exit で QEMU を終了）
 /// 戻り値: 0（成功）
-fn sys_selftest() -> Result<u64, SyscallError> {
+fn sys_selftest(auto_exit: u64) -> Result<u64, SyscallError> {
     // selftest 中にタイマー割り込みやタスク切り替えが動くように有効化
     x86_64::instructions::interrupts::enable();
-    crate::shell::run_selftest();
+    crate::shell::run_selftest(auto_exit != 0);
     Ok(0)
 }
 

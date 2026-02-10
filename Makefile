@@ -63,7 +63,8 @@ QEMU_COMMON = qemu-system-x86_64 \
 	-drive if=virtio,format=raw,file=$(DISK_IMG) \
 	-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
 	-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
-	-audiodev id=snd0,driver=none -device AC97,audiodev=snd0
+	-audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
+	-device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 # スクリーンショットの出力先（デフォルト: docs/images/screenshot.png）
 SCREENSHOT_OUT ?= docs/images/screenshot.png
@@ -193,6 +194,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 		-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
 		-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
 		-audiodev id=snd0,driver=sdl -device AC97,audiodev=snd0 \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio
 
 # スクリーンショットを撮る

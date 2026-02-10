@@ -409,11 +409,14 @@ pub fn draw_text(x: u32, y: u32, fg: (u8, u8, u8), bg: (u8, u8, u8), text: &str)
 
 /// カーネル selftest を実行する
 ///
+/// # 引数
+/// - `auto_exit`: true の場合、完了後に ISA debug exit で QEMU を自動終了する
+///
 /// # 戻り値
 /// - 0（成功時）
 /// - 負の値（エラー時）
-pub fn selftest() -> SyscallResult {
-    unsafe { syscall0(SYS_SELFTEST) as i64 }
+pub fn selftest(auto_exit: bool) -> SyscallResult {
+    unsafe { syscall1(SYS_SELFTEST, if auto_exit { 1 } else { 0 }) as i64 }
 }
 
 /// プログラムを終了する

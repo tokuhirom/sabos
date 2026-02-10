@@ -101,6 +101,7 @@ qemu-system-x86_64 \
     -drive if=virtio,format=raw,file=hostfs.img \
     -netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
     -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio \
     -display none \
     -monitor telnet:127.0.0.1:$MONITOR_PORT,server,nowait > "$LOG_FILE" 2>&1 &

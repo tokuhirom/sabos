@@ -26,6 +26,7 @@ mod scheduler;
 mod serial;
 mod slab_allocator;
 mod pci;
+mod qemu;
 mod shell;
 mod syscall;
 mod net;

@@ -115,6 +115,7 @@ impl Shell {
             "beep" => self.cmd_beep(args),
             "panic" => self.cmd_panic(),
             "halt" => self.cmd_halt(),
+            "exit_qemu" => self.cmd_exit_qemu(args),
             _ => {
                 framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
                 kprintln!("Unknown command: {}", command);
@@ -155,6 +156,7 @@ impl Shell {
         kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
         kprintln!("  halt            - Halt the system");
+        kprintln!("  exit_qemu [code] - Exit QEMU via ISA debug exit (0=success, 1=failure)");
     }
 
     /// clear コマンド: 画面をクリアする。
@@ -1071,11 +1073,22 @@ impl Shell {
     /// CI で使いやすいように、各テスト結果を [PASS]/[FAIL] で出力し、
     /// 最後にサマリーを出力する。
     fn cmd_selftest(&self, args: &str) {
-        let target = args.trim();
-        let target = if target.is_empty() { "all" } else { target };
+        // 引数パース: `selftest [target] [--exit]`
+        // --exit フラグが指定されると、テスト終了後に QEMU を ISA debug exit で終了する。
+        // CI で QEMU の exit code だけでテスト成否を判定できるようになる。
+        let mut target = "all";
+        let mut auto_exit = false;
+        for arg in args.split_whitespace() {
+            if arg == "--exit" {
+                auto_exit = true;
+            } else {
+                target = arg;
+            }
+        }
 
         if target == "list" {
             kprintln!("selftest targets: all, base, core, fs, net, gui, service");
+            kprintln!("flags: --exit (exit QEMU after completion)");
             return;
         }
 
@@ -1298,6 +1311,18 @@ impl Shell {
             framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
             kprintln!("=== SELFTEST END: {}/{} FAILED ===", failed, total);
             framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+        }
+
+        // --exit フラグが指定されている場合、ISA debug exit で QEMU を終了する。
+        // QEMU の exit code は (code << 1) | 1 になるため:
+        //   - 全テスト PASS → code=0 → QEMU exit 1
+        //   - テスト FAIL あり → code=1 → QEMU exit 3
+        if auto_exit {
+            let exit_code = if failed == 0 { 0 } else { 1 };
+            kprintln!("Exiting QEMU with debug exit code {}...", exit_code);
+            crate::qemu::debug_exit(exit_code);
+            // ISA debug exit デバイスが設定されていない場合はここに到達する
+            kprintln!("WARN: ISA debug exit device not available. Use -device isa-debug-exit.");
         }
     }
 
@@ -3089,6 +3114,19 @@ impl Shell {
             x86_64::instructions::hlt();
         }
     }
+
+    /// exit_qemu コマンド: ISA debug exit デバイス経由で QEMU を終了する。
+    /// QEMU の exit code は (code << 1) | 1 になる。
+    ///   exit_qemu 0 → QEMU exit 1（成功）
+    ///   exit_qemu 1 → QEMU exit 3（失敗）
+    fn cmd_exit_qemu(&self, args: &str) {
+        let code: u32 = args.trim().parse().unwrap_or(0);
+        kprintln!("Exiting QEMU with debug exit code {}...", code);
+        crate::qemu::debug_exit(code);
+        // ISA debug exit デバイスが設定されていない場合はここに到達する
+        kprintln!("WARN: ISA debug exit device not available.");
+        kprintln!("Start QEMU with: -device isa-debug-exit,iobase=0xf4,iosize=0x04");
+    }
 }
 
 /// rdtsc 命令で TSC (Time Stamp Counter) を読み取る。
@@ -3107,7 +3145,14 @@ fn rdtsc() -> u64 {
 /// カーネル側から selftest を実行するための公開関数。
 ///
 /// syscall から呼べるように、最小限の Shell を生成して selftest を実行する。
-pub fn run_selftest() {
+/// syscall 経由で selftest を実行する。
+/// auto_exit が true の場合、selftest のコマンド引数に "--exit" を付けて
+/// ISA debug exit で QEMU を自動終了する。
+pub fn run_selftest(auto_exit: bool) {
     let shell = Shell::new(0, 0);
-    shell.cmd_selftest("");
+    if auto_exit {
+        shell.cmd_selftest("--exit");
+    } else {
+        shell.cmd_selftest("");
+    }
 }

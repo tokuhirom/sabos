@@ -56,6 +56,7 @@ qemu-system-x86_64 \
     -drive if=virtio,format=raw,file=hostfs.img \
     -netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
     -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio \
     -display none \
     -monitor telnet:127.0.0.1:$MONITOR_PORT,server,nowait > "$LOG_FILE" 2>&1 &
@@ -556,12 +557,15 @@ if [ -f "$GUI_SCREENSHOT_PATH_FILE" ]; then
     echo "GUI screenshot saved: $GUI_SCREENSHOT_OUT"
 fi
 
-# user シェルで selftest を実行
+# user シェルで selftest --exit を実行する。
+# --exit フラグは syscall 経由でカーネルに渡され、ISA debug exit で QEMU を自動終了する:
+#   全テスト PASS → QEMU exit 1（ゲストが 0 を書き込む → (0 << 1) | 1 = 1）
+#   テスト FAIL あり → QEMU exit 3（ゲストが 1 を書き込む → (1 << 1) | 1 = 3）
 base=$(log_line_count)
 if [ -n "${SELFTEST_TARGET:-}" ]; then
-    send_command "selftest ${SELFTEST_TARGET}"
+    send_command "selftest ${SELFTEST_TARGET} --exit"
 else
-    send_command "selftest"
+    send_command "selftest --exit"
 fi
 
 # テスト開始の反応を待つ（最大 10 秒）
@@ -577,21 +581,11 @@ if ! grep_after "$base" "Running kernel selftest" && ! grep_after "$base" "SELFT
     send_key ret
 fi
 
-# テスト結果を待つ（最大 60 秒）
-echo "Waiting for selftest to complete..."
-for i in {1..60}; do
-    if grep_after "$base" "SELFTEST END"; then
-        break
-    fi
-    sleep 1
-done
-
-# 結果確認前に少し待つ
-sleep 2
-
-# QEMU を終了
-kill "$QEMU_PID" 2>/dev/null || true
-wait "$QEMU_PID" 2>/dev/null || true
+# QEMU が ISA debug exit で自動終了するのを待つ（最大 120 秒）
+# selftest --exit は完了後に I/O ポート 0xf4 に書き込み、QEMU を終了させる。
+echo "Waiting for selftest to complete (QEMU will auto-exit)..."
+qemu_exit=0
+wait "$QEMU_PID" 2>/dev/null || qemu_exit=$?
 QEMU_PID=""  # cleanup で再度 kill しないように
 
 # 結果を表示
@@ -608,15 +602,17 @@ if [ -n "$SABOS_SAVE_LOG" ] && [ -f "$LOG_FILE" ]; then
     echo "QEMU log saved: $SABOS_SAVE_LOG"
 fi
 
-# 結果を検証（JSON サマリーを優先的に使用する）
-# 以前の grep ベース判定では selftest_net の "NET SELFTEST END:...PASSED" が
-# 誤マッチする問題があったため、JSON パースで正確に判定する。
+# 結果を検証（3 段階のフォールバック）
+#   1. QEMU exit code（ISA debug exit 経由: 1=成功, 3=失敗）
+#   2. JSON サマリーのパース
+#   3. grep フォールバック
+
+echo "QEMU exit code: $qemu_exit"
+
+# JSON サマリーも取得して詳細表示する（exit code に関わらず）
 # シリアル出力は \r\n を使うため、tr -d '\r' で除去してからパースする
 json_line=$(grep "SELFTEST JSON" "$LOG_FILE" | tail -1 | tr -d '\r' | sed 's/.*SELFTEST JSON //' | sed 's/ ===//' || true)
-
 if [ -n "$json_line" ] && command -v python3 &>/dev/null; then
-    # JSON サマリーが見つかった場合: python3 で正確にパースする
-    # set -e 下で python3 の非ゼロ exit code によるスクリプト中断を防ぐ
     json_exit=0
     result=$(echo "$json_line" | python3 -c "
 import sys, json
@@ -634,22 +630,29 @@ sys.exit(1 if failed > 0 else 0)
 " 2>&1) || json_exit=$?
     echo "$result"
     echo ""
-    if [ $json_exit -eq 0 ]; then
-        echo -e "${GREEN}All tests PASSED!${NC}"
-        exit 0
-    else
-        echo -e "${RED}Some tests FAILED!${NC}"
-        echo ""
-        echo "Full log:"
-        cat "$LOG_FILE"
-        exit 1
-    fi
+fi
+
+# ISA debug exit の exit code で判定（最も信頼性が高い）
+# exit code 1 = ゲストが 0 を書き込み = 全テスト PASS
+# exit code 3 = ゲストが 1 を書き込み = テスト FAIL あり
+# それ以外 = QEMU が異常終了またはタイムアウト → JSON/grep にフォールバック
+if [ "$qemu_exit" -eq 1 ]; then
+    echo -e "${GREEN}All tests PASSED! (QEMU exit code: $qemu_exit)${NC}"
+    exit 0
+elif [ "$qemu_exit" -eq 3 ]; then
+    echo -e "${RED}Some tests FAILED! (QEMU exit code: $qemu_exit)${NC}"
+    echo ""
+    echo "Full log:"
+    cat "$LOG_FILE"
+    exit 1
 else
-    # JSON が見つからない場合: フォールバックとして grep で判定する。
-    # "=== SELFTEST END:" で始まる行のみをチェックし、
-    # selftest_net の "NET SELFTEST END" との誤マッチを防ぐ。
-    if grep -q "^=== SELFTEST END:.*PASSED ===" "$LOG_FILE"; then
-        echo -e "${GREEN}All tests PASSED!${NC}"
+    # ISA debug exit が使えなかった場合（kill されたなど）: JSON / grep にフォールバック
+    echo -e "${YELLOW}WARN: Unexpected QEMU exit code: $qemu_exit (falling back to output parsing)${NC}"
+    if [ -n "$json_line" ] && [ "${json_exit:-1}" -eq 0 ]; then
+        echo -e "${GREEN}All tests PASSED! (from JSON)${NC}"
+        exit 0
+    elif grep -q "^=== SELFTEST END:.*PASSED ===" "$LOG_FILE"; then
+        echo -e "${GREEN}All tests PASSED! (from grep)${NC}"
         exit 0
     else
         echo -e "${RED}Some tests FAILED!${NC}"

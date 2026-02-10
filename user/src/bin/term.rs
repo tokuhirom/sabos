@@ -457,7 +457,7 @@ fn cmd_exit() {
 /// selftest コマンド: カーネル selftest を実行
 fn cmd_selftest(term: &mut TermBuffer) {
     term.write_text("Running kernel selftest...\n");
-    let _ = syscall::selftest();
+    let _ = syscall::selftest(false);
     term.write_text("(selftest output goes to serial console)\n");
 }
 

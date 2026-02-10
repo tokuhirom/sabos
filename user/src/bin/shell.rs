@@ -249,7 +249,7 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "rect" => cmd_rect(args),
         "cal" => cmd_cal(args),
         "beep" => cmd_beep(args),
-        "selftest" => cmd_selftest(),
+        "selftest" => cmd_selftest(args),
         "selftest_net" => cmd_selftest_net(),
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
@@ -534,7 +534,7 @@ fn cmd_help() {
     syscall::write_str("  rect x y w h r g b - Draw filled rectangle (GUI demo)\n");
     syscall::write_str("  cal <month> <year> - Show calendar for given month\n");
     syscall::write_str("  beep [freq] [ms]  - Play beep sound (default: 440Hz 200ms)\n");
-    syscall::write_str("  selftest          - Run kernel selftest\n");
+    syscall::write_str("  selftest [--exit]  - Run kernel selftest (--exit: auto-exit QEMU)\n");
     syscall::write_str("  selftest_net      - Run network API selftest\n");
     syscall::write_str("  halt              - Halt the system\n");
     syscall::write_str("\n");
@@ -552,9 +552,11 @@ fn cmd_exit() {
 }
 
 /// selftest コマンド: カーネル selftest を実行
-fn cmd_selftest() {
+/// `selftest --exit` で完了後に QEMU を ISA debug exit で自動終了する
+fn cmd_selftest(args: &str) {
+    let auto_exit = args.split_whitespace().any(|a| a == "--exit");
     syscall::write_str("Running kernel selftest...\n");
-    let _ = syscall::selftest();
+    let _ = syscall::selftest(auto_exit);
 }
 
 /// selftest_net コマンド: ネットワーク抽象化 API のテスト

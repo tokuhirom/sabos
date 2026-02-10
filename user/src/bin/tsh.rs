@@ -199,7 +199,7 @@ fn handle_line(telnetd_id: u64, line: &[u8]) {
             }
         }
         "selftest" => {
-            let _ = syscall::selftest();
+            let _ = syscall::selftest(false);
             send_output(telnetd_id, "selftest done\n");
         }
         "exit" => {
