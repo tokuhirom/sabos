@@ -340,7 +340,19 @@ pub fn init() {
     vfs.mount("/proc", Box::new(|| {
         Box::new(crate::procfs::ProcFs::new())
     }));
-    crate::kprintln!("VFS initialized: / -> fat32, /proc -> procfs");
+
+    // 2 台目の virtio-blk デバイスがあれば "/host" にマウントする。
+    // QEMU で `-drive if=virtio,format=raw,file=fat:rw:hostfs/` を指定すると
+    // ホストのビルドディレクトリが FAT32 として公開される。
+    let dev_count = crate::virtio_blk::device_count();
+    if dev_count >= 2 {
+        vfs.mount("/host", Box::new(|| {
+            Box::new(crate::fat32::Fat32::new_fs_with_index(1))
+        }));
+        crate::kprintln!("VFS initialized: / -> fat32, /proc -> procfs, /host -> fat32[1]");
+    } else {
+        crate::kprintln!("VFS initialized: / -> fat32, /proc -> procfs");
+    }
 }
 
 /// ファイルを開く

@@ -7,7 +7,7 @@ unexport RUSTUP_TOOLCHAIN
 # -Zjson-target-spec は nightly 専用フラグのため、toolchain 指定が必須。
 NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
 
-.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img test check-syscall
+.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img hostfs-update test check-syscall
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
@@ -41,8 +41,15 @@ endif
 # virtio-blk 用のディスクイメージ
 DISK_IMG = disk.img
 
+# ホスト共有用ディスクイメージ（2台目の virtio-blk）
+# ユーザーランドバイナリの開発・テスト用。
+# disk.img とは別に管理し、mcopy -o でインクリメンタルに更新する。
+# ゲスト内からは "/host" としてマウントされる。
+HOSTFS_IMG = hostfs.img
+
 # QEMU の共通オプション
 # -drive if=virtio で virtio-blk デバイスとしてディスクイメージを接続する。
+# 1台目: disk.img（システムディスク）、2台目: hostfs.img（ホスト共有用）
 # -netdev user + -device virtio-net-pci で virtio-net デバイスを追加する。
 # PCI バス上に vendor=0x1AF4 のデバイスとして見える。
 QEMU_COMMON = qemu-system-x86_64 \
@@ -54,6 +61,7 @@ QEMU_COMMON = qemu-system-x86_64 \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 	-drive format=raw,file=fat:rw:esp \
 	-drive if=virtio,format=raw,file=$(DISK_IMG) \
+	-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
 	-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
 	-audiodev id=snd0,driver=none -device AC97,audiodev=snd0
 
@@ -134,13 +142,46 @@ disk-img: build-user
 	fi
 	@echo "Disk image created: $(DISK_IMG)"
 
-run: build $(ESP_DIR) $(DISK_IMG)
+# ホスト共有用ディスクイメージを作成する（初回のみ）。
+# 64MB FAT32 としてフォーマットする。
+$(HOSTFS_IMG):
+	dd if=/dev/zero of=$@ bs=1M count=64
+	mkfs.fat -F 32 $@
+	@echo "Host filesystem image created: $@"
+
+# ホスト共有用ディスクイメージにユーザーバイナリをコピーする。
+# mcopy -o（上書きモード）で変更されたバイナリだけを高速に更新する。
+# disk.img の再作成（dd + mkfs.fat）は不要。
+# 使い方: make hostfs-update → QEMU 再起動 → /host/SHELL.ELF 等でアクセス
+hostfs-update: build-user | $(HOSTFS_IMG)
+	mcopy -o -i $(HOSTFS_IMG) $(NETD_ELF) ::NETD.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(INIT_ELF) ::INIT.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(SHELL_ELF) ::SHELL.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(GUI_ELF) ::GUI.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(CALC_ELF) ::CALC.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(PAD_ELF) ::PAD.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(TETRIS_ELF) ::TETRIS.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(ED_ELF) ::ED.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(HTTPD_ELF) ::HTTPD.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(TELNETD_ELF) ::TELNETD.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(TSH_ELF) ::TSH.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(EXIT0_ELF) ::EXIT0.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(TERM_ELF) ::TERM.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(LIFE_ELF) ::LIFE.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(MANDELBROT_ELF) ::MANDEL.ELF
+	mcopy -o -i $(HOSTFS_IMG) $(SNAKE_ELF) ::SNAKE.ELF
+	@if [ -f "$(HELLO_STD_ELF)" ]; then \
+		mcopy -o -i $(HOSTFS_IMG) $(HELLO_STD_ELF) ::HELLOSTD.ELF; \
+	fi
+	@echo "Host filesystem updated: $(HOSTFS_IMG)"
+
+run: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	$(QEMU_COMMON) \
 		-serial stdio \
 		-display none
 
-run-gui: build $(ESP_DIR) $(DISK_IMG)
+run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-machine q35 \
@@ -149,6 +190,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG)
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
 		-drive format=raw,file=fat:rw:esp \
 		-drive if=virtio,format=raw,file=$(DISK_IMG) \
+		-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
 		-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
 		-audiodev id=snd0,driver=sdl -device AC97,audiodev=snd0 \
 		-serial stdio
@@ -158,7 +200,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG)
 #   make screenshot                                        → docs/images/screenshot.png
 #   make screenshot SCREENSHOT_OUT=docs/images/foo.png     → docs/images/foo.png
 #   make screenshot SCREENSHOT_WAIT=10                     → 10秒待ってから撮影
-screenshot: build $(ESP_DIR) $(DISK_IMG)
+screenshot: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	@mkdir -p $(dir $(SCREENSHOT_OUT))
 	@echo "Starting QEMU for screenshot..."
@@ -181,6 +223,7 @@ clean:
 	cd user-std && cargo clean
 	rm -rf esp
 	rm -f $(DISK_IMG)
+	rm -f $(HOSTFS_IMG)
 
 # PAL ファイルの syscall 番号を検証する。
 # libs/sabos-syscall/src/lib.rs を正として、rust-std-sabos/*.rs の番号が一致するかチェック。
@@ -190,6 +233,6 @@ check-syscall:
 # 自動テストを実行する。
 # QEMU を起動して selftest コマンドを実行し、結果を検証する。
 # CI で使う場合はこのターゲットを呼ぶ。
-test: check-syscall build build-user-std $(ESP_DIR) disk-img
+test: check-syscall build build-user-std $(ESP_DIR) disk-img $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh
