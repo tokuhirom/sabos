@@ -2,6 +2,35 @@
 
 セキュリティと型安全性を重視した、夢の自作 OS への道のり。
 
+## 最優先: ネットワーク処理のユーザー空間移行
+
+カーネル内のネットワークスタック（ARP/IP/UDP/TCP/DNS）を削除し、すべて netd に一本化する。
+現状、カーネルの `poll_and_handle()` と netd が同じ virtio-net 受信キューを取り合う
+レース条件があり、アーキテクチャとして破綻している。
+
+マイクロカーネル方針: カーネルは raw フレーム送受信（SYS_NET_SEND_FRAME / SYS_NET_RECV_FRAME）だけを提供し、プロトコル処理はすべてユーザー空間で行う。
+
+### Step 1: カーネル DNS テストを netd IPC 経由に移行
+- [ ] `test_network_dns` を netd IPC 経由（`test_network_netd_dns` と同じパス）に書き換え
+- [ ] カーネルの `dns_lookup()` を selftest から除去
+
+### Step 2: カーネル内ネットワークスタックの利用箇所を洗い出し
+- [ ] `net.rs` の公開 API（`dns_lookup`, `send_udp_packet`, `poll_and_handle` 等）の呼び出し元を特定
+- [ ] カーネルシェルの `dns` / `http` / `ping` / `ping6` コマンドの代替策を検討
+  - netd IPC 経由に切り替え or カーネルシェル廃止（ユーザーシェルに統合済みのため不要かも）
+
+### Step 3: カーネル内ネットワークスタックの段階的削除
+- [ ] `dns_lookup()` を削除（Step 1 完了後）
+- [ ] `send_tcp_packet()` / TCP 関連コードを削除
+- [ ] `send_udp_packet()` / UDP 関連コードを削除（netd が自前で raw フレーム送信）
+- [ ] `poll_and_handle()` / ARP / ICMP ハンドラを削除
+- [ ] `net.rs` をカーネルから除去、または最小限の raw フレーム送受信ヘルパーのみ残す
+
+### Step 4: 受信キューの一元管理
+- [ ] virtio-net の受信パケットはすべて netd が受け取る設計に統一
+- [ ] カーネルは `SYS_NET_RECV_FRAME` で netd にフレームを渡すだけ
+- [ ] レース条件が構造的に発生しないことを確認
+
 ## 短期目標（そろそろやりたい）
 
 ### HELLOSTD.ELF の残バグ修正
@@ -19,10 +48,12 @@
   - PCM バッファへのオーディオデータ書き込みと再生開始が未実装
 
 ### ネットワーク selftest の安定化
-- [ ] net selftest で全テストが CI で安定して PASS するようにする
-  - 現状: 5/6 PASS（net_ipv6_ping のみ FAIL）
+- [x] ~~network_dns フレーキーテスト~~ → リトライ + タイマーベースタイムアウトで修正済み
+  - 根本原因: netd とカーネルの `poll_and_handle()` が受信キューを取り合うレース条件
+  - 暫定修正: DNS クエリを最大 3 回リトライ（最優先タスクで根本解決予定）
+- [ ] net selftest の net_ipv6_ping を安定化
   - IPv6 ping は QEMU の ipv6=on 設定が IPv4 と排他的に動作する問題あり
-  - HELLOSTD.ELF の net テストもフレーキー（タイミング依存）
+- [ ] HELLOSTD.ELF の net テストのフレーキーさを改善
 
 ### IPC 基盤の改善
 - [x] タイムアウト/キャンセルの改善
@@ -103,6 +134,8 @@
 - [ ] procfs をユーザー空間サービス化
 
 ### ネットワークスタックの改善
+- [ ] カーネル内ネットワークスタックの削除（最優先タスク参照）
+  - 完了後、netd がプロトコル処理の唯一の実装になる
 - [ ] IPv6 Phase 2: TCP/UDP over IPv6
   - IPC プロトコルのアドレスフィールドを 16 バイトに拡張
   - IpAddr enum（V4/V6）導入 + netstack 全体のアドレス抽象化
@@ -110,7 +143,6 @@
   - PAL の IPv6 対応
 - [ ] DHCP クライアント（IP アドレスの自動取得）
 - [ ] NTP クライアント（時刻同期）
-- [ ] ネットワークドライバの分離（マイクロカーネル化の第一歩）
 
 ### セキュリティ強化
 - [ ] ASLR (Address Space Layout Randomization)
