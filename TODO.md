@@ -46,6 +46,55 @@
   - syscall.rs / handle.rs / shell.rs の Fat32 直接呼び出しと /proc 分岐を除去
   - procfs も VFS の子として自動ルーティング
 
+### ユーザーランド開発サイクルの高速化
+
+ゴール: ユーザーランドバイナリの変更 → テスト実行 → 結果取得を、ディスクイメージの再作成なしで高速に回す。
+
+現状の問題:
+- ユーザーランドを変更するたびに `dd + mkfs.fat + 全ファイル mcopy` で disk.img を毎回ゼロから再作成
+- テスト実行は QEMU + sendkey で手動的
+- virtio-blk は 1 台しかサポートしておらず、ホストのディレクトリを直接マウントできない
+
+#### Step 1: 複数 virtio-blk デバイスのサポート（カーネル）
+- [ ] `pci::find_all_virtio_blk()` で全 virtio-blk デバイスを返すように拡張
+  - 現在の `find_virtio_blk()` は最初の 1 台のみ返す
+- [ ] `VIRTIO_BLK` をデバイスリスト（`Vec<VirtioBlk>` or 固定配列）に拡張
+  - デバイスインデックスで個別にアクセス可能にする
+- [ ] `KernelBlockDevice` にデバイスインデックスを持たせる
+  - `KernelBlockDevice(0)` = 既存の disk.img、`KernelBlockDevice(1)` = ホスト共有用
+
+#### Step 2: ホストディレクトリの VFS マウント（カーネル + QEMU）
+- [ ] QEMU 起動オプションに 2 台目の virtio-blk を追加
+  - `-drive if=virtio,format=raw,file=fat:rw:user/target/x86_64-unknown-none/debug/`
+  - ホストのビルドディレクトリを FAT として直接公開
+- [ ] `vfs::init()` で 2 台目のデバイスを `/host` にマウント
+  - VFS マウントテーブルは実装済みなので、マウント追加は容易
+  - ゲスト内から `run /host/shell` でホスト側のバイナリを直接実行可能
+- [ ] 注意: QEMU の `fat:rw:dir` は起動時にスナップショットを作るため、
+  ホスト側でファイルを変更した場合は QEMU 再起動が必要（disk.img 再作成は不要）
+
+#### Step 3: テストランナーの改善（スクリプト）
+- [ ] 特定バイナリを指定してテスト実行するスクリプト
+  - 例: `make test-bin BIN=shell` → QEMU 起動 → `/host/shell` 実行 → 結果取得
+  - ディスクイメージの再作成をスキップし、QEMU 起動を高速化
+- [ ] テスト結果の構造化出力
+  - テスト結果を JSON でシリアル出力 → ホスト側スクリプトでパース
+  - 現在の grep ベースの判定をより堅牢に
+
+#### Step 4: ISA debug exit の活用（カーネル + QEMU）
+- [ ] QEMU に `-device isa-debug-exit,iobase=0xf4,iosize=0x04` を追加
+  - ゲストが I/O ポート 0xf4 に書き込むと QEMU が指定した exit code で終了
+- [ ] カーネルにシステムコール `SYS_EXIT_QEMU` を追加（または halt 拡張）
+  - テスト成功 = exit 0、失敗 = exit 1 をホストに伝搬
+  - CI スクリプトが exit code だけで成否判定できるようになる
+
+#### 将来: virtio-9p ドライバ（QEMU 再起動不要化）
+- [ ] 9P2000.L プロトコルの実装
+  - QEMU の `-virtfs local,path=./user/target,mount_tag=hostshare,security_model=none`
+  - ゲストがホストのファイルをリアルタイムでアクセス（QEMU 再起動不要）
+  - VFS に `/host` として 9P ファイルシステムをマウント
+  - cargo build → 即座にゲストから最新バイナリを実行可能
+
 ## 中期目標（いつかやりたい）
 
 ### ファイルシステムのユーザー空間移行
