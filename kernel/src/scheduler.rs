@@ -1460,7 +1460,7 @@ global_asm!(
 /// そのグループに属するスレッドを全て終了させてからアドレス空間を破棄する。
 #[unsafe(no_mangle)]
 extern "C" fn user_task_exit_handler() {
-    let (user_process_info, task_id, is_leader) = {
+    let (user_process_info, task_id, is_leader, stdin_handle, stdout_handle) = {
         let mut sched = SCHEDULER.lock();
         let current = sched.current;
         sched.tasks[current].state = TaskState::Finished;
@@ -1469,8 +1469,13 @@ extern "C" fn user_task_exit_handler() {
         // process_leader_id が None で、user_process_info を持つ = プロセスリーダー
         let is_leader = sched.tasks[current].process_leader_id.is_none()
             && sched.tasks[current].user_process_info.is_some();
+        // リダイレクトされた stdin/stdout ハンドルを取り出す（プロセス終了時にクローズするため）
+        // パイプの write end を閉じないと、親プロセスが EOF を受け取れない
+        let stdin_handle = sched.tasks[current].stdin_handle.take();
+        let stdout_handle = sched.tasks[current].stdout_handle.take();
         // ユーザープロセス情報を取り出す（プロセス破棄のため）
-        (sched.tasks[current].user_process_info.take(), task_id, is_leader)
+        (sched.tasks[current].user_process_info.take(), task_id, is_leader,
+         stdin_handle, stdout_handle)
     };
 
     // プロセスリーダーなら、所属スレッドを全て Finished にする。
@@ -1484,6 +1489,15 @@ extern "C" fn user_task_exit_handler() {
     crate::console::release_keyboard(task_id);
     // IPC キューをクリーンアップ（未読メッセージを解放）
     crate::ipc::cleanup_task(task_id);
+
+    // リダイレクトされた stdin/stdout パイプハンドルを閉じる。
+    // stdout の write end を閉じることで、親プロセスの read が EOF を受け取れるようになる。
+    if let Some(ref h) = stdin_handle {
+        let _ = crate::handle::close(h);
+    }
+    if let Some(ref h) = stdout_handle {
+        let _ = crate::handle::close(h);
+    }
 
     // ユーザープロセスのリソースを解放
     if let Some(info) = user_process_info {

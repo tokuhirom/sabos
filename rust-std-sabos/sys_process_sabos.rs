@@ -1,11 +1,17 @@
 // sys/process/sabos.rs — SABOS プロセス管理 PAL 実装
 //
-// SYS_SPAWN(31) / SYS_WAIT(34) / SYS_KILL(36) を使って
+// SYS_SPAWN(31) / SYS_SPAWN_REDIRECTED(6) / SYS_WAIT(34) / SYS_KILL(36) を使って
 // std::process::Command を実装する。
 //
-// SABOS にはパイプ（stdin/stdout/stderr のリダイレクト）がないため、
-// ChildPipe は unsupported::Pipe(!) を使い、StdioPipes は全て None を返す。
-// 子プロセスの I/O は親と同じシリアルコンソールに接続される。
+// ## パイプ対応
+//
+// stdout/stdin の MakePipe が指定された場合:
+// 1. SYS_PIPE(5) でパイプハンドルペアを作成
+// 2. SYS_SPAWN_REDIRECTED(6) でパイプの一端を子プロセスに渡す
+// 3. 親プロセスでもう一端を使って I/O を行う
+// 4. 親で不要な端を drop することで、子プロセス終了時に EOF が発生する
+//
+// stderr リダイレクトは未対応（SABOS の SpawnRedirectArgs は stdin/stdout のみ）。
 //
 // ## 引数バッファ形式
 //
@@ -21,6 +27,7 @@ use crate::os::sabos::ffi::OsStrExt;
 use crate::path::Path;
 use crate::process::StdioPipes;
 use crate::sys::fs::File;
+use crate::sys::pipe::Pipe;
 use crate::{fmt, io};
 
 /// 引数バッファの最大サイズ（バイト）
@@ -57,6 +64,45 @@ fn syscall_spawn(path: &[u8], args_ptr: *const u8, args_len: usize) -> i64 {
         );
     }
     ret as i64
+}
+
+/// SYS_SPAWN_REDIRECTED(6): stdin/stdout リダイレクト付きでプロセスを起動する。
+///
+/// 引数:
+///   rdi — SpawnRedirectArgs 構造体のポインタ（ユーザー空間）
+///
+/// 戻り値:
+///   正の値 — タスク ID
+///   負の値 — エラー
+fn syscall_spawn_redirected(args: &SpawnRedirectArgs) -> i64 {
+    let ret: u64;
+    unsafe {
+        core::arch::asm!(
+            "int 0x80",
+            in("rax") 6u64,               // SYS_SPAWN_REDIRECTED
+            in("rdi") args as *const SpawnRedirectArgs as u64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+        );
+    }
+    ret as i64
+}
+
+/// SYS_SPAWN_REDIRECTED に渡す引数構造体。
+/// カーネル側の SpawnRedirectArgs と同じレイアウト（#[repr(C)]）。
+#[repr(C)]
+struct SpawnRedirectArgs {
+    path_ptr: u64,
+    path_len: u64,
+    args_ptr: u64,
+    args_len: u64,
+    /// stdin のリダイレクト先ハンドル ID。u64::MAX = リダイレクトなし（コンソール）
+    stdin_handle_id: u64,
+    stdin_handle_token: u64,
+    /// stdout のリダイレクト先ハンドル ID。u64::MAX = リダイレクトなし（コンソール）
+    stdout_handle_id: u64,
+    stdout_handle_token: u64,
 }
 
 /// SYS_WAIT(34): 子プロセスの終了を待つ。
@@ -146,7 +192,7 @@ pub struct Command {
     stderr: Option<Stdio>,
 }
 
-// Stdio enum — SABOS にはパイプリダイレクトがないので実質 Inherit のみ使用される
+// Stdio enum — MakePipe で stdin/stdout パイプリダイレクトをサポート
 #[derive(Debug)]
 pub enum Stdio {
     Inherit,
@@ -219,9 +265,9 @@ impl Command {
 
     /// プロセスを起動する。
     ///
-    /// SYS_SPAWN を使ってバックグラウンドでプロセスを起動し、
-    /// タスク ID を保持した Process を返す。
-    /// SABOS にはパイプがないため StdioPipes は全て None。
+    /// stdin/stdout に MakePipe が指定されている場合は SYS_PIPE でパイプを作成し、
+    /// SYS_SPAWN_REDIRECTED で子プロセスにパイプの一端を渡す。
+    /// それ以外は SYS_SPAWN で通常起動する。
     pub fn spawn(
         &mut self,
         _default: Stdio,
@@ -234,13 +280,33 @@ impl Command {
         let mut args_buf = [0u8; ARGS_BUF_SIZE];
         let args_len = build_args_buffer(&self.args, &mut args_buf);
 
-        // SYS_SPAWN を呼ぶ
         let (args_ptr, args_buf_len) = if args_len > 0 {
             (args_buf.as_ptr(), args_len)
         } else {
             (core::ptr::null(), 0)
         };
-        let ret = syscall_spawn(program_bytes, args_ptr, args_buf_len);
+
+        // パイプが必要かどうかを判定
+        let needs_stdin_pipe = matches!(self.stdin, Some(Stdio::MakePipe));
+        let needs_stdout_pipe = matches!(self.stdout, Some(Stdio::MakePipe));
+
+        if needs_stdin_pipe || needs_stdout_pipe {
+            // パイプ付きスポーン: SYS_SPAWN_REDIRECTED を使用
+            self.spawn_with_pipes(program_bytes, args_ptr, args_buf_len, needs_stdin_pipe, needs_stdout_pipe)
+        } else {
+            // 通常スポーン: SYS_SPAWN を使用
+            self.spawn_simple(program_bytes, args_ptr, args_buf_len)
+        }
+    }
+
+    /// 通常のスポーン（パイプなし）。SYS_SPAWN を使用する。
+    fn spawn_simple(
+        &self,
+        program_bytes: &[u8],
+        args_ptr: *const u8,
+        args_len: usize,
+    ) -> io::Result<(Process, StdioPipes)> {
+        let ret = syscall_spawn(program_bytes, args_ptr, args_len);
 
         if ret < 0 {
             return Err(io::Error::new(
@@ -249,13 +315,11 @@ impl Command {
             ));
         }
 
-        let task_id = ret as u64;
         let process = Process {
-            task_id,
+            task_id: ret as u64,
             status: None,
         };
 
-        // SABOS にはパイプがないので全て None
         let pipes = StdioPipes {
             stdin: None,
             stdout: None,
@@ -264,22 +328,127 @@ impl Command {
 
         Ok((process, pipes))
     }
+
+    /// パイプ付きスポーン。SYS_PIPE + SYS_SPAWN_REDIRECTED を使用する。
+    ///
+    /// ## 動作
+    ///
+    /// stdout パイプの場合:
+    /// 1. pipe() で (read_end, write_end) を作成
+    /// 2. write_end を子プロセスの stdout として渡す
+    /// 3. 親で write_end を drop（子プロセス終了時に EOF が発生するために必要）
+    /// 4. 親で read_end を StdioPipes.stdout に返す
+    ///
+    /// stdin パイプの場合:
+    /// 1. pipe() で (read_end, write_end) を作成
+    /// 2. read_end を子プロセスの stdin として渡す
+    /// 3. 親で read_end を drop
+    /// 4. 親で write_end を StdioPipes.stdin に返す
+    fn spawn_with_pipes(
+        &self,
+        program_bytes: &[u8],
+        args_ptr: *const u8,
+        args_len: usize,
+        needs_stdin_pipe: bool,
+        needs_stdout_pipe: bool,
+    ) -> io::Result<(Process, StdioPipes)> {
+        // stdin パイプの作成
+        let (stdin_child_handle_id, stdin_child_handle_token, stdin_parent_pipe) =
+            if needs_stdin_pipe {
+                let (read_end, write_end) = crate::sys::pipe::pipe()?;
+                // 子には read_end を渡し、親は write_end を保持する
+                // read_end の handle_id/token を取得してから drop せずに渡す
+                // ※ read_end は子に渡すので、ここでは handle 情報だけ取得して
+                //   drop を手動で管理する必要がある
+                let child_id = read_end.handle_id();
+                let child_token = read_end.handle_token();
+                // read_end は子プロセスに渡したので、親では close しない
+                // （カーネルが子プロセスの stdin として管理する）
+                core::mem::forget(read_end);
+                (child_id, child_token, Some(write_end))
+            } else {
+                (u64::MAX, 0u64, None)
+            };
+
+        // stdout パイプの作成
+        let (stdout_child_handle_id, stdout_child_handle_token, stdout_parent_pipe) =
+            if needs_stdout_pipe {
+                let (read_end, write_end) = crate::sys::pipe::pipe()?;
+                // 子には write_end を渡し、親は read_end を保持する
+                let child_id = write_end.handle_id();
+                let child_token = write_end.handle_token();
+                // write_end は子プロセスに渡したので、親では close しない
+                core::mem::forget(write_end);
+                (child_id, child_token, Some(read_end))
+            } else {
+                (u64::MAX, 0u64, None)
+            };
+
+        // SYS_SPAWN_REDIRECTED で子プロセスを起動
+        let spawn_args = SpawnRedirectArgs {
+            path_ptr: program_bytes.as_ptr() as u64,
+            path_len: program_bytes.len() as u64,
+            args_ptr: args_ptr as u64,
+            args_len: args_len as u64,
+            stdin_handle_id: stdin_child_handle_id,
+            stdin_handle_token: stdin_child_handle_token,
+            stdout_handle_id: stdout_child_handle_id,
+            stdout_handle_token: stdout_child_handle_token,
+        };
+
+        let ret = syscall_spawn_redirected(&spawn_args);
+
+        if ret < 0 {
+            // スポーン失敗 — 親側のパイプも閉じる（drop で自動 close）
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "SYS_SPAWN_REDIRECTED failed: program not found or execution error",
+            ));
+        }
+
+        let process = Process {
+            task_id: ret as u64,
+            status: None,
+        };
+
+        let pipes = StdioPipes {
+            stdin: stdin_parent_pipe,
+            stdout: stdout_parent_pipe,
+            stderr: None, // SABOS は stderr リダイレクト未対応
+        };
+
+        Ok((process, pipes))
+    }
 }
 
 /// output — Command を実行して終了ステータスと stdout/stderr を返す。
 ///
-/// SABOS にはパイプがないので stdout/stderr は空の Vec を返す。
-/// 実質 spawn() + wait() と同じ。
+/// stdout を MakePipe で子プロセスに接続し、子の出力をキャプチャする。
+/// stderr リダイレクトは未対応なので空の Vec を返す。
 pub fn output(cmd: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-    let (mut process, _pipes) = cmd.spawn(Stdio::Inherit, false)?;
+    // stdout をパイプに設定
+    cmd.stdout(Stdio::MakePipe);
+
+    let (mut process, pipes) = cmd.spawn(Stdio::Inherit, false)?;
+
+    // stdout パイプから子プロセスの出力を読み取る
+    let mut stdout_data = Vec::new();
+    if let Some(stdout_pipe) = pipes.stdout {
+        // 子プロセスが終了して write_end が閉じられると EOF になる
+        let _ = stdout_pipe.read_to_end(&mut stdout_data)?;
+    }
+
+    // 子プロセスの終了を待つ
     let status = process.wait()?;
-    // SABOS にはパイプがないので stdout/stderr は空
-    Ok((status, Vec::new(), Vec::new()))
+
+    // stderr は未対応なので空
+    Ok((status, stdout_data, Vec::new()))
 }
 
 impl From<ChildPipe> for Stdio {
-    fn from(pipe: ChildPipe) -> Stdio {
-        pipe.diverge()
+    fn from(_pipe: ChildPipe) -> Stdio {
+        // パイプのチェイン（child1.stdout → child2.stdin）は未対応
+        panic!("pipe chaining (child1.stdout -> child2.stdin) is not supported on SABOS");
     }
 }
 
@@ -528,15 +697,19 @@ impl<'a> fmt::Debug for CommandArgs<'a> {
 // ChildPipe / read_output
 ////////////////////////////////////////////////////////////////////////////////
 
-/// SABOS にはパイプがないので unsupported の Pipe(!) を使用する。
-pub type ChildPipe = crate::sys::pipe::Pipe;
+/// 子プロセスのパイプ端点。crate::sys::pipe::Pipe を直接使用する。
+pub type ChildPipe = Pipe;
 
-/// パイプからの読み取り — SABOS ではパイプが存在しないので到達不能。
+/// パイプからの読み取り — stdout/stderr パイプからデータを読み取る。
+///
+/// stdout パイプから read_to_end で全データを読み取り、stdout バッファに格納する。
+/// stderr は SABOS 未対応のため、err パイプは drop されるだけ。
 pub fn read_output(
-    out: ChildPipe,
-    _stdout: &mut Vec<u8>,
-    _err: ChildPipe,
+    stdout_pipe: ChildPipe,
+    stdout: &mut Vec<u8>,
+    _stderr_pipe: ChildPipe,
     _stderr: &mut Vec<u8>,
 ) -> io::Result<()> {
-    match out.diverge() {}
+    let _ = stdout_pipe.read_to_end(stdout)?;
+    Ok(())
 }

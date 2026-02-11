@@ -98,6 +98,11 @@ cp "$PATCH_DIR/sys_args_sabos.rs" "$STD_SRC/sys/args/sabos.rs"
 echo "[COPY] sys/process/sabos.rs"
 cp "$PATCH_DIR/sys_process_sabos.rs" "$STD_SRC/sys/process/sabos.rs"
 
+# ---- 3k. pipe ファイルのコピー ----
+
+echo "[COPY] sys/pipe/sabos.rs"
+cp "$PATCH_DIR/sys_pipe_sabos.rs" "$STD_SRC/sys/pipe/sabos.rs"
+
 # ---- 3j. thread ファイルのコピー ----
 
 echo "[COPY] sys/thread/sabos.rs"

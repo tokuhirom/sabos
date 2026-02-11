@@ -190,7 +190,9 @@ Phase 1-3 完了済み（バディアロケータ + スラブアロケータ）�
 - [ ] thread_local を `thread_local_key` モードに切り替え
   - 現在の `no_threads` モード (Cell ベース) では `std::thread::current()` がスレッド間で正しく動かない
 - [ ] PAL net の IPv6 対応（IPv6 Phase 2 の一部）
-- [ ] `std::process::Command` のパイプ対応
+- [x] `std::process::Command` のパイプ対応
+  - SYS_PIPE + SYS_SPAWN_REDIRECTED で stdout/stdin パイプをサポート
+  - output() で子プロセスの stdout をキャプチャ可能に
 
 ### 形式検証への挑戦
 - [ ] カーネルの重要部分を Kani/Prusti で検証

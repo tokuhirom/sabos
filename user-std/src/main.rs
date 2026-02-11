@@ -164,6 +164,23 @@ fn main() {
         Err(e) => println!("process::spawn error: {}", e),
     }
 
+    // === std::process::Command::output() パイプテスト ===
+
+    // Command::output() テスト（SYS_PIPE + SYS_SPAWN_REDIRECTED 経由）
+    // EXIT0.ELF は "exit0: ok\n" を stdout に出力して終了する。
+    // output() はパイプで子プロセスの stdout をキャプチャする。
+    match std::process::Command::new("/EXIT0.ELF").output() {
+        Ok(output) => {
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            if stdout_str.contains("exit0: ok") {
+                println!("process::output pipe OK");
+            } else {
+                println!("process::output pipe FAIL: stdout={:?}", stdout_str);
+            }
+        }
+        Err(e) => println!("process::output error: {}", e),
+    }
+
     // === std::thread テスト ===
 
     // std::thread::spawn() テスト（SYS_THREAD_CREATE + SYS_THREAD_JOIN 経由）

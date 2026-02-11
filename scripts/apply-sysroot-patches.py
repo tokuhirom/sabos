@@ -261,6 +261,18 @@ def patch_process_mod(content: str) -> str:
     return content
 
 
+def patch_pipe_mod(content: str) -> str:
+    """sys/pipe/mod.rs: _ => { の直前に sabos ブランチを追加する。"""
+    sabos_branch = (
+        '    target_os = "sabos" => {\n'
+        '        mod sabos;\n'
+        '        pub use sabos::{Pipe, pipe};\n'
+        '    }'
+    )
+    content = insert_before_line(content, "    _ => {", sabos_branch)
+    return content
+
+
 def patch_thread_mod(content: str) -> str:
     """sys/thread/mod.rs: _ => { の直前に sabos ブランチを追加する。
     Thread / available_parallelism / sleep / yield_now / DEFAULT_MIN_STACK_SIZE は
@@ -324,6 +336,7 @@ def main():
         ("sys/args/mod.rs", 'target_os = "sabos"', patch_args_mod),
         ("sys/net/connection/mod.rs", 'target_os = "sabos"', patch_net_connection_mod),
         ("sys/process/mod.rs", 'target_os = "sabos"', patch_process_mod),
+        ("sys/pipe/mod.rs", 'target_os = "sabos"', patch_pipe_mod),
         ("sys/thread/mod.rs", 'target_os = "sabos"', patch_thread_mod),
     ]
 
