@@ -1245,11 +1245,10 @@ impl Shell {
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
-            // 14. ネットワーク (DNS) のテスト
-            run_test("network_dns", this.test_network_dns());
-
-            // 15. ユーザー空間 netd の DNS テスト
-            run_test("network_netd_dns", this.test_network_netd_dns());
+            // 14. ネットワーク DNS テスト（netd IPC 経由）
+            // カーネル内の dns_lookup() は netd との受信キューレースがあるため廃止。
+            // すべての DNS 解決は netd IPC 経由で行う。
+            run_test("network_dns", this.test_network_netd_dns());
         };
 
         let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2597,27 +2596,9 @@ impl Shell {
 
     /// ネットワーク (DNS) のテスト
     /// example.com を解決してみる（QEMU SLIRP は常に応答を返すはず）
-    fn test_network_dns(&self) -> bool {
-        // virtio-net が利用可能か確認
-        {
-            let drv = crate::virtio_net::VIRTIO_NET.lock();
-            if drv.is_none() {
-                return false;
-            }
-        }
-
-        // DNS lookup を試行
-        match crate::net::dns_lookup("example.com") {
-            Ok(ip) => {
-                // 何らかの IP が返ってくれば OK（0.0.0.0 以外）
-                ip != [0, 0, 0, 0]
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// ユーザー空間 netd の DNS テスト
+    /// ネットワーク DNS テスト（netd IPC 経由）
     /// IPC 経由で netd に example.com を問い合わせる。
+    /// カーネル内の dns_lookup() は netd との受信キューレースがあるため廃止。
     fn test_network_netd_dns(&self) -> bool {
         // netd のタスク ID を探す（init が /NETD.ELF を起動している前提）
         let netd_id = match crate::scheduler::find_task_id_by_name("NETD.ELF") {
