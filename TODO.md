@@ -2,13 +2,11 @@
 
 セキュリティと型安全性を重視した、夢の自作 OS への道のり。
 
-## 最優先: ネットワーク処理のユーザー空間移行
+## 完了: ネットワーク処理のユーザー空間移行 ✓
 
-カーネル内のネットワークスタック（ARP/IP/UDP/TCP/DNS）を削除し、すべて netd に一本化する。
-現状、カーネルの `poll_and_handle()` と netd が同じ virtio-net 受信キューを取り合う
-レース条件があり、アーキテクチャとして破綻している。
-
-マイクロカーネル方針: カーネルは raw フレーム送受信（SYS_NET_SEND_FRAME / SYS_NET_RECV_FRAME）だけを提供し、プロトコル処理はすべてユーザー空間で行う。
+カーネル内のネットワークスタック（ARP/IP/UDP/TCP/DNS）を削除し、すべて netd に一本化した。
+カーネルは raw フレーム送受信（SYS_NET_SEND_FRAME / SYS_NET_RECV_FRAME）だけを提供し、
+プロトコル処理はすべてユーザー空間の netd が担当する。レース条件も構造的に解消済み。
 
 ### Step 1: カーネル DNS テストを netd IPC 経由に移行
 - [x] `test_network_dns` を netd IPC 経由（`test_network_netd_dns` と同じパス）に書き換え
@@ -26,9 +24,11 @@
 - [x] syscall-list.md を更新
 
 ### Step 4: 受信キューの一元管理
-- [ ] virtio-net の受信パケットはすべて netd が受け取る設計に統一
-- [ ] カーネルは `SYS_NET_RECV_FRAME` で netd にフレームを渡すだけ
-- [ ] レース条件が構造的に発生しないことを確認
+- [x] virtio-net の受信パケットはすべて netd が受け取る設計に統一
+  - net.rs 削除により、カーネルの `poll_and_handle()` が消滅
+  - `receive_packet()` を呼ぶのは `sys_net_recv_frame` (netd 用) のみ
+- [x] カーネルは `SYS_NET_RECV_FRAME` で netd にフレームを渡すだけ
+- [x] レース条件が構造的に発生しないことを確認
 
 ## 短期目標（そろそろやりたい）
 
