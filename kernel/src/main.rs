@@ -30,7 +30,7 @@ mod pci;
 mod qemu;
 mod shell;
 mod syscall;
-mod net;
+mod net_config;
 mod user_ptr;
 mod usermode;
 mod vfs;

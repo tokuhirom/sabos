@@ -89,11 +89,7 @@ pub const SYS_LISTENV: u64 = 39; // listenv(buf_ptr, buf_len) — 全環境変�
 // =================================================================
 // ネットワーク (40-49)
 // =================================================================
-pub const SYS_DNS_LOOKUP: u64 = 40;    // dns_lookup(domain_ptr, domain_len, ip_ptr) — DNS 解決
-pub const SYS_TCP_CONNECT: u64 = 41;   // tcp_connect(ip_ptr, port) — TCP 接続
-pub const SYS_TCP_SEND: u64 = 42;      // tcp_send(data_ptr, data_len) — TCP 送信
-pub const SYS_TCP_RECV: u64 = 43;      // tcp_recv(buf_ptr, buf_len, timeout_ms) — TCP 受信
-pub const SYS_TCP_CLOSE: u64 = 44;     // tcp_close() — TCP 切断
+// 40-44 (DNS_LOOKUP, TCP_CONNECT/SEND/RECV/CLOSE) は netd デーモンに一元化したため削除済み
 pub const SYS_NET_SEND_FRAME: u64 = 45; // net_send_frame(buf_ptr, len) — Ethernet フレーム送信
 pub const SYS_NET_RECV_FRAME: u64 = 46; // net_recv_frame(buf_ptr, len, timeout_ms) — Ethernet フレーム受信
 pub const SYS_NET_GET_MAC: u64 = 47;   // net_get_mac(buf_ptr, len) — MAC アドレス取得

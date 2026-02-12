@@ -106,10 +106,7 @@ impl Shell {
             "rm" => self.cmd_rm(args),
             "run" => self.cmd_run(args),
             "spawn" => self.cmd_spawn(args),
-            "netpoll" => self.cmd_netpoll(args),
             "ip" => self.cmd_ip(),
-            "dns" => self.cmd_dns(args),
-            "http" => self.cmd_http(args),
             "selftest" => self.cmd_selftest(args),
             "ipc_bench" => self.cmd_ipc_bench(args),
             "beep" => self.cmd_beep(args),
@@ -147,10 +144,7 @@ impl Shell {
         kprintln!("  rm <name>       - Delete a file");
         kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
         kprintln!("  spawn <path>    - Spawn ELF as background process (e.g., spawn HELLO.ELF)");
-        kprintln!("  netpoll [n]     - Poll network for n seconds (default 10)");
         kprintln!("  ip              - Show IP configuration");
-        kprintln!("  dns <domain>    - Resolve domain name to IP address");
-        kprintln!("  http <host> [path] - HTTP GET request (e.g., http example.com /index.html)");
         kprintln!("  selftest [target] - Run automated self-tests (target: all/base/core/fs/net/gui/service/list)");
         kprintln!("  ipc_bench [n]   - IPC round-trip benchmark (default: 1000 iterations)");
         kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
@@ -858,62 +852,18 @@ impl Shell {
         }
     }
 
-    /// netpoll コマンド: ネットワークパケットをポーリングして処理する。
-    ///
-    /// 引数なし: 10 秒間ポーリング
-    /// 引数あり: 指定秒数ポーリング
-    fn cmd_netpoll(&self, args: &str) {
-        let seconds = if args.trim().is_empty() {
-            10u32
-        } else {
-            match args.trim().parse::<u32>() {
-                Ok(s) => s,
-                Err(_) => {
-                    kprintln!("Usage: netpoll [seconds]");
-                    return;
-                }
-            }
-        };
-
-        {
-            let drv = crate::virtio_net::VIRTIO_NET.lock();
-            if drv.is_none() {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("virtio-net not available");
-                kprintln!("Add -netdev user,id=net0 -device virtio-net-pci,netdev=net0 to QEMU");
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        }
-
-        kprintln!("Polling network for {} seconds...", seconds);
-        kprintln!("(Try 'ping 10.0.2.15' from another terminal)");
-
-        // 指定秒数ポーリング（約 100ms 間隔）
-        let iterations = seconds * 10;
-        for _ in 0..iterations {
-            crate::net::poll_and_handle();
-            // 約 100ms 待機
-            for _ in 0..100000 {
-                core::hint::spin_loop();
-            }
-        }
-
-        kprintln!("Done polling.");
-    }
-
     /// ip コマンド: IP 設定を表示する。
     fn cmd_ip(&self) {
         kprintln!("IP Configuration:");
         kprintln!("  IP Address: {}.{}.{}.{}",
-            crate::net::MY_IP[0], crate::net::MY_IP[1],
-            crate::net::MY_IP[2], crate::net::MY_IP[3]);
+            crate::net_config::MY_IP[0], crate::net_config::MY_IP[1],
+            crate::net_config::MY_IP[2], crate::net_config::MY_IP[3]);
         kprintln!("  Gateway:    {}.{}.{}.{}",
-            crate::net::GATEWAY_IP[0], crate::net::GATEWAY_IP[1],
-            crate::net::GATEWAY_IP[2], crate::net::GATEWAY_IP[3]);
+            crate::net_config::GATEWAY_IP[0], crate::net_config::GATEWAY_IP[1],
+            crate::net_config::GATEWAY_IP[2], crate::net_config::GATEWAY_IP[3]);
         kprintln!("  DNS:        {}.{}.{}.{}",
-            crate::net::DNS_SERVER_IP[0], crate::net::DNS_SERVER_IP[1],
-            crate::net::DNS_SERVER_IP[2], crate::net::DNS_SERVER_IP[3]);
+            crate::net_config::DNS_SERVER_IP[0], crate::net_config::DNS_SERVER_IP[1],
+            crate::net_config::DNS_SERVER_IP[2], crate::net_config::DNS_SERVER_IP[3]);
 
         let drv = crate::virtio_net::VIRTIO_NET.lock();
         if let Some(ref d) = *drv {
@@ -925,149 +875,6 @@ impl Shell {
         }
     }
 
-    /// dns コマンド: ドメイン名を IP アドレスに解決する。
-    fn cmd_dns(&self, args: &str) {
-        let domain = args.trim();
-        if domain.is_empty() {
-            kprintln!("Usage: dns <domain>");
-            kprintln!("  Example: dns example.com");
-            return;
-        }
-
-        {
-            let drv = crate::virtio_net::VIRTIO_NET.lock();
-            if drv.is_none() {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("virtio-net not available");
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        }
-
-        kprintln!("Resolving '{}'...", domain);
-
-        match crate::net::dns_lookup(domain) {
-            Ok(ip) => {
-                framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
-                kprintln!("{} -> {}.{}.{}.{}", domain, ip[0], ip[1], ip[2], ip[3]);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-            }
-            Err(e) => {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("DNS lookup failed: {}", e);
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-            }
-        }
-    }
-
-    /// http コマンド: HTTP GET リクエストを送信する。
-    ///
-    /// 使い方: http <host> [path]
-    /// 例: http example.com /
-    ///     http 93.184.216.34 /index.html
-    fn cmd_http(&self, args: &str) {
-        let parts: Vec<&str> = args.trim().split_whitespace().collect();
-        if parts.is_empty() {
-            kprintln!("Usage: http <host> [path]");
-            kprintln!("  Example: http example.com /");
-            return;
-        }
-
-        let host = parts[0];
-        let path = if parts.len() > 1 { parts[1] } else { "/" };
-
-        // virtio-net が利用可能か確認
-        {
-            let drv = crate::virtio_net::VIRTIO_NET.lock();
-            if drv.is_none() {
-                framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                kprintln!("virtio-net not available");
-                framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                return;
-            }
-        }
-
-        // ホストが IP アドレスかドメイン名かを判定
-        let ip = if let Some(parsed_ip) = self.parse_ip(host) {
-            parsed_ip
-        } else {
-            // DNS で解決
-            kprintln!("Resolving {}...", host);
-            match crate::net::dns_lookup(host) {
-                Ok(ip) => {
-                    kprintln!("Resolved to {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-                    ip
-                }
-                Err(e) => {
-                    framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-                    kprintln!("DNS lookup failed: {}", e);
-                    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-                    return;
-                }
-            }
-        };
-
-        // TCP 接続
-        kprintln!("Connecting to {}.{}.{}.{}:80...", ip[0], ip[1], ip[2], ip[3]);
-        if let Err(e) = crate::net::tcp_connect(ip, 80) {
-            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-            kprintln!("TCP connect failed: {}", e);
-            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-            return;
-        }
-        kprintln!("Connected!");
-
-        // HTTP リクエストを送信
-        let request = alloc::format!(
-            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, host
-        );
-        kprintln!("Sending HTTP request...");
-        if let Err(e) = crate::net::tcp_send(request.as_bytes()) {
-            framebuffer::set_global_colors((255, 100, 100), (0, 0, 128));
-            kprintln!("TCP send failed: {}", e);
-            framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
-            let _ = crate::net::tcp_close();
-            return;
-        }
-
-        // レスポンスを受信
-        kprintln!("Receiving response...");
-        kprintln!("--- Response ---");
-        loop {
-            match crate::net::tcp_recv(5000) {
-                Ok(data) => {
-                    // UTF-8 として表示（無効な場合は置換）
-                    let text = core::str::from_utf8(&data)
-                        .unwrap_or("[binary data]");
-                    kprint!("{}", text);
-                }
-                Err(e) => {
-                    if e != "timeout" {
-                        kprintln!("\n[{}]", e);
-                    }
-                    break;
-                }
-            }
-        }
-        kprintln!("\n--- End ---");
-
-        // 接続を閉じる
-        let _ = crate::net::tcp_close();
-    }
-
-    /// IP アドレス文字列をパースする (例: "192.168.1.1")
-    fn parse_ip(&self, s: &str) -> Option<[u8; 4]> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 4 {
-            return None;
-        }
-        let mut ip = [0u8; 4];
-        for (i, part) in parts.iter().enumerate() {
-            ip[i] = part.parse().ok()?;
-        }
-        Some(ip)
-    }
 
     /// selftest コマンド: 各サブシステムの自動テストを実行する。
     /// CI で使いやすいように、各テスト結果を [PASS]/[FAIL] で出力し、

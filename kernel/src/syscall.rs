@@ -222,11 +222,6 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_SETENV => sys_setenv(arg1, arg2, arg3, arg4),
         SYS_LISTENV => sys_listenv(arg1, arg2),
         // ネットワーク
-        SYS_DNS_LOOKUP => sys_dns_lookup(arg1, arg2, arg3),
-        SYS_TCP_CONNECT => sys_tcp_connect(arg1, arg2),
-        SYS_TCP_SEND => sys_tcp_send(arg1, arg2),
-        SYS_TCP_RECV => sys_tcp_recv(arg1, arg2, arg3),
-        SYS_TCP_CLOSE => sys_tcp_close(),
         SYS_NET_SEND_FRAME => sys_net_send_frame(arg1, arg2),
         SYS_NET_RECV_FRAME => sys_net_recv_frame(arg1, arg2, arg3),
         SYS_NET_GET_MAC => sys_net_get_mac(arg1, arg2),
@@ -1845,9 +1840,9 @@ fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let buf = buf_slice.as_mut_slice();
 
     // ネットワーク情報を取得
-    let my_ip = crate::net::MY_IP;
-    let gateway = crate::net::GATEWAY_IP;
-    let dns = crate::net::DNS_SERVER_IP;
+    let my_ip = crate::net_config::MY_IP;
+    let gateway = crate::net_config::GATEWAY_IP;
+    let dns = crate::net_config::DNS_SERVER_IP;
 
     // テキスト形式で書き込む
     let mut writer = SliceWriter::new(buf);
@@ -2421,122 +2416,9 @@ fn sys_listenv(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 // =================================================================
 // ネットワーク関連システムコール
 // =================================================================
-
-/// SYS_DNS_LOOKUP: DNS 解決
-///
-/// 引数:
-///   arg1 — ドメイン名のポインタ（ユーザー空間）
-///   arg2 — ドメイン名の長さ
-///   arg3 — 結果の IP アドレスを書き込むバッファ（4 バイト）
-///
-/// 戻り値:
-///   0（成功時）
-///   負の値（エラー時）
-fn sys_dns_lookup(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    // ドメイン名を取得
-    let domain_slice = user_slice_from_args(arg1, arg2)?;
-    let domain = domain_slice.as_str().map_err(|_| SyscallError::InvalidUtf8)?;
-
-    // IP バッファを取得（4 バイト）
-    let ip_slice = UserSlice::<u8>::from_raw(arg3, 4)?;
-    let ip_buf = ip_slice.as_mut_slice();
-
-    // DNS 解決
-    let ip = crate::net::dns_lookup(domain).map_err(|_| SyscallError::Other)?;
-
-    // 結果をコピー
-    ip_buf[0] = ip[0];
-    ip_buf[1] = ip[1];
-    ip_buf[2] = ip[2];
-    ip_buf[3] = ip[3];
-
-    Ok(0)
-}
-
-/// SYS_TCP_CONNECT: TCP 接続
-///
-/// 引数:
-///   arg1 — IP アドレスのポインタ（4 バイト）
-///   arg2 — ポート番号
-///
-/// 戻り値:
-///   0（成功時）
-///   負の値（エラー時）
-fn sys_tcp_connect(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    let port = arg2 as u16;
-
-    // IP アドレスを取得
-    let ip_slice = UserSlice::<u8>::from_raw(arg1, 4)?;
-    let ip_buf = ip_slice.as_slice();
-    let ip = [ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3]];
-
-    // TCP 接続
-    crate::net::tcp_connect(ip, port).map_err(|_| SyscallError::Other)?;
-
-    Ok(0)
-}
-
-/// SYS_TCP_SEND: TCP 送信
-///
-/// 引数:
-///   arg1 — データのポインタ（ユーザー空間）
-///   arg2 — データの長さ
-///
-/// 戻り値:
-///   送信したバイト数（成功時）
-///   負の値（エラー時）
-fn sys_tcp_send(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
-    // データを取得
-    let data_slice = user_slice_from_args(arg1, arg2)?;
-    let data = data_slice.as_slice();
-
-    // TCP 送信
-    crate::net::tcp_send(data).map_err(|_| SyscallError::Other)?;
-
-    Ok(data.len() as u64)
-}
-
-/// SYS_TCP_RECV: TCP 受信
-///
-/// 引数:
-///   arg1 — バッファのポインタ（ユーザー空間）
-///   arg2 — バッファの長さ
-///   arg3 — タイムアウト（ミリ秒）
-///
-/// 戻り値:
-///   受信したバイト数（成功時）
-///   0（タイムアウト時）
-///   負の値（エラー時）
-fn sys_tcp_recv(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
-    let buf_len = usize::try_from(arg2).map_err(|_| SyscallError::InvalidArgument)?;
-    let timeout_ms = arg3;
-
-    // バッファを取得
-    let buf_slice = user_slice_from_args(arg1, arg2)?;
-    let buf = buf_slice.as_mut_slice();
-
-    // TCP 受信
-    match crate::net::tcp_recv(timeout_ms) {
-        Ok(data) => {
-            let copy_len = core::cmp::min(data.len(), buf_len);
-            buf[..copy_len].copy_from_slice(&data[..copy_len]);
-            Ok(copy_len as u64)
-        }
-        Err(e) if e == "timeout" => Ok(0),  // タイムアウトは 0 を返す
-        Err(e) if e == "connection closed" => Ok(0),  // 接続終了も 0 を返す
-        Err(_) => Err(SyscallError::Other),
-    }
-}
-
-/// SYS_TCP_CLOSE: TCP 切断
-///
-/// 戻り値:
-///   0（成功時）
-///   負の値（エラー時）
-fn sys_tcp_close() -> Result<u64, SyscallError> {
-    crate::net::tcp_close().map_err(|_| SyscallError::Other)?;
-    Ok(0)
-}
+// DNS/TCP 系 syscall（SYS_DNS_LOOKUP, SYS_TCP_CONNECT/SEND/RECV/CLOSE）は
+// netd デーモンに一元化したため削除済み。
+// 残っているのは raw フレーム送受信（SYS_NET_SEND_FRAME/RECV_FRAME/GET_MAC）のみ。
 
 /// SYS_NET_SEND_FRAME: Ethernet フレーム送信
 ///

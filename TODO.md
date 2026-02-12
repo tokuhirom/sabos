@@ -15,16 +15,15 @@
 - [x] カーネルの `dns_lookup()` を selftest から除去
 
 ### Step 2: カーネル内ネットワークスタックの利用箇所を洗い出し
-- [ ] `net.rs` の公開 API（`dns_lookup`, `send_udp_packet`, `poll_and_handle` 等）の呼び出し元を特定
-- [ ] カーネルシェルの `dns` / `http` / `ping` / `ping6` コマンドの代替策を検討
-  - netd IPC 経由に切り替え or カーネルシェル廃止（ユーザーシェルに統合済みのため不要かも）
+- [x] `net.rs` の公開 API（`dns_lookup`, `send_udp_packet`, `poll_and_handle` 等）の呼び出し元を特定
+- [x] カーネルシェルの `dns` / `http` / `netpoll` コマンドを削除（ユーザーシェルに統合済み）
 
 ### Step 3: カーネル内ネットワークスタックの段階的削除
-- [ ] `dns_lookup()` を削除（Step 1 完了後）
-- [ ] `send_tcp_packet()` / TCP 関連コードを削除
-- [ ] `send_udp_packet()` / UDP 関連コードを削除（netd が自前で raw フレーム送信）
-- [ ] `poll_and_handle()` / ARP / ICMP ハンドラを削除
-- [ ] `net.rs` をカーネルから除去、または最小限の raw フレーム送受信ヘルパーのみ残す
+- [x] `net.rs`（1616行）をカーネルから完全に除去
+- [x] DNS/TCP 系 syscall（SYS_DNS_LOOKUP, SYS_TCP_CONNECT/SEND/RECV/CLOSE）を削除
+- [x] IP 設定定数を `net_config.rs` に分離（SYS_GET_NET_INFO / ip コマンド用）
+- [x] sabos-syscall から削除した定数を除去
+- [x] syscall-list.md を更新
 
 ### Step 4: 受信キューの一元管理
 - [ ] virtio-net の受信パケットはすべて netd が受け取る設計に統一

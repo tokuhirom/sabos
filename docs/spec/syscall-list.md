@@ -139,11 +139,8 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 
 ## ネットワーク (40-49)
 
-- `40` `SYS_DNS_LOOKUP(domain_ptr, domain_len, ip_ptr) -> 0`
-- `41` `SYS_TCP_CONNECT(ip_ptr, port) -> 0`
-- `42` `SYS_TCP_SEND(data_ptr, data_len) -> n`
-- `43` `SYS_TCP_RECV(buf_ptr, buf_len, timeout_ms) -> n`
-- `44` `SYS_TCP_CLOSE() -> 0`
+40-44 (DNS_LOOKUP, TCP_CONNECT/SEND/RECV/CLOSE) は netd デーモンに一元化したため削除済み。
+
 - `45` `SYS_NET_SEND_FRAME(buf_ptr, len) -> n`
 - `46` `SYS_NET_RECV_FRAME(buf_ptr, len, timeout_ms) -> n`
 - `47` `SYS_NET_GET_MAC(buf_ptr, len) -> n`
