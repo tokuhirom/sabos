@@ -1,0 +1,11 @@
+[package]
+name = "sabos-fat32"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+sabos-blockdev = { path = "../blockdev" }
+sabos-fat-core = { path = "../fat-core" }

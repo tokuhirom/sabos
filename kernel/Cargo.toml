@@ -13,6 +13,7 @@ pic8259 = "0.11"
 pc-keyboard = "0.7"
 sabos-blockdev = { path = "../libs/blockdev" }
 sabos-fat-core = { path = "../libs/fat-core" }
+sabos-fat32 = { path = "../libs/fat32" }
 sabos-textutil = { path = "../libs/textutil" }
 sabos-syscall = { path = "../libs/sabos-syscall" }
 
