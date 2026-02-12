@@ -349,10 +349,27 @@ pub fn init() {
         vfs.mount("/host", Box::new(|| {
             Box::new(crate::fat32::Fat32::new_fs_with_index(1))
         }));
-        crate::kprintln!("VFS initialized: / -> fat32, /proc -> procfs, /host -> fat32[1]");
-    } else {
-        crate::kprintln!("VFS initialized: / -> fat32, /proc -> procfs");
     }
+
+    // virtio-9p デバイスがあれば "/9p" にマウントする。
+    // QEMU の `-virtfs` オプションでホストのディレクトリをリアルタイム共有する。
+    // FAT32 (hostfs.img) と違い、ホスト側の変更が即座にゲストに反映される。
+    let has_9p = crate::virtio_9p::is_available();
+    if has_9p {
+        vfs.mount("/9p", Box::new(|| {
+            Box::new(crate::virtio_9p::V9pFs::new())
+        }));
+    }
+
+    // 初期化結果をログ出力
+    let mut msg = alloc::string::String::from("VFS initialized: / -> fat32, /proc -> procfs");
+    if dev_count >= 2 {
+        msg.push_str(", /host -> fat32[1]");
+    }
+    if has_9p {
+        msg.push_str(", /9p -> 9p");
+    }
+    crate::kprintln!("{}", msg);
 }
 
 /// ファイルを開く

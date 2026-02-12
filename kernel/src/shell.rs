@@ -1049,6 +1049,9 @@ impl Shell {
 
             // 13.14. ハンドル経由のディレクトリ作成テスト（handle_mkdir）
             run_test("handle_mkdir", this.test_handle_mkdir());
+
+            // 13.15. virtio-9p の読み取りテスト（/9p ディレクトリの ls が成功すること）
+            run_test("9p_read", this.test_9p_read());
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2832,6 +2835,22 @@ impl Shell {
             Err(_) => return false,
         };
         text.contains("HELLO.TXT")
+    }
+
+    /// virtio-9p の読み取りテスト。
+    /// /9p ディレクトリの ls が成功し、エントリが 1 つ以上あることを確認する。
+    /// QEMU が `-virtfs` オプションでホストの user/target ディレクトリを共有している前提。
+    fn test_9p_read(&self) -> bool {
+        // virtio-9p が初期化されていなければ失敗
+        if !crate::virtio_9p::is_available() {
+            return false;
+        }
+
+        // /9p ディレクトリの一覧を取得
+        match crate::vfs::list_dir("/9p") {
+            Ok(entries) => !entries.is_empty(),
+            Err(_) => false,
+        }
     }
 
     /// beep コマンド: AC97 ドライバでビープ音を再生する。

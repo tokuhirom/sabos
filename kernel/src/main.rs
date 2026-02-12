@@ -34,6 +34,7 @@ mod net_config;
 mod user_ptr;
 mod usermode;
 mod vfs;
+mod virtio_9p;
 mod virtio_blk;
 mod virtio_net;
 
@@ -259,6 +260,24 @@ fn main() -> Status {
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found (add -device virtio-net-pci to QEMU)");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- virtio-9p ドライバの初期化 ---
+    // PCI バスから virtio-9p デバイスを探して初期化する。
+    // QEMU の `-virtfs` で追加されたデバイスを検出する。
+    // 9P プロトコルのバージョンネゴシエーションとルートアタッチまで行う。
+    kprint!("Initializing virtio-9p... ");
+    virtio_9p::init();
+    {
+        if virtio_9p::is_available() {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("OK");
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
         }
     }
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));

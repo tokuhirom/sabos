@@ -54,13 +54,11 @@
   - IPv6 ping は QEMU の ipv6=on 設定が IPv4 と排他的に動作する問題あり
 - [ ] HELLOSTD.ELF の net テストのフレーキーさを改善
 
-### selftest ハング問題の調査
-- [ ] selftest が `framebuffer_info` または `handle_open` テスト付近でハングする
-  - `framebuffer::screen_info()` が `without_interrupts` 内で `WRITER.lock()` を取得しており、
-    GUI タスクがロック保持中に呼ぶとデッドロックする可能性
-  - HELLOSTD.ELF 実行の有無にかかわらず再現する
-  - ハング位置が不安定（7テスト目 or 9テスト目で停止）でタイミング依存の可能性
-  - run-selftest.sh は 180 秒タイムアウトで QEMU を強制終了するようにしたが、根本解決が必要
+### selftest ハング問題の修正 ✓
+- [x] selftest が `framebuffer_info` または `handle_open` テスト付近でハングする問題を修正
+  - 原因: `without_interrupts` 内で `WRITER.lock()` を取得 → 他タスクがロック保持中だとデッドロック
+  - 修正: `framebuffer.rs` の全 10 関数 + `serial.rs` の `_serial_print` から `without_interrupts` を除去
+  - 割り込みハンドラは WRITER/SERIAL1 に触れないため `without_interrupts` は不要だった
 
 ### IPC 基盤の改善
 - [x] タイムアウト/キャンセルの改善
@@ -125,12 +123,14 @@
   - selftest --exit → QEMU 自動終了 → exit code 1=成功, 3=失敗
   - kill 不要のクリーンシャットダウン
 
-#### 将来: virtio-9p ドライバ（QEMU 再起動不要化）
-- [ ] 9P2000.L プロトコルの実装
-  - QEMU の `-virtfs local,path=./user/target,mount_tag=hostshare,security_model=none`
-  - ゲストがホストのファイルをリアルタイムでアクセス（QEMU 再起動不要）
-  - VFS に `/host` として 9P ファイルシステムをマウント
-  - cargo build → 即座にゲストから最新バイナリを実行可能
+#### Step 5: virtio-9p ドライバ（QEMU 再起動不要化） ✓
+- [x] 9P2000.L プロトコルの実装（読み取り専用）
+  - QEMU の `-virtfs local,path=./user/target,mount_tag=hostfs9p,security_model=none`
+  - ゲストがホストの `./user/target` をリアルタイムでアクセス（QEMU 再起動不要）
+  - VFS に `/9p` として 9P ファイルシステムをマウント
+  - cargo build → 即座にゲストから `run /9p/x86_64-unknown-none/debug/shell` で最新バイナリを実行可能
+  - 8 種の 9P 操作: version, attach, walk, lopen, read, readdir, getattr, clunk
+  - selftest に `9p_read` テストを追加
 
 ## 中期目標（いつかやりたい）
 
@@ -346,6 +346,7 @@ SABOS は意図的に fork() を提供しない:
 - [x] FAT32 ファイルシステム（読み書き + LFN + サブディレクトリ）
 - [x] VFS 基盤 + procfs（JSON 出力）
 - [x] ハンドルベース API (SYS_OPEN / READ / WRITE / CLOSE / SEEK / STAT)
+- [x] virtio-9p ドライバ（9P2000.L, 読み取り専用, ホストディレクトリ共有）
 
 ### ネットワーク
 - [x] virtio-net ドライバ

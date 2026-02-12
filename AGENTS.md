@@ -141,8 +141,9 @@ make hostfs-update
 | `/` | FAT32 | virtio-blk[0]（disk.img） |
 | `/proc` | ProcFs | なし（疑似ファイルシステム） |
 | `/host` | FAT32 | virtio-blk[1]（hostfs.img） |
+| `/9p` | 9P2000.L | virtio-9p（ホスト `./user/target` 共有） |
 
-QEMU は 2 台の virtio-blk デバイスを接続する。カーネルは PCI バスをスキャンして全 virtio-blk デバイスを検出・初期化する。
+QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続する。カーネルは PCI バスをスキャンして全 virtio デバイスを検出・初期化する。
 
 ## ドキュメント一覧
 
@@ -192,14 +193,14 @@ QEMU は 2 台の virtio-blk デバイスを接続する。カーネルは PCI �
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン等（47 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（49 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（47 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（49 項目）:
 
 ```
 sabos> selftest
@@ -209,7 +210,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 47/47 PASSED ===
+=== SELFTEST END: 49/49 PASSED ===
 ```
 
 ## CI/CD
@@ -298,7 +299,7 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果（47 項目全 PASS）:**
+**期待される selftest 結果（49 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
@@ -308,7 +309,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 47/47 PASSED ===
+=== SELFTEST END: 49/49 PASSED ===
 ```
 
 ### シェルの起動フロー

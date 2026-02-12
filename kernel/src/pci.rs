@@ -248,3 +248,21 @@ pub fn find_virtio_net() -> Option<PciDevice> {
     }
     None
 }
+
+/// virtio-9p デバイスを PCI バスから探す。
+///
+/// virtio デバイスの識別:
+///   vendor_id = 0x1AF4 (Red Hat / virtio)
+///   device_id = 0x1009 (virtio legacy 9P transport)
+///
+/// QEMU の `-virtfs` オプションで作成される virtio-9p デバイスを検出する。
+/// 見つかった最初のデバイスを返す。見つからなければ None。
+pub fn find_virtio_9p() -> Option<PciDevice> {
+    let devices = enumerate_bus();
+    for dev in devices {
+        if dev.vendor_id == 0x1AF4 && dev.device_id == 0x1009 {
+            return Some(dev);
+        }
+    }
+    None
+}
