@@ -57,6 +57,7 @@ pub const SYS_FILE_WRITE: u64 = 14;  // file_write(path_ptr, path_len, data_ptr,
 pub const SYS_DIR_CREATE: u64 = 15;  // dir_create(path_ptr, path_len) — ディレクトリ作成
 pub const SYS_DIR_REMOVE: u64 = 16;  // dir_remove(path_ptr, path_len) — ディレクトリ削除
 pub const SYS_FS_STAT: u64 = 17;     // fs_stat(buf_ptr, buf_len) — ファイルシステム統計情報
+pub const SYS_FS_REGISTER: u64 = 18; // fs_register() — ファイルシステムサービスの登録（fat32d が VFS に自身を登録する）
 
 // =================================================================
 // システム情報 (20-29)
@@ -125,8 +126,8 @@ pub const SYS_HANDLE_SEEK: u64 = 78;     // handle_seek(handle_ptr, offset, when
 // =================================================================
 // ブロックデバイス (80-89)
 // =================================================================
-pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len)
-pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len)
+pub const SYS_BLOCK_READ: u64 = 80;   // block_read(sector, buf_ptr, len, dev_index)
+pub const SYS_BLOCK_WRITE: u64 = 81;  // block_write(sector, buf_ptr, len, dev_index)
 
 // =================================================================
 // IPC (90-99)

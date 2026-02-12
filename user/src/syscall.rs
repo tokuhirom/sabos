@@ -444,18 +444,38 @@ pub fn _exit() -> ! {
 // ブロックデバイス関連
 // =================================================================
 
-/// ブロックデバイスから 1 セクタ読み取る（512 バイト固定）
+/// ブロックデバイスから 1 セクタ読み取る（512 バイト固定、デバイス 0）
 pub fn block_read(sector: u64, buf: &mut [u8]) -> SyscallResult {
-    let buf_ptr = buf.as_mut_ptr() as u64;
-    let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_BLOCK_READ, sector, buf_ptr, buf_len) as i64 }
+    block_read_dev(sector, buf, 0)
 }
 
-/// ブロックデバイスへ 1 セクタ書き込む（512 バイト固定）
+/// ブロックデバイスへ 1 セクタ書き込む（512 バイト固定、デバイス 0）
 pub fn block_write(sector: u64, buf: &[u8]) -> SyscallResult {
+    block_write_dev(sector, buf, 0)
+}
+
+/// 指定デバイスのブロックデバイスから 1 セクタ読み取る（512 バイト固定）
+///
+/// # 引数
+/// - `sector`: セクタ番号
+/// - `buf`: 読み取り先バッファ（512 バイト）
+/// - `dev_index`: デバイスインデックス（0 = disk.img, 1 = hostfs.img, ...）
+pub fn block_read_dev(sector: u64, buf: &mut [u8], dev_index: u64) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_BLOCK_READ, sector, buf_ptr, buf_len, dev_index) as i64 }
+}
+
+/// 指定デバイスのブロックデバイスへ 1 セクタ書き込む（512 バイト固定）
+///
+/// # 引数
+/// - `sector`: セクタ番号
+/// - `buf`: 書き込むデータ（512 バイト）
+/// - `dev_index`: デバイスインデックス（0 = disk.img, 1 = hostfs.img, ...）
+pub fn block_write_dev(sector: u64, buf: &[u8], dev_index: u64) -> SyscallResult {
     let buf_ptr = buf.as_ptr() as u64;
     let buf_len = buf.len() as u64;
-    unsafe { syscall3(SYS_BLOCK_WRITE, sector, buf_ptr, buf_len) as i64 }
+    unsafe { syscall4(SYS_BLOCK_WRITE, sector, buf_ptr, buf_len, dev_index) as i64 }
 }
 
 // =================================================================

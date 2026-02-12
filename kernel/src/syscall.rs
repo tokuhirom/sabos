@@ -240,8 +240,8 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_HANDLE_UNLINK => sys_handle_unlink(arg1, arg2, arg3),
         SYS_HANDLE_MKDIR => sys_handle_mkdir(arg1, arg2, arg3),
         // ブロックデバイス
-        SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3),
-        SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3),
+        SYS_BLOCK_READ => sys_block_read(arg1, arg2, arg3, arg4),
+        SYS_BLOCK_WRITE => sys_block_write(arg1, arg2, arg3, arg4),
         // IPC
         SYS_IPC_SEND => sys_ipc_send(arg1, arg2, arg3),
         SYS_IPC_RECV => sys_ipc_recv(arg1, arg2, arg3, arg4),
@@ -1255,21 +1255,23 @@ fn sys_restrict_rights(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallEr
 ///   arg1 — セクタ番号
 ///   arg2 — バッファのポインタ（ユーザー空間）
 ///   arg3 — バッファの長さ（512 バイト固定）
+///   arg4 — デバイスインデックス（0 = disk.img, 1 = hostfs.img, ...）
 ///
 /// 戻り値:
 ///   読み取ったバイト数（成功時）
 ///   負の値（エラー時）
-pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(arg3).map_err(|_| SyscallError::InvalidArgument)?;
     if len != 512 {
         return Err(SyscallError::InvalidArgument);
     }
+    let dev_index = arg4 as usize;
 
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
     let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
-    let drv = devs.get_mut(0).ok_or(SyscallError::Other)?;
+    let drv = devs.get_mut(dev_index).ok_or(SyscallError::Other)?;
     // ユーザー空間のバッファは物理アドレスではないため、
     // DMA 先に直接渡すと壊れる。カーネルバッファに読み取ってから
     // ユーザー空間にコピーする。
@@ -1285,21 +1287,23 @@ pub(crate) fn sys_block_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, Sys
 ///   arg1 — セクタ番号
 ///   arg2 — バッファのポインタ（ユーザー空間）
 ///   arg3 — バッファの長さ（512 バイト固定）
+///   arg4 — デバイスインデックス（0 = disk.img, 1 = hostfs.img, ...）
 ///
 /// 戻り値:
 ///   書き込んだバイト数（成功時）
 ///   負の値（エラー時）
-pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+pub(crate) fn sys_block_write(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
     let len = usize::try_from(arg3).map_err(|_| SyscallError::InvalidArgument)?;
     if len != 512 {
         return Err(SyscallError::InvalidArgument);
     }
+    let dev_index = arg4 as usize;
 
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_slice();
 
     let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
-    let drv = devs.get_mut(0).ok_or(SyscallError::Other)?;
+    let drv = devs.get_mut(dev_index).ok_or(SyscallError::Other)?;
     // DMA 先は物理アドレス前提なので、カーネルバッファにコピーしてから書き込む。
     let mut kernel_buf = [0u8; 512];
     kernel_buf.copy_from_slice(buf);

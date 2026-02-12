@@ -1852,7 +1852,7 @@ impl Shell {
     fn test_block_syscall(&self) -> bool {
         let mut buf = [0u8; 512];
         let ptr = buf.as_mut_ptr() as u64;
-        match crate::syscall::sys_block_read(0, ptr, buf.len() as u64) {
+        match crate::syscall::sys_block_read(0, ptr, buf.len() as u64, 0) {
             Ok(n) => n == 512 && buf[510] == 0x55 && buf[511] == 0xAA,
             Err(_) => false,
         }
