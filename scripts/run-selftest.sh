@@ -10,6 +10,7 @@ set -e
 # 色付き出力用
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
 # プロジェクトルートへ移動
@@ -541,6 +542,13 @@ sleep 0.5
 
 echo "Sending selftest command..."
 
+# selftest 送信前にシステムを安定させる。
+# HELLOSTD.ELF のネットワークテスト後、シリアル出力が落ち着くのを待つ。
+# sendkey で --exit フラグが欠落するのを防ぐため、十分な間隔を空ける。
+sleep 2
+send_key ret
+sleep 1
+
 # GUI アプリのスクリーンショット（任意）
 if [ -f "$GUI_SCREENSHOT_PATH_FILE" ]; then
     GUI_SCREENSHOT_OUT="$(cat "$GUI_SCREENSHOT_PATH_FILE")"
@@ -561,30 +569,69 @@ fi
 # --exit フラグは syscall 経由でカーネルに渡され、ISA debug exit で QEMU を自動終了する:
 #   全テスト PASS → QEMU exit 1（ゲストが 0 を書き込む → (0 << 1) | 1 = 1）
 #   テスト FAIL あり → QEMU exit 3（ゲストが 1 を書き込む → (1 << 1) | 1 = 3）
-base=$(log_line_count)
-if [ -n "${SELFTEST_TARGET:-}" ]; then
-    send_command "selftest ${SELFTEST_TARGET} --exit"
-else
-    send_command "selftest --exit"
+#
+# sendkey でキーが欠落することがあるため、最大 2 回リトライする。
+selftest_started=false
+for attempt in 1 2; do
+    base=$(log_line_count)
+    if [ -n "${SELFTEST_TARGET:-}" ]; then
+        send_command "selftest ${SELFTEST_TARGET} --exit"
+    else
+        send_command "selftest --exit"
+    fi
+
+    # テスト開始の反応を待つ（最大 15 秒）
+    for i in {1..15}; do
+        if grep_after "$base" "Running kernel selftest" || grep_after "$base" "SELFTEST START"; then
+            selftest_started=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$selftest_started" = true ]; then
+        break
+    fi
+
+    echo "selftest did not start (attempt $attempt), retrying..."
+    # 反応がない場合は改行を送ってプロンプトをリセットしてからリトライ
+    send_key ret
+    sleep 2
+done
+
+if [ "$selftest_started" != true ]; then
+    echo -e "${RED}ERROR: selftest did not start after retries${NC}"
+    cat "$LOG_FILE"
+    exit 1
 fi
 
-# テスト開始の反応を待つ（最大 10 秒）
-for i in {1..10}; do
-    if grep_after "$base" "Running kernel selftest" || grep_after "$base" "SELFTEST START"; then
+# QEMU が ISA debug exit で自動終了するのを待つ（最大 180 秒）
+# selftest --exit は完了後に I/O ポート 0xf4 に書き込み、QEMU を終了させる。
+# sendkey で --exit フラグが欠落することがあるため、タイムアウト付きで待つ。
+echo "Waiting for selftest to complete (QEMU will auto-exit)..."
+qemu_exit=0
+WAIT_TIMEOUT=180
+for i in $(seq 1 $WAIT_TIMEOUT); do
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+        # QEMU が終了した
+        break
+    fi
+    # SELFTEST END が出力されたかチェック（--exit が欠落した場合の検出）
+    if [ $((i % 10)) -eq 0 ] && grep -q "^=== SELFTEST END:" "$LOG_FILE" 2>/dev/null; then
+        echo "SELFTEST END detected but QEMU still running (--exit flag likely lost)"
+        echo "Killing QEMU and parsing results from log..."
+        kill "$QEMU_PID" 2>/dev/null || true
+        sleep 1
         break
     fi
     sleep 1
 done
-
-# 反応がない場合は改行を送って入力の取りこぼしを回避
-if ! grep_after "$base" "Running kernel selftest" && ! grep_after "$base" "SELFTEST START"; then
-    send_key ret
+# タイムアウト後も QEMU が生きていたら強制終了
+if kill -0 "$QEMU_PID" 2>/dev/null; then
+    echo "QEMU still running after ${WAIT_TIMEOUT}s timeout, killing..."
+    kill "$QEMU_PID" 2>/dev/null || true
+    sleep 1
 fi
-
-# QEMU が ISA debug exit で自動終了するのを待つ（最大 120 秒）
-# selftest --exit は完了後に I/O ポート 0xf4 に書き込み、QEMU を終了させる。
-echo "Waiting for selftest to complete (QEMU will auto-exit)..."
-qemu_exit=0
 wait "$QEMU_PID" 2>/dev/null || qemu_exit=$?
 QEMU_PID=""  # cleanup で再度 kill しないように
 
