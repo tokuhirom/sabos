@@ -11,8 +11,8 @@
 マイクロカーネル方針: カーネルは raw フレーム送受信（SYS_NET_SEND_FRAME / SYS_NET_RECV_FRAME）だけを提供し、プロトコル処理はすべてユーザー空間で行う。
 
 ### Step 1: カーネル DNS テストを netd IPC 経由に移行
-- [ ] `test_network_dns` を netd IPC 経由（`test_network_netd_dns` と同じパス）に書き換え
-- [ ] カーネルの `dns_lookup()` を selftest から除去
+- [x] `test_network_dns` を netd IPC 経由（`test_network_netd_dns` と同じパス）に書き換え
+- [x] カーネルの `dns_lookup()` を selftest から除去
 
 ### Step 2: カーネル内ネットワークスタックの利用箇所を洗い出し
 - [ ] `net.rs` の公開 API（`dns_lookup`, `send_udp_packet`, `poll_and_handle` 等）の呼び出し元を特定
@@ -54,6 +54,14 @@
 - [ ] net selftest の net_ipv6_ping を安定化
   - IPv6 ping は QEMU の ipv6=on 設定が IPv4 と排他的に動作する問題あり
 - [ ] HELLOSTD.ELF の net テストのフレーキーさを改善
+
+### selftest ハング問題の調査
+- [ ] selftest が `framebuffer_info` または `handle_open` テスト付近でハングする
+  - `framebuffer::screen_info()` が `without_interrupts` 内で `WRITER.lock()` を取得しており、
+    GUI タスクがロック保持中に呼ぶとデッドロックする可能性
+  - HELLOSTD.ELF 実行の有無にかかわらず再現する
+  - ハング位置が不安定（7テスト目 or 9テスト目で停止）でタイミング依存の可能性
+  - run-selftest.sh は 180 秒タイムアウトで QEMU を強制終了するようにしたが、根本解決が必要
 
 ### IPC 基盤の改善
 - [x] タイムアウト/キャンセルの改善
