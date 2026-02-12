@@ -36,35 +36,29 @@ pub fn init_global_writer(info: FramebufferInfo) {
 }
 
 /// グローバルライターの前景色と背景色を設定する。
-/// 割り込み無効区間で実行して、割り込みハンドラとのデッドロックを防ぐ。
+/// spin::Mutex で排他制御する。
 pub fn set_global_colors(fg: (u8, u8, u8), bg: (u8, u8, u8)) {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        if let Some(writer) = WRITER.lock().as_mut() {
-            writer.set_colors(fg, bg);
-        }
-    });
+    if let Some(writer) = WRITER.lock().as_mut() {
+        writer.set_colors(fg, bg);
+    }
 }
 
 /// グローバルフレームバッファの画面をクリアする。
 /// シェルの clear コマンドで使う。
 pub fn clear_global_screen() {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        if let Some(writer) = WRITER.lock().as_mut() {
-            writer.clear();
-            writer.flush_dirty();
-        }
-    });
+    if let Some(writer) = WRITER.lock().as_mut() {
+        writer.clear();
+        writer.flush_dirty();
+    }
 }
 
 /// グローバルフレームバッファのサイズを取得する。
 /// GUI のレイアウト計算などで使う。
 pub fn screen_size() -> Option<(usize, usize)> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        WRITER
-            .lock()
-            .as_ref()
-            .map(|writer| (writer.width, writer.height))
-    })
+    WRITER
+        .lock()
+        .as_ref()
+        .map(|writer| (writer.width, writer.height))
 }
 
 /// ユーザー空間に渡すためのフレームバッファ情報。
@@ -80,14 +74,12 @@ pub struct FramebufferInfoSmall {
 
 /// グローバルフレームバッファ情報を取得する。
 pub fn screen_info() -> Option<FramebufferInfoSmall> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        WRITER.lock().as_ref().map(|writer| FramebufferInfoSmall {
-            width: writer.width as u32,
-            height: writer.height as u32,
-            stride: writer.stride as u32,
-            pixel_format: pixel_format_to_u32(writer.pixel_format),
-            bytes_per_pixel: 4,
-        })
+    WRITER.lock().as_ref().map(|writer| FramebufferInfoSmall {
+        width: writer.width as u32,
+        height: writer.height as u32,
+        stride: writer.stride as u32,
+        pixel_format: pixel_format_to_u32(writer.pixel_format),
+        bytes_per_pixel: 4,
     })
 }
 
@@ -128,21 +120,19 @@ pub enum DrawError {
 
 /// 1 ピクセルを描画する（グローバル）。
 pub fn draw_pixel_global(x: usize, y: usize, r: u8, g: u8, b: u8) -> Result<(), DrawError> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = WRITER.lock();
-        let Some(writer) = guard.as_mut() else {
-            return Err(DrawError::NotInitialized);
-        };
+    let mut guard = WRITER.lock();
+    let Some(writer) = guard.as_mut() else {
+        return Err(DrawError::NotInitialized);
+    };
 
-        if x >= writer.width || y >= writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
+    if x >= writer.width || y >= writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
 
-        writer.put_pixel(x, y, r, g, b);
-        writer.mark_dirty(x, y, 1, 1);
-        writer.flush_dirty();
-        Ok(())
-    })
+    writer.put_pixel(x, y, r, g, b);
+    writer.mark_dirty(x, y, 1, 1);
+    writer.flush_dirty();
+    Ok(())
 }
 
 /// 矩形を塗りつぶして描画する（グローバル）。
@@ -155,46 +145,44 @@ pub fn draw_rect_global(
     g: u8,
     b: u8,
 ) -> Result<(), DrawError> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = WRITER.lock();
-        let Some(writer) = guard.as_mut() else {
-            return Err(DrawError::NotInitialized);
-        };
+    let mut guard = WRITER.lock();
+    let Some(writer) = guard.as_mut() else {
+        return Err(DrawError::NotInitialized);
+    };
 
-        if w == 0 || h == 0 {
-            return Err(DrawError::InvalidSize);
-        }
-        if x >= writer.width || y >= writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
-        let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
-        let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
-        if end_x > writer.width || end_y > writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
+    if w == 0 || h == 0 {
+        return Err(DrawError::InvalidSize);
+    }
+    if x >= writer.width || y >= writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
+    let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
+    let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
+    if end_x > writer.width || end_y > writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
 
-        // バックバッファに矩形を描画してから、その領域だけ MMIO に転送。
-        // 行テンプレートを作って行ごとに copy_within することで put_pixel ループより高速。
-        let pixel = writer.make_pixel(r, g, b);
-        let bpp = 4;
-        let row_bytes = w * bpp;
+    // バックバッファに矩形を描画してから、その領域だけ MMIO に転送。
+    // 行テンプレートを作って行ごとに copy_within することで put_pixel ループより高速。
+    let pixel = writer.make_pixel(r, g, b);
+    let bpp = 4;
+    let row_bytes = w * bpp;
 
-        // 最初の行をテンプレートとして作成
-        let first_row_offset = (y * writer.stride + x) * bpp;
-        for xx in 0..w {
-            let offset = first_row_offset + xx * bpp;
-            writer.backbuf[offset..offset + bpp].copy_from_slice(&pixel);
-        }
+    // 最初の行をテンプレートとして作成
+    let first_row_offset = (y * writer.stride + x) * bpp;
+    for xx in 0..w {
+        let offset = first_row_offset + xx * bpp;
+        writer.backbuf[offset..offset + bpp].copy_from_slice(&pixel);
+    }
 
-        // 残りの行は最初の行を copy_within でコピー（同じ色パターンなので行コピーで済む）
-        for yy in (y + 1)..end_y {
-            let dst = (yy * writer.stride + x) * bpp;
-            writer.backbuf.copy_within(first_row_offset..first_row_offset + row_bytes, dst);
-        }
-        writer.mark_dirty(x, y, w, h);
-        writer.flush_dirty();
-        Ok(())
-    })
+    // 残りの行は最初の行を copy_within でコピー（同じ色パターンなので行コピーで済む）
+    for yy in (y + 1)..end_y {
+        let dst = (yy * writer.stride + x) * bpp;
+        writer.backbuf.copy_within(first_row_offset..first_row_offset + row_bytes, dst);
+    }
+    writer.mark_dirty(x, y, w, h);
+    writer.flush_dirty();
+    Ok(())
 }
 
 /// 直線を描画する（グローバル）。
@@ -207,57 +195,55 @@ pub fn draw_line_global(
     g: u8,
     b: u8,
 ) -> Result<(), DrawError> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = WRITER.lock();
-        let Some(writer) = guard.as_mut() else {
-            return Err(DrawError::NotInitialized);
-        };
+    let mut guard = WRITER.lock();
+    let Some(writer) = guard.as_mut() else {
+        return Err(DrawError::NotInitialized);
+    };
 
-        if x0 >= writer.width || y0 >= writer.height || x1 >= writer.width || y1 >= writer.height {
-            return Err(DrawError::OutOfBounds);
+    if x0 >= writer.width || y0 >= writer.height || x1 >= writer.width || y1 >= writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
+
+    // 直線の bounding box を事前計算してダーティ領域に使う。
+    // 以前は全画面 flush していたが、dirty rect で bounding box だけ転送する。
+    let bb_x = x0.min(x1);
+    let bb_y = y0.min(y1);
+    let bb_w = x0.max(x1) - bb_x + 1;
+    let bb_h = y0.max(y1) - bb_y + 1;
+
+    // Bresenham
+    let mut x0 = x0 as i32;
+    let mut y0 = y0 as i32;
+    let x1 = x1 as i32;
+    let y1 = y1 as i32;
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 {
+            writer.put_pixel(x0 as usize, y0 as usize, r, g, b);
         }
-
-        // 直線の bounding box を事前計算してダーティ領域に使う。
-        // 以前は全画面 flush していたが、dirty rect で bounding box だけ転送する。
-        let bb_x = x0.min(x1);
-        let bb_y = y0.min(y1);
-        let bb_w = x0.max(x1) - bb_x + 1;
-        let bb_h = y0.max(y1) - bb_y + 1;
-
-        // Bresenham
-        let mut x0 = x0 as i32;
-        let mut y0 = y0 as i32;
-        let x1 = x1 as i32;
-        let y1 = y1 as i32;
-        let dx = (x1 - x0).abs();
-        let dy = -(y1 - y0).abs();
-        let sx = if x0 < x1 { 1 } else { -1 };
-        let sy = if y0 < y1 { 1 } else { -1 };
-        let mut err = dx + dy;
-
-        loop {
-            if x0 >= 0 && y0 >= 0 {
-                writer.put_pixel(x0 as usize, y0 as usize, r, g, b);
-            }
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let e2 = err * 2;
-            if e2 >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y0 += sy;
-            }
+        if x0 == x1 && y0 == y1 {
+            break;
         }
+        let e2 = err * 2;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
 
-        // bounding box だけをダーティにして転送（以前の全画面 flush より高速）
-        writer.mark_dirty(bb_x, bb_y, bb_w, bb_h);
-        writer.flush_dirty();
-        Ok(())
-    })
+    // bounding box だけをダーティにして転送（以前の全画面 flush より高速）
+    writer.mark_dirty(bb_x, bb_y, bb_w, bb_h);
+    writer.flush_dirty();
+    Ok(())
 }
 
 /// バッファの内容を矩形として描画する（グローバル）。
@@ -270,48 +256,46 @@ pub fn draw_blit_global(
     h: usize,
     buf: &[u8],
 ) -> Result<(), DrawError> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = WRITER.lock();
-        let Some(writer) = guard.as_mut() else {
-            return Err(DrawError::NotInitialized);
-        };
+    let mut guard = WRITER.lock();
+    let Some(writer) = guard.as_mut() else {
+        return Err(DrawError::NotInitialized);
+    };
 
-        if w == 0 || h == 0 {
-            return Err(DrawError::InvalidSize);
-        }
-        if x >= writer.width || y >= writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
-        let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
-        let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
-        if end_x > writer.width || end_y > writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
+    if w == 0 || h == 0 {
+        return Err(DrawError::InvalidSize);
+    }
+    if x >= writer.width || y >= writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
+    let end_x = x.checked_add(w).ok_or(DrawError::OutOfBounds)?;
+    let end_y = y.checked_add(h).ok_or(DrawError::OutOfBounds)?;
+    if end_x > writer.width || end_y > writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
 
-        let pixel_count = w.checked_mul(h).ok_or(DrawError::OutOfBounds)?;
-        let byte_len = pixel_count.checked_mul(4).ok_or(DrawError::OutOfBounds)?;
-        if buf.len() < byte_len {
-            return Err(DrawError::InvalidSize);
-        }
+    let pixel_count = w.checked_mul(h).ok_or(DrawError::OutOfBounds)?;
+    let byte_len = pixel_count.checked_mul(4).ok_or(DrawError::OutOfBounds)?;
+    if buf.len() < byte_len {
+        return Err(DrawError::InvalidSize);
+    }
 
-        // ユーザー空間のバッファはネイティブピクセルフォーマット（BGR/RGB）で
-        // 書き込み済みなので、ピクセル単位のフォーマット変換は不要。
-        // 行単位の memcpy でバックバッファにコピーする。
-        // これにより 78万回のピクセル変換 → 768回の行コピーに削減される。
-        let row_bytes = w * 4;
-        let mut src_offset = 0;
-        for yy in y..end_y {
-            let dst_offset = (yy * writer.stride + x) * 4;
-            writer.backbuf[dst_offset..dst_offset + row_bytes]
-                .copy_from_slice(&buf[src_offset..src_offset + row_bytes]);
-            src_offset += row_bytes;
-        }
+    // ユーザー空間のバッファはネイティブピクセルフォーマット（BGR/RGB）で
+    // 書き込み済みなので、ピクセル単位のフォーマット変換は不要。
+    // 行単位の memcpy でバックバッファにコピーする。
+    // これにより 78万回のピクセル変換 → 768回の行コピーに削減される。
+    let row_bytes = w * 4;
+    let mut src_offset = 0;
+    for yy in y..end_y {
+        let dst_offset = (yy * writer.stride + x) * 4;
+        writer.backbuf[dst_offset..dst_offset + row_bytes]
+            .copy_from_slice(&buf[src_offset..src_offset + row_bytes]);
+        src_offset += row_bytes;
+    }
 
-        // 変更された矩形領域をダーティとしてマークし、MMIO に転送
-        writer.mark_dirty(x, y, w, h);
-        writer.flush_dirty();
-        Ok(())
-    })
+    // 変更された矩形領域をダーティとしてマークし、MMIO に転送
+    writer.mark_dirty(x, y, w, h);
+    writer.flush_dirty();
+    Ok(())
 }
 
 /// 指定位置に文字列を描画する（グローバル）。
@@ -322,72 +306,64 @@ pub fn draw_text_global(
     bg: (u8, u8, u8),
     text: &str,
 ) -> Result<(), DrawError> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut guard = WRITER.lock();
-        let Some(writer) = guard.as_mut() else {
-            return Err(DrawError::NotInitialized);
-        };
+    let mut guard = WRITER.lock();
+    let Some(writer) = guard.as_mut() else {
+        return Err(DrawError::NotInitialized);
+    };
 
-        if x >= writer.width || y >= writer.height {
-            return Err(DrawError::OutOfBounds);
-        }
+    if x >= writer.width || y >= writer.height {
+        return Err(DrawError::OutOfBounds);
+    }
 
-        let old_fg = writer.fg_color;
-        let old_bg = writer.bg_color;
-        let old_x = writer.cursor_x;
-        let old_y = writer.cursor_y;
+    let old_fg = writer.fg_color;
+    let old_bg = writer.bg_color;
+    let old_x = writer.cursor_x;
+    let old_y = writer.cursor_y;
 
-        writer.set_colors(fg, bg);
-        writer.cursor_x = x;
-        writer.cursor_y = y;
+    writer.set_colors(fg, bg);
+    writer.cursor_x = x;
+    writer.cursor_y = y;
 
-        let _ = writer.write_str(text);
+    let _ = writer.write_str(text);
 
-        writer.set_colors(old_fg, old_bg);
-        writer.cursor_x = old_x;
-        writer.cursor_y = old_y;
+    writer.set_colors(old_fg, old_bg);
+    writer.cursor_x = old_x;
+    writer.cursor_y = old_y;
 
-        // 各 draw_char が mark_dirty しているので、まとめて flush_dirty で転送。
-        // 以前の全画面 flush() より効率的（テキスト領域の bounding box だけ転送）。
-        writer.flush_dirty();
-        Ok(())
-    })
+    // 各 draw_char が mark_dirty しているので、まとめて flush_dirty で転送。
+    // 以前の全画面 flush() より効率的（テキスト領域の bounding box だけ転送）。
+    writer.flush_dirty();
+    Ok(())
 }
 
 /// kprint!/kprintln! マクロの内部実装。
 /// フレームバッファとシリアルの両方に出力する。
-/// 割り込み無効区間でライターにアクセスして、デッドロックを防ぐ。
+/// spin::Mutex で排他制御する。
 ///
-/// デッドロックの仕組み:
-///   1. メインコードが WRITER.lock() を取得して書き込み中
-///   2. キーボード割り込みが発生
-///   3. キーボードハンドラが WRITER.lock() を取ろうとする
-///   4. ロックはメインコードが持っている → 永久待ち（デッドロック）
-///
-/// without_interrupts で割り込みを一時的に無効化すれば、
-/// ロック保持中に割り込みが入ることはなくなる。
+/// 割り込みハンドラ（キーボード、タイマー）は WRITER / SERIAL1 のロックを
+/// 取得しないため、without_interrupts は不要。
+/// without_interrupts を使うと、他タスクがロック保持中にスピン待ちになった際に
+/// タイマー割り込みが発火せずデッドロックする問題があった。
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        // フレームバッファに出力
-        if let Some(writer) = WRITER.lock().as_mut() {
-            writer.write_fmt(args).unwrap();
+    // フレームバッファに出力
+    if let Some(writer) = WRITER.lock().as_mut() {
+        writer.write_fmt(args).unwrap();
 
-            // draw_char / scroll_up が mark_dirty しているので、
-            // flush_dirty で変更領域の bounding box だけ MMIO に転送する。
-            // 以前は手動でスクロール判定して flush/flush_rect を切り替えていたが、
-            // dirty rect トラッキングにより自動的に最小限の領域が転送される。
-            writer.flush_dirty();
-        }
-        // シリアルにも出力（デュアル出力）
-        // Exit Boot Services 後のデバッグに便利。
-        // make run のターミナルにカーネルログが表示される。
-        crate::serial::SERIAL1
-            .lock()
-            .write_fmt(args)
-            .ok();
-    });
+        // draw_char / scroll_up が mark_dirty しているので、
+        // flush_dirty で変更領域の bounding box だけ MMIO に転送する。
+        // 以前は手動でスクロール判定して flush/flush_rect を切り替えていたが、
+        // dirty rect トラッキングにより自動的に最小限の領域が転送される。
+        writer.flush_dirty();
+    }
+    // シリアルにも出力（デュアル出力）
+    // Exit Boot Services 後のデバッグに便利。
+    // make run のターミナルにカーネルログが表示される。
+    crate::serial::SERIAL1
+        .lock()
+        .write_fmt(args)
+        .ok();
 }
 
 /// カーネル用 print! マクロ。グローバルフレームバッファに出力する。

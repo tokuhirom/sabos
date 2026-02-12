@@ -126,16 +126,15 @@ lazy_static! {
 }
 
 /// シリアルポートに出力する内部関数。
-/// 割り込み無効区間で実行してデッドロックを防ぐ。
+/// spin::Mutex で排他制御する。
+/// 割り込みハンドラは SERIAL1 のロックを取得しないため without_interrupts は不要。
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
     use core::fmt::Write;
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        SERIAL1
-            .lock()
-            .write_fmt(args)
-            .expect("Printing to serial failed");
-    });
+    SERIAL1
+        .lock()
+        .write_fmt(args)
+        .expect("Printing to serial failed");
 }
 
 /// シリアル用 print! マクロ。
