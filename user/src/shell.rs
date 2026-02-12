@@ -27,6 +27,9 @@
 // - dns <domain>: DNS 解決
 // - http <host> [path]: HTTP GET リクエスト
 // - halt: システム停止
+//
+// ビルトインコマンドに該当しない入力は、EXEC_PATH（/9p/..., /host/, /）から
+// 実行ファイルを探して自動的に実行する（PATH 機能）。
 
 use crate::syscall;
 use alloc::format;
@@ -189,10 +192,65 @@ fn execute_command(line: &[u8], state: &mut ShellState) {
         "halt" => cmd_halt(),
         "" => {}  // 空のコマンドは無視
         _ => {
-            syscall::write_str("Unknown command: ");
-            syscall::write_str(cmd);
-            syscall::write_str("\nType 'help' for available commands.\n");
+            // ビルトインコマンドに該当しない場合、PATH から実行ファイルを探す
+            if !try_exec_from_path(cmd, args, state) {
+                syscall::write_str("Unknown command: ");
+                syscall::write_str(cmd);
+                syscall::write_str("\nType 'help' for available commands.\n");
+            }
         }
+    }
+}
+
+/// 実行ファイル検索パス。
+/// コマンド名がビルトインに該当しない場合、これらのディレクトリから順に探す。
+/// /9p/x86_64-unknown-none/debug/ は virtio-9p 経由のホスト共有ディレクトリで、
+/// cargo build の成果物がそのまま見える。
+const EXEC_PATH: &[&str] = &[
+    "/9p/x86_64-unknown-none/debug/",
+    "/host/",
+    "/",
+];
+
+/// ビルトインコマンドに該当しなかったコマンドを、PATH から探して実行する。
+///
+/// コマンドにスラッシュが含まれていれば直接パスとして扱い、
+/// そうでなければ EXEC_PATH の各ディレクトリを順に探索する。
+/// 実行できたら true、見つからなければ false を返す。
+fn try_exec_from_path(cmd: &str, args: &str, state: &ShellState) -> bool {
+    if cmd.contains('/') {
+        // スラッシュを含む場合は直接パスとして実行を試みる
+        let abs_path = resolve_path(&state.cwd_text, cmd);
+        return try_exec_binary(&abs_path, args);
+    }
+
+    // EXEC_PATH の各ディレクトリから探す
+    for dir in EXEC_PATH {
+        let path = format!("{}{}", dir, cmd);
+        if try_exec_binary(&path, args) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 指定パスの ELF バイナリをフォアグラウンドで実行する。
+/// 実行に成功したら true、ファイルが見つからない等のエラーなら false を返す。
+fn try_exec_binary(path: &str, args: &str) -> bool {
+    let result = if args.is_empty() {
+        syscall::exec(path)
+    } else {
+        // 引数をスペースで分割して渡す
+        let arg_list: Vec<&str> = args.split_whitespace().collect();
+        syscall::exec_with_args(path, &arg_list)
+    };
+
+    if result >= 0 {
+        syscall::write_str("Program exited.\n");
+        true
+    } else {
+        false
     }
 }
 
@@ -319,6 +377,15 @@ fn cmd_help() {
     syscall::write_str("  dns <domain>      - DNS lookup\n");
     syscall::write_str("  http <host> [path] - HTTP GET request\n");
     syscall::write_str("  halt              - Halt the system\n");
+    syscall::write_str("\n");
+    syscall::write_str("Executable search paths (PATH):\n");
+    for dir in EXEC_PATH {
+        syscall::write_str("  ");
+        syscall::write_str(dir);
+        syscall::write_str("\n");
+    }
+    syscall::write_str("\nUnknown commands are searched in PATH and executed as ELF binaries.\n");
+    syscall::write_str("Example: 'tetris' runs /9p/x86_64-unknown-none/debug/tetris\n");
     syscall::write_str("\n");
 }
 
