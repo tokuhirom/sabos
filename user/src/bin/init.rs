@@ -45,12 +45,22 @@ struct Service {
 unsafe impl Sync for Service {}
 
 /// 管理するサービスの一覧
+///
+/// **起動順序が重要**:
+/// fat32d は最後に起動する。これにより他サービスの ELF ロードが
+/// カーネル内 FAT32 経由（高速）で行われる。fat32d を最初に起動すると
+/// VFS が IPC プロキシに切り替わり、以後の ELF ロードが fat32d IPC 経由
+/// （毎回ディスク読み出し + コンテキストスイッチ）になって遅い。
+///
+/// fat32d 登録後は、ランタイムのファイル操作（ls, cat 等）が fat32d 経由になる。
+///
 /// - netd: ネットワークサービス（再起動有効）
 /// - gui: GUI サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
 /// - httpd: HTTP サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
-static SERVICES: [Service; 5] = [
+/// - fat32d: FAT32 ファイルシステムサービス（最後に起動）
+static SERVICES: [Service; 6] = [
     Service {
         name: "netd",
         path: "/NETD.ELF",
@@ -81,6 +91,12 @@ static SERVICES: [Service; 5] = [
         restart: false,
         task_id: AtomicU64::new(0),
     },
+    Service {
+        name: "fat32d",
+        path: "/FAT32D.ELF",
+        restart: true,
+        task_id: AtomicU64::new(0),
+    },
 ];
 
 #[unsafe(no_mangle)]
@@ -109,14 +125,6 @@ fn start_services() {
         syscall::write_str(service.name);
         syscall::write_str("...\n");
 
-        if service.name == "gui" {
-            syscall::write_str("[init] gui path ptr=");
-            write_number(service.path.as_ptr() as u64);
-            syscall::write_str(" len=");
-            write_number(service.path.len() as u64);
-            syscall::write_str("\n");
-        }
-
         let result = syscall::spawn(service.path);
         if result < 0 {
             syscall::write_str("[init] ERROR: Failed to start ");
@@ -131,6 +139,16 @@ fn start_services() {
             syscall::write_str(" (PID ");
             write_number(task_id);
             syscall::write_str(")\n");
+        }
+
+        // fat32d 起動後は初期化完了を待つ。
+        // fat32d が SYS_FS_REGISTER を呼んで VFS を IPC プロキシに切り替えるまで
+        // 200ms 待機する。fat32d は最後に起動されるので、他サービスの ELF は
+        // カーネル内 FAT32 で高速にロード済み。以後のランタイムファイル操作
+        // （ls, cat 等）が fat32d 経由になる。
+        if service.name == "fat32d" {
+            syscall::write_str("[init] Waiting for fat32d to register...\n");
+            syscall::sleep(200);
         }
     }
 }

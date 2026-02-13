@@ -11,6 +11,7 @@ NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
+FAT32D_ELF = user/target/x86_64-unknown-none/debug/fat32d
 NETD_ELF = user/target/x86_64-unknown-none/debug/netd
 INIT_ELF = user/target/x86_64-unknown-none/debug/init
 SHELL_ELF = user/target/x86_64-unknown-none/debug/shell
@@ -55,6 +56,7 @@ HOSTFS_IMG = hostfs.img
 QEMU_COMMON = qemu-system-x86_64 \
 	-nodefaults \
 	-machine q35 \
+	-m 256 \
 	-cpu max \
 	-vga std \
 	-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
@@ -121,6 +123,7 @@ disk-img: build-user
 	mkfs.fat -F 32 $(DISK_IMG)
 	echo "Hello from FAT32!" > /tmp/hello.txt
 	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
+	mcopy -i $(DISK_IMG) $(FAT32D_ELF) ::FAT32D.ELF
 	mcopy -i $(DISK_IMG) $(NETD_ELF) ::NETD.ELF
 	mcopy -i $(DISK_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -i $(DISK_IMG) $(SHELL_ELF) ::SHELL.ELF
@@ -156,6 +159,7 @@ $(HOSTFS_IMG):
 # disk.img の再作成（dd + mkfs.fat）は不要。
 # 使い方: make hostfs-update → QEMU 再起動 → /host/SHELL.ELF 等でアクセス
 hostfs-update: build-user | $(HOSTFS_IMG)
+	mcopy -o -i $(HOSTFS_IMG) $(FAT32D_ELF) ::FAT32D.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(NETD_ELF) ::NETD.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(SHELL_ELF) ::SHELL.ELF
@@ -187,6 +191,7 @@ run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-machine q35 \
+		-m 256 \
 		-cpu max \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \

@@ -742,6 +742,7 @@ pub fn kernel_cr3() -> PhysAddr {
 ///
 /// 返り値はプロセス固有の L4 ページテーブルが配置された物理フレーム。
 /// CR3 にこのフレームのアドレスを書き込むとアドレス空間が切り替わる。
+
 pub fn create_process_page_table() -> PhysFrame<Size4KiB> {
     // 1. フレームアロケータから 1 フレーム確保 → 新 L4 テーブル
     let new_l4_frame = {
@@ -1914,3 +1915,76 @@ pub fn unmap_pages_in_process(
     freed_frames
 }
 
+/// デバッグ用: 現在の CR3 のページテーブルで、指定仮想アドレスの
+/// L4→L3→L2→L1 各エントリのフラグをダンプする。
+/// ページフォルトのデバッグに使う。
+pub fn debug_dump_page_entry(vaddr: u64) {
+    use x86_64::registers::control::Cr3;
+
+    let (cr3_frame, _) = Cr3::read();
+    let l4_phys = cr3_frame.start_address().as_u64();
+
+    let l4_idx = ((vaddr >> 39) & 0x1FF) as usize;
+    let l3_idx = ((vaddr >> 30) & 0x1FF) as usize;
+    let l2_idx = ((vaddr >> 21) & 0x1FF) as usize;
+    let l1_idx = ((vaddr >> 12) & 0x1FF) as usize;
+
+    crate::kprintln!("  Page table walk for {:#x}:", vaddr);
+    crate::kprintln!("    CR3={:#x} L4[{}] L3[{}] L2[{}] L1[{}]", l4_phys, l4_idx, l3_idx, l2_idx, l1_idx);
+
+    // カーネルのページテーブルに切り替えて読む。
+    // プロセスのページテーブルでは ELF マッピングがアイデンティティマッピングを
+    // 上書きしている可能性があり、ページテーブルフレームの物理アドレスを
+    // 正しく読めないことがある。
+    let kernel_cr3_val = kernel_cr3().as_u64();
+    unsafe {
+        core::arch::asm!("mov cr3, {}", in(reg) kernel_cr3_val, options(nostack));
+    }
+
+    let l4: &PageTable = unsafe { &*(l4_phys as *const PageTable) };
+    let l4e = &l4[l4_idx];
+    crate::kprintln!("    L4[{}]: addr={:#x} flags={:?}", l4_idx, l4e.addr().as_u64(), l4e.flags());
+    if l4e.is_unused() {
+        crate::kprintln!("    L4 entry is UNUSED — page not mapped");
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+        return;
+    }
+
+    let l3: &PageTable = unsafe { &*(l4e.addr().as_u64() as *const PageTable) };
+    let l3e = &l3[l3_idx];
+    crate::kprintln!("    L3[{}]: addr={:#x} flags={:?}", l3_idx, l3e.addr().as_u64(), l3e.flags());
+    if l3e.is_unused() {
+        crate::kprintln!("    L3 entry is UNUSED — page not mapped");
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+        return;
+    }
+    if l3e.flags().contains(PageTableFlags::HUGE_PAGE) {
+        crate::kprintln!("    L3 is 1GiB HUGE PAGE — no L2/L1");
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+        return;
+    }
+
+    let l2: &PageTable = unsafe { &*(l3e.addr().as_u64() as *const PageTable) };
+    let l2e = &l2[l2_idx];
+    crate::kprintln!("    L2[{}]: addr={:#x} flags={:?}", l2_idx, l2e.addr().as_u64(), l2e.flags());
+    if l2e.is_unused() {
+        crate::kprintln!("    L2 entry is UNUSED — page not mapped");
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+        return;
+    }
+    if l2e.flags().contains(PageTableFlags::HUGE_PAGE) {
+        crate::kprintln!("    L2 is 2MiB HUGE PAGE — no L1");
+        unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+        return;
+    }
+
+    let l1: &PageTable = unsafe { &*(l2e.addr().as_u64() as *const PageTable) };
+    let l1e = &l1[l1_idx];
+    crate::kprintln!("    L1[{}]: addr={:#x} flags={:?}", l1_idx, l1e.addr().as_u64(), l1e.flags());
+    if l1e.is_unused() {
+        crate::kprintln!("    L1 entry is UNUSED — page not mapped");
+    }
+
+    // プロセスのページテーブルに戻す
+    unsafe { core::arch::asm!("mov cr3, {}", in(reg) l4_phys, options(nostack)); }
+}

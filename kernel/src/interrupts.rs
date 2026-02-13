@@ -238,13 +238,18 @@ extern "x86-interrupt" fn page_fault_handler(
     if error_code.contains(PageFaultErrorCode::USER_MODE) {
         crate::kprintln!();
         crate::kprintln!("Page fault in user mode!");
-        crate::kprintln!("  Accessed address: {:?}", Cr2::read());
+        let fault_addr = Cr2::read().expect("Cr2::read failed");
+        crate::kprintln!("  Accessed address: {:#x}", fault_addr.as_u64());
         crate::kprintln!("  Error code: {:?}", error_code);
         crate::scheduler::with_current_task(|task| {
             crate::kprintln!("  Task: {} ({})", task.id, task.name);
         });
         crate::kprintln!("  RIP: {:?}", stack_frame.instruction_pointer);
         crate::kprintln!("  RSP: {:?}", stack_frame.stack_pointer);
+
+        // デバッグ: ページテーブルエントリのダンプ（fault_addr のマッピング状態を確認）
+        crate::paging::debug_dump_page_entry(fault_addr.as_u64());
+
         crate::kprintln!("  Terminating user program...");
         // ユーザーモード例外は現在のユーザータスクを終了させて
         // 他のタスクに切り替える。割り込みハンドラ内なので

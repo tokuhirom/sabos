@@ -125,6 +125,7 @@ dependencies = [
  "pic8259",
  "sabos-blockdev",
  "sabos-fat-core",
+ "sabos-fat32",
  "sabos-syscall",
  "sabos-textutil",
  "spin",
@@ -139,6 +140,14 @@ version = "0.1.0"
 [[package]]
 name = "sabos-fat-core"
 version = "0.1.0"
+
+[[package]]
+name = "sabos-fat32"
+version = "0.1.0"
+dependencies = [
+ "sabos-blockdev",
+ "sabos-fat-core",
+]
 
 [[package]]
 name = "sabos-syscall"

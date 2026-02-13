@@ -20,7 +20,7 @@ use core::alloc::Layout;
 /// 当面はこれで十分。足りなくなったら増やすか、
 /// メモリマップベースの動的確保に移行する。
 const HEAP_SIZE_FALLBACK: usize = 4 * 1024 * 1024; // 4 MiB
-const HEAP_SIZE_DEFAULT: u64 = 16 * 1024 * 1024; // 16 MiB
+const HEAP_SIZE_DEFAULT: u64 = 32 * 1024 * 1024; // 32 MiB
 const HEAP_SIZE_MIN: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// ヒープ用の静的メモリ領域。

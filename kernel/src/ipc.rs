@@ -176,6 +176,82 @@ pub fn try_recv(task_id: u64) -> Option<IpcMessage> {
     q.pop_front()
 }
 
+/// 特定の送信元からのメッセージのみ受信する（送信元フィルタリング版）
+///
+/// キュー内を走査し、`from_sender` からのメッセージだけを取り出す。
+/// 他の送信元からのメッセージはキューに残す。
+///
+/// ## 使用場面
+/// fat32d への IPC プロキシで、netd 等の他プロセスからのレスポンスが
+/// 混入しないようにフィルタリングする。
+fn try_recv_from(task_id: u64, from_sender: u64) -> Option<IpcMessage> {
+    let mut queues = IPC_QUEUES.lock();
+    let q = queues.get_mut(&task_id)?;
+
+    // キュー内を走査して from_sender からのメッセージを探す
+    let pos = q.iter().position(|msg| msg.sender == from_sender)?;
+    q.remove(pos)
+}
+
+/// 特定の送信元からのメッセージを受信する（Sleep/Wake 方式、送信元フィルタリング版）
+///
+/// `from_sender` からのメッセージのみを受け取る。
+/// 他の送信元からのメッセージはキューに残し、無視する。
+///
+/// ## 使用場面
+/// Fat32IpcFs が fat32d にリクエストを送信し、fat32d からのレスポンスのみを
+/// 受け取りたい場合。同じタスクに対して netd 等からのレスポンスが
+/// 同時に到着しても混入しない。
+pub fn recv_from(task_id: u64, from_sender: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
+    let deadline = calc_wake_at(timeout_ms);
+
+    loop {
+        // 1. 即座にチェック（送信元フィルタリング付き）
+        if let Some(msg) = try_recv_from(task_id, from_sender) {
+            return Ok(msg);
+        }
+
+        // 2. タイムアウトチェック
+        if is_deadline_reached(deadline) {
+            return Err(SyscallError::Timeout);
+        }
+
+        // 3. IPC_WAITERS に登録
+        {
+            let mut waiters = IPC_WAITERS.lock();
+            waiters.insert(task_id);
+        }
+
+        // Sleeping に遷移（deadline で自動起床）
+        scheduler::set_current_sleeping(deadline);
+
+        // ダブルチェック
+        if let Some(msg) = try_recv_from(task_id, from_sender) {
+            scheduler::wake_task(task_id);
+            let mut waiters = IPC_WAITERS.lock();
+            waiters.remove(&task_id);
+            return Ok(msg);
+        }
+
+        // スケジューラに制御を渡す
+        scheduler::yield_now();
+
+        // 起床後の処理
+        {
+            let mut waiters = IPC_WAITERS.lock();
+            waiters.remove(&task_id);
+        }
+
+        // キャンセルチェック
+        {
+            let mut cancelled = IPC_CANCELLED.lock();
+            if cancelled.remove(&task_id) {
+                return Err(SyscallError::Cancelled);
+            }
+        }
+    }
+}
+
 /// recv 待ちをキャンセルする
 ///
 /// target_task_id が recv 待ち（Sleeping）の場合、Cancelled エラーで起床させる。

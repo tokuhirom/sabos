@@ -16,7 +16,7 @@
 
 extern crate alloc;
 
-#[path = "../allocator.rs"]
+#[path = "../allocator_fat32d.rs"]
 mod allocator;
 #[path = "../syscall_fat32d.rs"]
 mod syscall_fat32d;
@@ -49,11 +49,14 @@ const OPCODE_CREATE_DIR: u32 = 6;
 /// ディレクトリ削除
 const OPCODE_DELETE_DIR: u32 = 7;
 
-/// IPC バッファサイズ（8 KiB）
+/// IPC バッファサイズ（64 KiB）
 ///
-/// SABOS の IPC メッセージ上限に合わせる。
-/// チャンクサイズは 8192 - 16（ヘッダ分）= ~8176 バイト。
-const IPC_BUF_SIZE: usize = 8192;
+/// 大きなファイル（ELF バイナリ）の転送を高速化するため、
+/// 8 KiB から 64 KiB に拡大。チャンク数が 1/8 に減り、
+/// IPC ラウンドトリップの回数を大幅に削減する。
+/// fat32d のバッファは Vec（ヒープ）で確保するため、
+/// スタックオーバーフローの心配はない。
+const IPC_BUF_SIZE: usize = 65536;
 
 /// IPC recv タイムアウト（実質無制限 — fat32d は常にリクエストを待ち続ける）
 const IPC_RECV_TIMEOUT_MS: u64 = 0xFFFF_FFFF;
@@ -89,7 +92,9 @@ pub extern "C" fn _start() -> ! {
 /// netd と同パターン: ipc_recv でリクエストを待ち、
 /// opcode に応じて Fat32Fs の操作を実行し、結果を ipc_send で返す。
 fn fat32d_loop() -> ! {
-    let mut buf = [0u8; IPC_BUF_SIZE];
+    // バッファをヒープに確保（64 KiB × 2 はスタックに載せられない）
+    let mut buf = alloc::vec![0u8; IPC_BUF_SIZE];
+    let mut resp = alloc::vec![0u8; IPC_BUF_SIZE];
     let mut sender: u64 = 0;
 
     // デバイスインデックス 0（disk.img）の Fat32Fs を初期化
@@ -121,7 +126,6 @@ fn fat32d_loop() -> ! {
         }
         let payload = &buf[8..8 + len];
 
-        let mut resp = [0u8; IPC_BUF_SIZE];
         let mut resp_len = 0usize;
         let mut status: i32 = 0;
 

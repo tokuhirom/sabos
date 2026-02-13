@@ -206,6 +206,13 @@ impl LargeAllocator {
     fn alloc(&mut self, size: usize, align: usize) -> *mut u8 {
         // ブロックのサイズ: ヘッダ + ペイロード + アライメントパディング
         // ヘッダにサイズを記録し、ペイロード部分のポインタを返す
+        //
+        // ヘッダ（LargeFreeBlock）は usize と *mut を含むため 8 バイトアラインが必要。
+        // payload の align が 8 未満でも、ヘッダのアライメント要件を満たす必要がある。
+        // payload_start - LARGE_HEADER_SIZE (=16) がヘッダ位置なので、
+        // payload_start を少なくとも 8 バイトアラインにすれば、
+        // ヘッダ位置 (payload_start - 16) も 8 バイトアラインになる。
+        let align = align.max(core::mem::align_of::<LargeFreeBlock>());
         let total_size = LARGE_HEADER_SIZE + size;
 
         // フリーリストから first-fit で探す

@@ -40,8 +40,12 @@ const OPCODE_DELETE_FILE: u32 = 5;
 const OPCODE_CREATE_DIR: u32 = 6;
 const OPCODE_DELETE_DIR: u32 = 7;
 
-/// IPC バッファサイズ（fat32d と同じ 8 KiB）
-const IPC_BUF_SIZE: usize = 8192;
+/// IPC バッファサイズ（fat32d と同じ 64 KiB）
+///
+/// 大きなファイル（ELF バイナリ）の転送を高速化するため、
+/// 8 KiB から 64 KiB に拡大。チャンク数が 1/8 に減り、
+/// コンテキストスイッチの回数を大幅に削減する。
+const IPC_BUF_SIZE: usize = 65536;
 
 /// READ_FILE_CHUNK で要求する最大チャンクサイズ。
 /// IPC レスポンスから total_size(4) + ヘッダ(12) を引いた分。
@@ -124,8 +128,12 @@ fn ipc_request(opcode: u32, dev_index: usize, extra: &[u8]) -> Result<Vec<u8>, V
     crate::ipc::send(sender, fat32d_id, req)
         .map_err(|_| VfsError::IoError)?;
 
-    // fat32d からレスポンスを受信
-    let resp = crate::ipc::recv(sender, IPC_TIMEOUT_MS)
+    // fat32d からレスポンスを受信（送信元フィルタリング付き）
+    //
+    // recv_from を使って fat32d からのメッセージのみを受け取る。
+    // 同じタスクが netd 等とも IPC 通信している場合、
+    // 他プロセスからのレスポンスが混入するのを防ぐ。
+    let resp = crate::ipc::recv_from(sender, fat32d_id, IPC_TIMEOUT_MS)
         .map_err(|_| VfsError::IoError)?;
 
     // レスポンス形式: [opcode:4][status:4][data_len:4][data...]
@@ -280,12 +288,13 @@ impl FileSystem for Fat32IpcFs {
     /// ファイル全体を分割読み取りで取得する（Fat32IpcFs 最適化版）。
     ///
     /// READ_FILE_CHUNK オペコードで offset ベースの分割転送を行う。
-    /// IPC バッファ 8 KiB の制約があるため、大きなファイル（ELF バイナリ等）は
+    /// IPC バッファ 64 KiB の制約があるため、大きなファイル（ELF バイナリ等）は
     /// 複数回の IPC ラウンドトリップで転送する。
     fn read_file(&self, path: &str) -> Result<Vec<u8>, VfsError> {
         let path_bytes = path.as_bytes();
         let mut result = Vec::new();
         let mut offset: u32 = 0;
+        let mut expected_total: u32 = 0;
 
         loop {
             // extra: [offset:4][max_len:4][path]
@@ -305,6 +314,7 @@ impl FileSystem for Fat32IpcFs {
 
             // 初回は total_size 分のバッファを予約
             if offset == 0 {
+                expected_total = total_size;
                 result.reserve(total_size as usize);
             }
 
@@ -320,6 +330,14 @@ impl FileSystem for Fat32IpcFs {
             if offset >= total_size {
                 break;
             }
+        }
+
+        // デバッグ: 読み込み結果のサイズ検証
+        if result.len() != expected_total as usize {
+            crate::kprintln!(
+                "[fat32d-ipc] WARNING: read_file({}) size mismatch: expected={}, got={}",
+                path, expected_total, result.len()
+            );
         }
 
         Ok(result)

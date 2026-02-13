@@ -41,6 +41,14 @@ name = "sabos-fat-core"
 version = "0.1.0"
 
 [[package]]
+name = "sabos-fat32"
+version = "0.1.0"
+dependencies = [
+ "sabos-blockdev",
+ "sabos-fat-core",
+]
+
+[[package]]
 name = "sabos-syscall"
 version = "0.1.0"
 
@@ -57,6 +65,7 @@ dependencies = [
  "log",
  "sabos-blockdev",
  "sabos-fat-core",
+ "sabos-fat32",
  "sabos-syscall",
  "sabos-textutil",
 ]
