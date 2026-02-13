@@ -138,12 +138,15 @@ make hostfs-update
 
 | マウントポイント | ファイルシステム | デバイス |
 |----------------|----------------|---------|
-| `/` | FAT32 | virtio-blk[0]（disk.img） |
+| `/` | fat32d-ipc（Fat32IpcFs） | virtio-blk[0]（disk.img）via fat32d |
 | `/proc` | ProcFs | なし（疑似ファイルシステム） |
-| `/host` | FAT32 | virtio-blk[1]（hostfs.img） |
+| `/host` | fat32d-ipc（Fat32IpcFs） | virtio-blk[1]（hostfs.img）via fat32d |
 | `/9p` | 9P2000.L | virtio-9p（ホスト `./user/target` 共有） |
 
-QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続する。カーネルは PCI バスをスキャンして全 virtio デバイスを検出・初期化する。
+**ブート時**: カーネル内 FAT32 で `/` と `/host` をマウント。INIT.ELF と全サービスの ELF をカーネル内 FAT32 で高速ロード。
+**fat32d 登録後**: fat32d が SYS_FS_REGISTER を呼ぶと、`/` と `/host` が Fat32IpcFs（IPC プロキシ）に remount される。以後のランタイムファイル操作は fat32d 経由。
+
+QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続する（256MB RAM）。カーネルは PCI バスをスキャンして全 virtio デバイスを検出・初期化する。
 
 ## ドキュメント一覧
 
@@ -193,14 +196,14 @@ QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続す�
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（49 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（50 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（49 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（50 項目）:
 
 ```
 sabos> selftest
@@ -210,7 +213,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 49/49 PASSED ===
+=== SELFTEST END: 50/50 PASSED ===
 ```
 
 ## CI/CD
@@ -299,7 +302,7 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果（49 項目全 PASS）:**
+**期待される selftest 結果（50 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
@@ -309,7 +312,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 49/49 PASSED ===
+=== SELFTEST END: 50/50 PASSED ===
 ```
 
 ### シェルの起動フロー

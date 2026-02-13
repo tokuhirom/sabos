@@ -135,9 +135,14 @@
 ## 中期目標（いつかやりたい）
 
 ### ファイルシステムのユーザー空間移行
-- [ ] FAT32 ドライバをユーザー空間で動かす（サービス化）
-- [ ] VFS (Virtual File System) 層の拡充（マウントテーブルは実装済み、ユーザー空間移行が次の課題）
-- [ ] ファイルシステムがクラッシュしてもカーネルは生き残る
+- [x] FAT32 ドライバをユーザー空間で動かす（fat32d サービス化）
+  - Fat32Fs をジェネリックライブラリ `libs/fat32` に抽出
+  - UserBlockDevice（syscall 経由ブロック I/O）で fat32d がディスクアクセス
+  - Fat32IpcFs（カーネル VFS プロキシ）が IPC でファイル操作を中継
+  - SYS_FS_REGISTER で fat32d 登録→VFS remount の動的切替
+  - IPC 送信元フィルタリング（recv_from）で netd 応答の混入を防止
+- [x] VFS (Virtual File System) 層の拡充（マウントテーブルは実装済み、ユーザー空間移行が次の課題）
+- [x] ファイルシステムがクラッシュしてもカーネルは生き残る（fat32d は init が自動再起動）
 - [ ] procfs をユーザー空間サービス化
 
 ### ネットワークスタックの改善
@@ -382,7 +387,7 @@ SABOS は意図的に fork() を提供しない:
 - [x] AC97 ドライバ（デバイス検出 + ミキサー初期化）
 
 ### テスト・CI
-- [x] 自動テストフレームワーク (selftest, 49 テスト項目)
+- [x] 自動テストフレームワーク (selftest, 50 テスト項目)
 - [x] CI での自動操作（sendkey による再現テスト）
 - [x] ネットワーク selftest (selftest_net)
 - [x] HELLOSTD.ELF による std E2E テスト
