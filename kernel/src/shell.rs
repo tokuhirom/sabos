@@ -1071,10 +1071,8 @@ impl Shell {
             run_test("fat32d_service", this.test_fat32d_service());
             // 17. telnetd サービスの起動確認
             run_test("telnetd_service", this.test_telnetd_service());
-            // 17.5. httpd サービスの起動確認
-            run_test("httpd_service", this.test_httpd_service());
-            // 17.6. httpd が参照するディレクトリ一覧が取得できることを確認
-            run_test("httpd_dirlist", this.test_httpd_dirlist());
+            // 17.5. ルートディレクトリ一覧が取得できることを確認
+            run_test("vfs_dirlist", this.test_vfs_dirlist());
         };
         let run_base = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
             run_core(this, run_test);
@@ -2729,12 +2727,7 @@ impl Shell {
         crate::scheduler::find_task_id_by_name("TELNETD.ELF").is_some()
     }
 
-    /// httpd サービスが起動しているかを確認する
-    fn test_httpd_service(&self) -> bool {
-        crate::scheduler::find_task_id_by_name("HTTPD.ELF").is_some()
-    }
-
-    /// httpd のディレクトリリスティングが動作する前提条件をテストする
+    /// VFS のディレクトリリスティングが動作する前提条件をテストする
     ///
     /// waitpid のテスト
     ///
@@ -2776,10 +2769,9 @@ impl Shell {
         true
     }
 
-    /// httpd はルートディレクトリを開いてエントリ一覧を HTML で返す。
-    /// ここでは同じ list_dir_to_buffer を呼んで、
-    /// ルートの一覧に HELLO.TXT が含まれることを確認する。
-    fn test_httpd_dirlist(&self) -> bool {
+    /// ルートディレクトリのエントリ一覧を取得し、
+    /// HELLO.TXT が含まれることを確認する。
+    fn test_vfs_dirlist(&self) -> bool {
         use alloc::vec;
 
         let mut buf = vec![0u8; 2048];

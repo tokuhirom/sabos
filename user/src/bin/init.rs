@@ -56,10 +56,12 @@ unsafe impl Sync for Service {}
 ///
 /// - gui: GUI サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
-/// - httpd: HTTP サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
 /// - fat32d: FAT32 ファイルシステムサービス（最後に起動）
-static SERVICES: [Service; 5] = [
+///
+/// httpd はデフォルトでは起動しない。telnetd と TCP accept を食い合う問題があるため、
+/// 必要な場合は shell から `spawn /HTTPD.ELF` で手動起動する。
+static SERVICES: [Service; 4] = [
     Service {
         name: "gui",
         path: "/GUI.ELF",
@@ -69,12 +71,6 @@ static SERVICES: [Service; 5] = [
     Service {
         name: "telnetd",
         path: "/TELNETD.ELF",
-        restart: true,
-        task_id: AtomicU64::new(0),
-    },
-    Service {
-        name: "httpd",
-        path: "/HTTPD.ELF",
         restart: true,
         task_id: AtomicU64::new(0),
     },
