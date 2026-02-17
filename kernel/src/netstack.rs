@@ -828,18 +828,21 @@ fn calculate_udp_checksum(
 ///
 /// VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順でデッドロックを防止。
 /// timeout_ms > 0 の場合、最初のフレームが到着するまで enable_and_hlt でスリープ。
+///
+/// ## 複数プロセス対応
+///
+/// フレーム処理後に yield_now() を呼んで他タスクに CPU を譲る。
+/// これにより httpd と telnetd が同時に tcp_accept を呼んでも、
+/// 各タスクが公平に自分のポートの pending キューを確認できる。
+///
+/// enable_and_hlt() は QEMU SLIRP がネットワーク I/O を処理するために必要
+/// （CPU がビジーループしていると SLIRP のイベントループが進まない）。
 pub fn poll_and_handle_timeout(timeout_ms: u64) {
     // まず即座に受信を試みる
     if let Some(frame) = recv_frame_nonblocking() {
         handle_packet(&frame);
         // 残りのフレームを drain
-        loop {
-            if let Some(frame) = recv_frame_nonblocking() {
-                handle_packet(&frame);
-            } else {
-                break;
-            }
-        }
+        drain_frames();
         return;
     }
 
@@ -848,20 +851,13 @@ pub fn poll_and_handle_timeout(timeout_ms: u64) {
     }
 
     // タイムアウト付きの待機
-    x86_64::instructions::interrupts::enable();
     let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
 
     loop {
         if let Some(frame) = recv_frame_nonblocking() {
             handle_packet(&frame);
             // 残りのフレームを drain
-            loop {
-                if let Some(frame) = recv_frame_nonblocking() {
-                    handle_packet(&frame);
-                } else {
-                    break;
-                }
-            }
+            drain_frames();
             return;
         }
 
@@ -874,9 +870,21 @@ pub fn poll_and_handle_timeout(timeout_ms: u64) {
 
         // QEMU TCG モードでは、ゲスト CPU がビジーループしていると
         // SLIRP のネットワーク I/O が処理されない。
-        // ISR ステータスの読み取りで QEMU のイベントループをキックする。
+        // ISR ステータスの読み取りで QEMU のイベントループをキックし、
+        // enable_and_hlt() で CPU を一時停止して QEMU に処理時間を与える。
         kick_virtio_net();
         x86_64::instructions::interrupts::enable_and_hlt();
+    }
+}
+
+/// 受信キューに残っているフレームをすべて処理する
+fn drain_frames() {
+    loop {
+        if let Some(frame) = recv_frame_nonblocking() {
+            handle_packet(&frame);
+        } else {
+            break;
+        }
     }
 }
 

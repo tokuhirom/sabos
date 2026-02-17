@@ -2727,6 +2727,16 @@ impl Shell {
         crate::scheduler::find_task_id_by_name("TELNETD.ELF").is_some()
     }
 
+    /// httpd サービスが起動しているかを確認する
+    ///
+    /// httpd と telnetd が同時に listen できることを検証する。
+    /// 現在は TCP accept 競合問題のため httpd はデフォルト無効。
+    /// TODO: TCP accept 競合を解消後、selftest に復帰させる（TODO_net.md Phase 1）
+    #[allow(dead_code)]
+    fn test_httpd_service(&self) -> bool {
+        crate::scheduler::find_task_id_by_name("HTTPD.ELF").is_some()
+    }
+
     /// VFS のディレクトリリスティングが動作する前提条件をテストする
     ///
     /// waitpid のテスト

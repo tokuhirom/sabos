@@ -61,6 +61,7 @@ unsafe impl Sync for Service {}
 ///
 /// httpd はデフォルトでは起動しない。telnetd と TCP accept を食い合う問題があるため、
 /// 必要な場合は shell から `spawn /HTTPD.ELF` で手動起動する。
+/// TODO: poll_and_handle_timeout の改善で httpd を復帰させる（TODO_net.md Phase 1）
 static SERVICES: [Service; 4] = [
     Service {
         name: "gui",
