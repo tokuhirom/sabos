@@ -34,14 +34,6 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn httpd_main() -> ! {
-    // netd の初期化（見つかるまでリトライ）
-    loop {
-        if net::init_netd().is_ok() {
-            break;
-        }
-        syscall::sleep(500);
-    }
-
     loop {
         // リッスン開始
         let listener = match net::TcpListener::bind(HTTP_PORT) {

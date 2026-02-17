@@ -97,10 +97,6 @@ fn run() -> ! {
 
     print_welcome();
     log::info!("Shell started");
-    // init が netd を起動するので、ここでは netd の PID を取得するだけ
-    // 将来的には init から netd の PID を受け取る仕組みにする
-    find_netd();
-
     // カレントディレクトリはユーザー空間で管理する
     let cwd_handle = match open_root_dir() {
         Ok(h) => h,
@@ -146,11 +142,6 @@ fn print_welcome() {
     syscall::write_str("\n");
 }
 
-/// netd の PID を探す（ps コマンド相当の処理）
-/// init が先に netd を起動しているはずなので、タスク一覧から探す
-fn find_netd() {
-    let _ = net::init_netd();
-}
 
 
 /// 改行まで1行を読み取る
@@ -721,22 +712,7 @@ fn cmd_selftest_net() {
     let mut passed = 0u32;
     let mut total = 0u32;
 
-    // テスト 1: net::init_netd() — netd 初期化
-    total += 1;
-    if net::init_netd().is_ok() && net::get_netd_id() > 0 {
-        syscall::write_str("[PASS] net_init_netd\n");
-        passed += 1;
-    } else {
-        syscall::write_str("[FAIL] net_init_netd\n");
-        syscall::write_str("=== NET SELFTEST END: ");
-        write_number(passed as u64);
-        syscall::write_str("/");
-        write_number(total as u64);
-        syscall::write_str(" PASSED ===\n");
-        return; // netd がないと後続テストはすべて失敗する
-    }
-
-    // テスト 2: Ipv4Addr / SocketAddr の基本操作
+    // テスト 1: Ipv4Addr / SocketAddr の基本操作
     total += 1;
     {
         let ip = net::Ipv4Addr::new(1, 2, 3, 4);
@@ -749,7 +725,7 @@ fn cmd_selftest_net() {
         }
     }
 
-    // テスト 3: DNS 名前解決（example.com）
+    // テスト 2: DNS 名前解決（example.com）
     total += 1;
     match net::dns_lookup("example.com") {
         Ok(ip) => {
@@ -766,7 +742,7 @@ fn cmd_selftest_net() {
         }
     }
 
-    // テスト 4: TcpStream::connect + HTTP GET（example.com:80）
+    // テスト 3: TcpStream::connect + HTTP GET（example.com:80）
     total += 1;
     {
         let ok = (|| -> Result<bool, net::NetError> {
@@ -801,7 +777,7 @@ fn cmd_selftest_net() {
         }
     }
 
-    // テスト 5: UdpSocket — DNS サーバーに手動クエリ送信
+    // テスト 4: UdpSocket — DNS サーバーに手動クエリ送信
     //
     // UdpSocket::bind(0) でエフェメラルポートにバインドし、
     // DNS クエリパケットを手動構築して 10.0.2.3:53 に send_to。
@@ -860,7 +836,7 @@ fn cmd_selftest_net() {
         }
     }
 
-    // テスト 6: IPv6 ping (fec0::2 = QEMU ゲートウェイ)
+    // テスト 5: IPv6 ping (fec0::2 = QEMU ゲートウェイ)
     total += 1;
     {
         let ipv6_gw = net::Ipv6Addr::from_octets(

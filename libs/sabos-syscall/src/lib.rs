@@ -88,12 +88,16 @@ pub const SYS_SETENV: u64 = 38;  // setenv(key_ptr, key_len, val_ptr, val_len) �
 pub const SYS_LISTENV: u64 = 39; // listenv(buf_ptr, buf_len) — 全環境変数を一覧取得
 
 // =================================================================
-// ネットワーク (40-49)
+// ネットワーク (40-49) — カーネル内ネットワークスタック直接呼び出し
 // =================================================================
-// 40-44 (DNS_LOOKUP, TCP_CONNECT/SEND/RECV/CLOSE) は netd デーモンに一元化したため削除済み
-pub const SYS_NET_SEND_FRAME: u64 = 45; // net_send_frame(buf_ptr, len) — Ethernet フレーム送信
-pub const SYS_NET_RECV_FRAME: u64 = 46; // net_recv_frame(buf_ptr, len, timeout_ms) — Ethernet フレーム受信
-pub const SYS_NET_GET_MAC: u64 = 47;   // net_get_mac(buf_ptr, len) — MAC アドレス取得
+pub const SYS_NET_DNS_LOOKUP: u64 = 40;   // net_dns_lookup(domain_ptr, domain_len, result_ip_ptr) → 0/-1
+pub const SYS_NET_TCP_CONNECT: u64 = 41;  // net_tcp_connect(ip_ptr, port) → conn_id/-1
+pub const SYS_NET_TCP_SEND: u64 = 42;     // net_tcp_send(conn_id, data_ptr, data_len) → 0/-1
+pub const SYS_NET_TCP_RECV: u64 = 43;     // net_tcp_recv(conn_id, buf_ptr, buf_len, timeout_ms) → bytes/-1
+pub const SYS_NET_TCP_CLOSE: u64 = 44;    // net_tcp_close(conn_id) → 0/-1
+pub const SYS_NET_SEND_FRAME: u64 = 45;   // net_send_frame(buf_ptr, len) — Ethernet フレーム送信（当面残す）
+pub const SYS_NET_RECV_FRAME: u64 = 46;   // net_recv_frame(buf_ptr, len, timeout_ms) — Ethernet フレーム受信（当面残す）
+pub const SYS_NET_GET_MAC: u64 = 47;      // net_get_mac(buf_ptr, len) — MAC アドレス取得
 
 // =================================================================
 // システム制御 (50-59)
@@ -137,6 +141,7 @@ pub const SYS_IPC_RECV: u64 = 91;     // ipc_recv(sender_ptr, buf_ptr, buf_len, 
 pub const SYS_IPC_CANCEL: u64 = 92;   // ipc_cancel(target_task_id) — recv 待ちをキャンセル
 pub const SYS_IPC_SEND_HANDLE: u64 = 93; // ipc_send_handle(dest, buf_ptr, len, handle_ptr) — ハンドル付きメッセージ送信
 pub const SYS_IPC_RECV_HANDLE: u64 = 94; // ipc_recv_handle(sender_ptr, buf_ptr, buf_len, handle_out_ptr) — ハンドル付きメッセージ受信
+pub const SYS_IPC_RECV_FROM: u64 = 95;   // ipc_recv_from(from_sender, sender_ptr, buf_ptr, buf_len, timeout_ms) — 特定送信元のみ受信
 
 // =================================================================
 // サウンド (100-109)
@@ -166,3 +171,36 @@ pub const SYS_CLOCK_REALTIME: u64 = 130; // clock_realtime() — UNIX エポッ�
 pub const SYS_HANDLE_CREATE_FILE: u64 = 140; // handle_create_file(dir_handle_ptr, name_ptr, name_len, out_handle_ptr) — ディレクトリ内にファイルを作成
 pub const SYS_HANDLE_UNLINK: u64 = 141;      // handle_unlink(dir_handle_ptr, name_ptr, name_len) — ディレクトリ内のファイル/ディレクトリを削除
 pub const SYS_HANDLE_MKDIR: u64 = 142;       // handle_mkdir(dir_handle_ptr, name_ptr, name_len) — ディレクトリ内にサブディレクトリを作成
+
+// =================================================================
+// ネットワーク拡張 (150-159) — TCP listen/accept, UDP, IPv6 ping
+// =================================================================
+pub const SYS_NET_TCP_LISTEN: u64 = 150;     // net_tcp_listen(port) → 0/-1
+pub const SYS_NET_TCP_ACCEPT: u64 = 151;     // net_tcp_accept(timeout_ms, listen_port) → conn_id/-1
+pub const SYS_NET_UDP_BIND: u64 = 152;       // net_udp_bind(port) → socket_id|(port<<32)
+pub const SYS_NET_UDP_SEND_TO: u64 = 153;    // net_udp_send_to(args_struct_ptr) → 0/-1
+pub const SYS_NET_UDP_RECV_FROM: u64 = 154;  // net_udp_recv_from(args_struct_ptr) → bytes/-1
+pub const SYS_NET_UDP_CLOSE: u64 = 155;      // net_udp_close(socket_id) → 0/-1
+pub const SYS_NET_PING6: u64 = 156;          // net_ping6(dst_ip_ptr, timeout_ms, src_ip_ptr) → 0/-1
+
+/// UDP send_to の引数構造体（ユーザー空間でスタック上に作成してポインタで渡す）
+#[repr(C)]
+pub struct UdpSendToArgs {
+    pub socket_id: u32,
+    pub dst_ip: [u8; 4],
+    pub dst_port: u16,
+    pub _pad: u16,
+    pub data_ptr: u64,
+    pub data_len: u64,
+}
+
+/// UDP recv_from の引数構造体
+#[repr(C)]
+pub struct UdpRecvFromArgs {
+    pub socket_id: u32,
+    pub _pad: u32,
+    pub buf_ptr: u64,
+    pub buf_len: u64,
+    pub timeout_ms: u64,
+    pub src_info_ptr: u64, // [u8; 6] = [ip0, ip1, ip2, ip3, port_lo, port_hi]
+}

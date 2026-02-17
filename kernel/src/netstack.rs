@@ -1,11 +1,13 @@
-// netstack.rs — ユーザー空間ネットワークスタック
+// netstack.rs — カーネル内ネットワークスタック
 //
-// Ethernet / ARP / IPv4 / ICMP の最小実装。
-// ping (ICMP Echo Request) に応答できることを目標とする。
+// Ethernet / ARP / IPv4 / IPv6 / ICMP / ICMPv6 / TCP / UDP / DNS の実装。
+// もともとユーザー空間の netd デーモンで動作していたが、
+// システムコール直接呼び出しに移行するためカーネルに移植した。
 //
 // ## プロトコル階層
 //
 // [Ethernet] → [ARP] or [IPv4] → [ICMP] / [UDP] / [TCP]
+//                      [IPv6] → [ICMPv6] (NDP, Echo)
 //
 // ## QEMU ユーザーモードネットワーク
 //
@@ -14,14 +16,18 @@
 //   - ゲートウェイ/ホスト: 10.0.2.2
 //   - DNS: 10.0.2.3
 //
-// ホストからゲストへの直接 ping は SLIRP の制限でできないが、
-// ゲスト内で ARP/ICMP が動作していることを確認できる。
+// ## Mutex デッドロック対策
+//
+// NET_STATE と VIRTIO_NET は異なる Mutex。
+// poll_and_handle_timeout(): VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順。
+// handle_packet() 内の send_arp_reply() 等: NET_STATE から MAC 取得→ロック解放→VIRTIO_NET でフレーム送信。
+// MAC アドレスは初期化時に MY_MAC に保持し、NET_STATE のロック不要。
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
+use spin::Mutex;
 
-use crate::syscall_netd as syscall;
+use crate::serial_println;
 
 /// ゲストの IP アドレス (QEMU user mode デフォルト)
 pub const MY_IP: [u8; 4] = [10, 0, 2, 15];
@@ -29,7 +35,6 @@ pub const MY_IP: [u8; 4] = [10, 0, 2, 15];
 /// ループバック IP アドレス (127.0.0.1)
 pub const LOOPBACK_IP: [u8; 4] = [127, 0, 0, 1];
 
-/// DNS サーバーの IP アドレス
 /// DNS サーバーの IP アドレス (QEMU user mode デフォルト)
 pub const DNS_SERVER_IP: [u8; 4] = [10, 0, 2, 3];
 
@@ -39,10 +44,27 @@ pub const BROADCAST_MAC: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 /// ゲストの IPv6 アドレス (QEMU SLIRP デフォルト: fec0::15)
 pub const MY_IPV6: [u8; 16] = [0xfe, 0xc0, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x15];
 
+/// 自分の MAC アドレス（初期化時に設定、以降変更なし）
+/// NET_STATE のロックなしでアクセスできるよう別のグローバル変数に保持する。
+static MY_MAC: Mutex<[u8; 6]> = Mutex::new([0u8; 6]);
 
+/// ネットワークスタックのログマクロ
+///
+/// 重要なイベント（接続確立、accept、エラー等）をシリアルに出力する。
 macro_rules! net_debug {
     ($($arg:tt)*) => {{
-        let _ = ($($arg)*);
+        serial_println!("[net] {}", format_args!($($arg)*));
+    }};
+}
+
+/// パケット単位の詳細トレースログ（デフォルト無効）
+///
+/// 有効にするにはコメントを外す。大量のシリアル出力が発生するため
+/// 通常はデバッグ時のみ使用する。
+#[allow(unused_macros)]
+macro_rules! net_trace {
+    ($($arg:tt)*) => {{
+        // serial_println!("[net-trace] {}", format_args!($($arg)*));
     }};
 }
 
@@ -69,8 +91,10 @@ struct NetState {
     tcp_connections: Vec<TcpConnection>,
     tcp_next_id: u32,
     tcp_next_port: u16,
-    tcp_listen_port: Option<u16>,
-    tcp_pending_accept: VecDeque<u32>,
+    /// リスン中のポート一覧（複数サービスが同時に listen 可能）
+    tcp_listen_ports: Vec<u16>,
+    /// accept 待ちの接続キュー: (conn_id, local_port)
+    tcp_pending_accept: VecDeque<(u32, u16)>,
     udp_response: Option<(u16, Vec<u8>)>,
     /// UDP ソケット一覧
     udp_sockets: Vec<UdpSocketEntry>,
@@ -80,44 +104,79 @@ struct NetState {
     icmpv6_echo_reply: Option<(u16, u16, [u8; 16])>,
 }
 
-struct NetStateCell(UnsafeCell<Option<NetState>>);
+/// グローバルなネットワーク状態（spin::Mutex で保護）
+static NET_STATE: Mutex<Option<NetState>> = Mutex::new(None);
 
-// Safety: netd は単一タスクで動き、並行アクセスしない前提。
-unsafe impl Sync for NetStateCell {}
-
-static NET_STATE: NetStateCell = NetStateCell(UnsafeCell::new(None));
-
-fn net_state_mut() -> &'static mut NetState {
-    // Safety: netd は単一タスクで動き、並行アクセスしない前提。
-    unsafe {
-        let slot = &mut *NET_STATE.0.get();
-        if slot.is_none() {
-            *slot = Some(NetState {
-                mac: [0; 6],
-                tcp_connections: Vec::new(),
-                tcp_next_id: 1,
-                tcp_next_port: 49152,
-                tcp_listen_port: None,
-                tcp_pending_accept: VecDeque::new(),
-                udp_response: None,
-                udp_sockets: Vec::new(),
-                udp_next_port: 49152,
-                icmpv6_echo_reply: None,
-            });
-        }
-        slot.as_mut().unwrap()
+/// NET_STATE のロックを取得し、初期化されていなければ初期化してから返す
+fn with_net_state<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut NetState) -> R,
+{
+    let mut guard = NET_STATE.lock();
+    if guard.is_none() {
+        *guard = Some(NetState {
+            mac: [0; 6],
+            tcp_connections: Vec::new(),
+            tcp_next_id: 1,
+            tcp_next_port: 49152,
+            tcp_listen_ports: Vec::new(),
+            tcp_pending_accept: VecDeque::new(),
+            udp_response: None,
+            udp_sockets: Vec::new(),
+            udp_next_port: 49152,
+            icmpv6_echo_reply: None,
+        });
     }
+    f(guard.as_mut().unwrap())
 }
 
 /// ネットワークスタックを初期化する（MAC 取得）
-pub fn init() -> Result<(), &'static str> {
-    let state = net_state_mut();
-    let mut mac = [0u8; 6];
-    if syscall::net_get_mac(&mut mac) < 0 {
-        return Err("net_get_mac failed");
+pub fn init() {
+    let drv = crate::virtio_net::VIRTIO_NET.lock();
+    if let Some(ref d) = *drv {
+        let mac = d.mac_address;
+        drop(drv); // ロック解放
+
+        *MY_MAC.lock() = mac;
+        with_net_state(|state| {
+            state.mac = mac;
+        });
+        serial_println!("netstack: initialized with MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        serial_println!("netstack: virtio-net not available, skipping init");
     }
-    state.mac = mac;
-    Ok(())
+}
+
+/// MAC アドレスを取得する（ロック不要版）
+fn get_my_mac() -> [u8; 6] {
+    *MY_MAC.lock()
+}
+
+// ============================================================
+// フレーム送受信ヘルパー（VIRTIO_NET 直接操作）
+// ============================================================
+
+/// Ethernet フレームを送信する
+fn send_frame(data: &[u8]) -> Result<(), &'static str> {
+    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+    let drv = drv.as_mut().ok_or("virtio-net not available")?;
+    drv.send_packet(data)
+}
+
+/// Ethernet フレームを受信する（ノンブロッキング）
+/// 受信できなければ None を返す
+fn recv_frame_nonblocking() -> Option<Vec<u8>> {
+    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+    drv.as_mut().and_then(|d| d.receive_packet())
+}
+
+/// ISR ステータスを読み取って QEMU のイベントループをキックする
+fn kick_virtio_net() {
+    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+    if let Some(d) = drv.as_mut() {
+        d.read_isr_status();
+    }
 }
 
 // ============================================================
@@ -319,24 +378,6 @@ impl UdpHeader {
 // ============================================================
 
 /// TCP ヘッダー (20 バイト、オプションなし)
-///
-/// ```text
-///  0                   1                   2                   3
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |          Source Port          |       Destination Port        |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                        Sequence Number                        |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                    Acknowledgment Number                      |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |  Data |       |C|E|U|A|P|R|S|F|                               |
-/// | Offset| Rsrvd |W|C|R|C|S|S|Y|I|            Window             |
-/// |       |       |R|E|G|K|H|T|N|N|                               |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |           Checksum            |         Urgent Pointer        |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct TcpHeader {
@@ -420,8 +461,6 @@ pub enum TcpState {
 }
 
 /// TCP コネクション
-///
-/// 簡易実装だが、複数コネクションを管理できるようにする。
 pub struct TcpConnection {
     /// コネクション ID
     pub id: u32,
@@ -556,7 +595,7 @@ fn handle_arp(_eth_header: &EthernetHeader, payload: &[u8]) {
 
 /// ARP Reply を送信する
 fn send_arp_reply(request: &ArpPacket) {
-    let my_mac = net_state_mut().mac;
+    let my_mac = get_my_mac();
 
     // Ethernet ヘッダー
     let eth_header = EthernetHeader {
@@ -588,21 +627,19 @@ fn send_arp_reply(request: &ArpPacket) {
     });
 
     // 送信
-    if syscall::net_send_frame(&packet) < 0 {
+    if send_frame(&packet).is_err() {
         net_debug!("net: failed to send ARP Reply");
     } else {
         net_debug!("net: sent ARP Reply");
     }
 }
 
-/// IPv4 パケットを処理する
 /// 指定された IP がローカル（自分宛）かどうかを判定する
-///
-/// MY_IP (10.0.2.15) と LOOPBACK_IP (127.0.0.1) をローカルとみなす。
 fn is_local_ip(ip: &[u8; 4]) -> bool {
     *ip == MY_IP || *ip == LOOPBACK_IP
 }
 
+/// IPv4 パケットを処理する
 fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 20 {
         return;
@@ -658,20 +695,7 @@ fn handle_icmp(ip_header: &Ipv4Header, payload: &[u8]) {
 
 /// ICMP Echo Reply を送信する
 fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
-    let my_mac = net_state_mut().mac;
-
-    // TODO: ARP テーブルから宛先 MAC を引くべきだが、
-    // 今回は request_ip.src_ip が直近の ARP リクエスト元と仮定して
-    // ブロードキャストで送る（または ARP キャッシュを実装する）
-    // 簡易実装: ゲートウェイの MAC = QEMU の仮想 NIC の MAC を使う
-    // QEMU SLIRP では最初のパケットで ARP が来るはずなので、
-    // ここでは元のパケットの src MAC を使う（実際は外部から取得が必要）
-
-    // Ethernet ヘッダー
-    // 宛先 MAC は ARP で解決するのが正しいが、簡易的にブロードキャストを使う
-    // または、リクエスト元のパケットから MAC を記憶する必要がある
-    // 今回は簡略化のため、受信時に src MAC を保存していないので
-    // ブロードキャストで送る
+    let my_mac = get_my_mac();
     let dst_mac = BROADCAST_MAC;
 
     let eth_header = EthernetHeader {
@@ -683,19 +707,18 @@ fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
     // IP ヘッダー
     let total_length = 20 + icmp_data.len();
     let ip_header = Ipv4Header {
-        version_ihl: 0x45, // IPv4, header length = 20 bytes
+        version_ihl: 0x45,
         tos: 0,
         total_length: (total_length as u16).to_be_bytes(),
         identification: [0, 0],
-        flags_fragment: [0x40, 0x00], // Don't Fragment
+        flags_fragment: [0x40, 0x00],
         ttl: 64,
         protocol: IP_PROTO_ICMP,
-        checksum: [0, 0], // 後で計算
+        checksum: [0, 0],
         src_ip: MY_IP,
         dst_ip: request_ip.src_ip,
     };
 
-    // IP ヘッダーチェックサムを計算
     let ip_header_bytes = unsafe {
         core::slice::from_raw_parts(&ip_header as *const _ as *const u8, 20)
     };
@@ -708,7 +731,6 @@ fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
     icmp_reply.code = 0;
     icmp_reply.checksum = [0, 0];
 
-    // ICMP ペイロード（Echo Request のデータ部分）
     let icmp_payload = if icmp_data.len() > 8 {
         &icmp_data[8..]
     } else {
@@ -726,42 +748,34 @@ fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
     // パケットを構築
     let mut packet = Vec::with_capacity(14 + 20 + icmp_data.len());
 
-    // Ethernet ヘッダー
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
     });
 
-    // IP ヘッダー（チェックサムを設定）
     let mut ip_header_with_checksum = ip_header;
     ip_header_with_checksum.checksum = ip_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // ICMP ヘッダー（チェックサムを設定）
     icmp_reply.checksum = icmp_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&icmp_reply as *const _ as *const u8, 8)
     });
 
-    // ICMP ペイロード
     packet.extend_from_slice(icmp_payload);
 
-    // 送信
-    if syscall::net_send_frame(&packet) < 0 {
+    if send_frame(&packet).is_err() {
         net_debug!("net: failed to send ICMP Echo Reply");
     } else {
         net_debug!("net: sent ICMP Echo Reply");
     }
 }
 
-/// インターネットチェックサムを計算する
-///
-/// RFC 1071 に従って 16 ビット 1 の補数の和の 1 の補数を計算
+/// インターネットチェックサムを計算する（RFC 1071）
 fn calculate_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
-    // 16 ビット単位で加算
     let mut i = 0;
     while i + 1 < data.len() {
         let word = u16::from_be_bytes([data[i], data[i + 1]]);
@@ -769,32 +783,18 @@ fn calculate_checksum(data: &[u8]) -> u16 {
         i += 2;
     }
 
-    // 奇数バイトの場合、最後の 1 バイトを処理
     if i < data.len() {
         sum += (data[i] as u32) << 8;
     }
 
-    // キャリーを折り返す
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
 
-    // 1 の補数
     !(sum as u16)
 }
 
-/// UDP チェックサムを計算する
-///
-/// UDP チェックサムは疑似ヘッダーを含めて計算する:
-/// - 送信元 IP (4 bytes)
-/// - 宛先 IP (4 bytes)
-/// - 0x00 (1 byte)
-/// - プロトコル番号 (1 byte, UDP=17)
-/// - UDP 長 (2 bytes)
-/// - UDP ヘッダー + データ
-///
-/// QEMU の libslirp (v8.2+) は UDP チェックサムが 0 のパケットをドロップするため、
-/// IPv4 でも正しいチェックサムの計算が必要。
+/// UDP チェックサムを計算する（疑似ヘッダー含む）
 fn calculate_udp_checksum(
     src_ip: &[u8; 4],
     dst_ip: &[u8; 4],
@@ -803,7 +803,6 @@ fn calculate_udp_checksum(
 ) -> u16 {
     let udp_len = 8 + payload.len();
 
-    // 疑似ヘッダー + UDP ヘッダー + データを構築
     let mut data = Vec::with_capacity(12 + udp_len);
 
     // 疑似ヘッダー
@@ -822,36 +821,62 @@ fn calculate_udp_checksum(
     data.extend_from_slice(payload);
 
     let checksum = calculate_checksum(&data);
-    // UDP では計算結果が 0 の場合は 0xFFFF にする（0 は「チェックサムなし」を意味するため）
     if checksum == 0 { 0xFFFF } else { checksum }
-}
-
-/// 受信パケットをポーリングして処理する（ノンブロッキング）
-///
-/// キューに溜まっているフレームを全て処理する（drain 方式）。
-pub fn poll_and_handle() {
-    poll_and_handle_timeout(0);
 }
 
 /// 受信パケットをポーリングして処理する（タイムアウト付き）
 ///
-/// timeout_ms > 0 の場合、最初のフレームが到着するまで最大 timeout_ms ミリ秒待つ。
-/// フレームを 1 つ受信した後は、残りのフレームをノンブロッキングで drain する。
+/// VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順でデッドロックを防止。
+/// timeout_ms > 0 の場合、最初のフレームが到着するまで enable_and_hlt でスリープ。
 pub fn poll_and_handle_timeout(timeout_ms: u64) {
-    let mut buf = [0u8; 1600];
-    let n = syscall::net_recv_frame(&mut buf, timeout_ms);
-    if n > 0 {
-        let len = n as usize;
-        handle_packet(&buf[..len]);
+    // まず即座に受信を試みる
+    if let Some(frame) = recv_frame_nonblocking() {
+        handle_packet(&frame);
         // 残りのフレームを drain
         loop {
-            let n = syscall::net_recv_frame(&mut buf, 0);
-            if n <= 0 {
+            if let Some(frame) = recv_frame_nonblocking() {
+                handle_packet(&frame);
+            } else {
                 break;
             }
-            let len = n as usize;
-            handle_packet(&buf[..len]);
         }
+        return;
+    }
+
+    if timeout_ms == 0 {
+        return;
+    }
+
+    // タイムアウト付きの待機
+    x86_64::instructions::interrupts::enable();
+    let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+
+    loop {
+        if let Some(frame) = recv_frame_nonblocking() {
+            handle_packet(&frame);
+            // 残りのフレームを drain
+            loop {
+                if let Some(frame) = recv_frame_nonblocking() {
+                    handle_packet(&frame);
+                } else {
+                    break;
+                }
+            }
+            return;
+        }
+
+        let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        let elapsed_ticks = now.saturating_sub(start_tick);
+        let elapsed_ms = elapsed_ticks * 55;
+        if elapsed_ms >= timeout_ms {
+            return;
+        }
+
+        // QEMU TCG モードでは、ゲスト CPU がビジーループしていると
+        // SLIRP のネットワーク I/O が処理されない。
+        // ISR ステータスの読み取りで QEMU のイベントループをキックする。
+        kick_virtio_net();
+        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
 
@@ -859,14 +884,7 @@ pub fn poll_and_handle_timeout(timeout_ms: u64) {
 // UDP 処理
 // ============================================================
 
-/// 受信した UDP レスポンスを保存するバッファ
-/// DNS クエリの応答を受け取るために使用する。
-/// 簡易実装のためグローバルバッファを使用。
-
 /// UDP パケットを処理する
-///
-/// 宛先ポートにバインドされた UDP ソケットがあれば recv_queue に追加する。
-/// なければ既存の DNS レスポンス処理（src_port==53 → udp_response に保存）にフォールバック。
 fn handle_udp(ip_header: &Ipv4Header, payload: &[u8]) {
     if payload.len() < 8 {
         return;
@@ -883,42 +901,28 @@ fn handle_udp(ip_header: &Ipv4Header, payload: &[u8]) {
         src_port, dst_port, udp_payload.len()
     );
 
-    let state = net_state_mut();
+    with_net_state(|state| {
+        // 宛先ポートにバインドされた UDP ソケットがあるか探す
+        if let Some(sock) = state.udp_sockets.iter_mut().find(|s| s.local_port == dst_port) {
+            sock.recv_queue.push_back((ip_header.src_ip, src_port, udp_payload.to_vec()));
+            return;
+        }
 
-    // 宛先ポートにバインドされた UDP ソケットがあるか探す
-    if let Some(sock) = state.udp_sockets.iter_mut().find(|s| s.local_port == dst_port) {
-        // バインドされたソケットの recv_queue に追加
-        sock.recv_queue.push_back((ip_header.src_ip, src_port, udp_payload.to_vec()));
-        return;
-    }
-
-    // バインドされたソケットがなければ、既存の DNS レスポンス処理にフォールバック
-    // DNS レスポンス (ポート 53 から)
-    if src_port == 53 {
-        // DNS レスポンスをバッファに保存
-        state.udp_response = Some((dst_port, udp_payload.to_vec()));
-    }
+        // バインドされたソケットがなければ、既存の DNS レスポンス処理にフォールバック
+        if src_port == 53 {
+            state.udp_response = Some((dst_port, udp_payload.to_vec()));
+        }
+    });
 }
 
 /// UDP パケットを送信する
-///
-/// # 引数
-/// - `dst_ip`: 宛先 IP アドレス
-/// - `dst_port`: 宛先ポート
-/// - `src_port`: 送信元ポート
-/// - `payload`: UDP ペイロード
 pub fn send_udp_packet(
     dst_ip: [u8; 4],
     dst_port: u16,
     src_port: u16,
     payload: &[u8],
 ) -> Result<(), &'static str> {
-    let my_mac = net_state_mut().mac;
-
-    // Ethernet ヘッダー
-    // 宛先 MAC は ARP 解決が必要だが、QEMU SLIRP では
-    // ゲートウェイ (10.0.2.2) 経由で全て送られるので
-    // ブロードキャストまたはゲートウェイの MAC を使う
+    let my_mac = get_my_mac();
     let dst_mac = BROADCAST_MAC;
 
     let eth_header = EthernetHeader {
@@ -927,28 +931,23 @@ pub fn send_udp_packet(
         ethertype: ETHERTYPE_IPV4.to_be_bytes(),
     };
 
-    // UDP ヘッダー（チェックサムは後で計算）
     let udp_length = 8 + payload.len();
     let udp_header = UdpHeader {
         src_port: src_port.to_be_bytes(),
         dst_port: dst_port.to_be_bytes(),
         length: (udp_length as u16).to_be_bytes(),
-        checksum: [0, 0], // 後で計算
+        checksum: [0, 0],
     };
 
-    // UDP チェックサムを計算（疑似ヘッダー + UDP ヘッダー + データ）
-    // QEMU の libslirp は UDP チェックサムが 0 のパケットをドロップするため、
-    // IPv4 でもチェックサムを正しく計算する必要がある。
     let udp_checksum = calculate_udp_checksum(&MY_IP, &dst_ip, &udp_header, payload);
 
-    // IP ヘッダー
     let total_length = 20 + udp_length;
     let ip_header = Ipv4Header {
         version_ihl: 0x45,
         tos: 0,
         total_length: (total_length as u16).to_be_bytes(),
         identification: [0, 0],
-        flags_fragment: [0x40, 0x00], // Don't Fragment
+        flags_fragment: [0x40, 0x00],
         ttl: 64,
         protocol: IP_PROTO_UDP,
         checksum: [0, 0],
@@ -956,133 +955,84 @@ pub fn send_udp_packet(
         dst_ip,
     };
 
-    // IP ヘッダーチェックサムを計算
     let ip_header_bytes = unsafe {
         core::slice::from_raw_parts(&ip_header as *const _ as *const u8, 20)
     };
     let ip_checksum = calculate_checksum(ip_header_bytes);
 
-    // パケットを構築
     let mut packet = Vec::with_capacity(14 + 20 + udp_length);
 
-    // Ethernet ヘッダー
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
     });
 
-    // IP ヘッダー（チェックサムを設定）
     let mut ip_header_with_checksum = ip_header;
     ip_header_with_checksum.checksum = ip_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // UDP ヘッダー（チェックサムを設定）
     let mut udp_header_with_checksum = udp_header;
     udp_header_with_checksum.checksum = udp_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&udp_header_with_checksum as *const _ as *const u8, 8)
     });
 
-    // UDP ペイロード
     packet.extend_from_slice(payload);
 
-    // 送信
-    if syscall::net_send_frame(&packet) < 0 {
-        Err("send failed")
-    } else {
-        Ok(())
-    }
+    send_frame(&packet).map_err(|_| "send failed")
 }
 
 // ============================================================
 // DNS クライアント
 // ============================================================
-//
-// DNS プロトコルの最小実装。
-// A レコード（ドメイン名 → IPv4 アドレス）のクエリのみ対応。
-//
-// DNS メッセージ構造:
-//   [Header (12 bytes)]
-//   [Question Section]
-//   [Answer Section] (レスポンスのみ)
-//   [Authority Section] (通常無視)
-//   [Additional Section] (通常無視)
-//
-// DNS ヘッダー (12 bytes):
-//   - ID (2 bytes): クエリ識別子
-//   - Flags (2 bytes): QR, Opcode, AA, TC, RD, RA, Z, RCODE
-//   - QDCOUNT (2 bytes): Question 数
-//   - ANCOUNT (2 bytes): Answer 数
-//   - NSCOUNT (2 bytes): Authority 数
-//   - ARCOUNT (2 bytes): Additional 数
-//
-// Question Entry:
-//   - QNAME: ラベル形式のドメイン名 (例: \x07example\x03com\x00)
-//   - QTYPE (2 bytes): 1 = A レコード
-//   - QCLASS (2 bytes): 1 = IN (Internet)
-//
-// Answer Entry:
-//   - NAME: ラベル or ポインタ
-//   - TYPE (2 bytes)
-//   - CLASS (2 bytes)
-//   - TTL (4 bytes)
-//   - RDLENGTH (2 bytes)
-//   - RDATA (RDLENGTH bytes): A レコードの場合は IPv4 アドレス (4 bytes)
 
 /// DNS ポート番号
 const DNS_PORT: u16 = 53;
-
 /// DNS レコードタイプ: A (IPv4 アドレス)
 const DNS_TYPE_A: u16 = 1;
-
 /// DNS クラス: IN (Internet)
 const DNS_CLASS_IN: u16 = 1;
 
 /// DNS クエリを送信して IP アドレスを解決する
-///
-/// # 引数
-/// - `domain`: ドメイン名 (例: "example.com")
-///
-/// # 戻り値
-/// - `Ok([u8; 4])`: 解決された IPv4 アドレス
-/// - `Err(&str)`: エラーメッセージ
 pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
-    let query_id: u16 = 0x1234; // 固定 ID（簡易実装）
-    let src_port: u16 = 12345; // 送信元ポート
+    let query_id: u16 = 0x1234;
+    let src_port: u16 = 12345;
 
     let query_packet = build_dns_query(query_id, domain)?;
 
     // 最大 2 回試行する。初回は ARP 未解決で drop される場合があるためリトライする
     for attempt in 0..2 {
         // レスポンスバッファをクリア
-        net_state_mut().udp_response = None;
+        with_net_state(|state| {
+            state.udp_response = None;
+        });
 
-        // クエリを送信
         net_debug!("dns: sending query for '{}' (attempt {})", domain, attempt);
         let send_result = send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet);
         if send_result.is_err() {
             return send_result.map(|_| [0u8; 4]);
         }
 
-        // レスポンスを待つ（最大 5 秒、50 回 × 100ms ブロッキング受信）
-        // net_recv_frame のタイムアウトで待つので、カーネル内の yield/hlt で
-        // QEMU SLIRP の処理時間を確保する。
+        // レスポンスを待つ（最大 5 秒）
         for _i in 0..50 {
-            // ネットワークをポーリング（100ms タイムアウト付き）
             poll_and_handle_timeout(100);
 
-            // レスポンスをチェック
-            if let Some((port, ref data)) = net_state_mut().udp_response {
-                if port == src_port && data.len() >= 12 {
-                    // レスポンスをパース
-                    let response_id = u16::from_be_bytes([data[0], data[1]]);
-                    if response_id == query_id {
-                        return parse_dns_response(data);
+            let result = with_net_state(|state| {
+                if let Some((port, ref data)) = state.udp_response {
+                    if port == src_port && data.len() >= 12 {
+                        let response_id = u16::from_be_bytes([data[0], data[1]]);
+                        if response_id == query_id {
+                            return Some(parse_dns_response(data));
+                        }
                     }
                 }
-            }
+                None
+            });
 
+            if let Some(result) = result {
+                return result;
+            }
         }
     }
 
@@ -1094,16 +1044,14 @@ fn build_dns_query(query_id: u16, domain: &str) -> Result<Vec<u8>, &'static str>
     let mut packet = Vec::with_capacity(512);
 
     // DNS ヘッダー (12 bytes)
-    packet.extend_from_slice(&query_id.to_be_bytes()); // ID
-    packet.extend_from_slice(&[0x01, 0x00]); // Flags: RD=1 (Recursion Desired)
+    packet.extend_from_slice(&query_id.to_be_bytes());
+    packet.extend_from_slice(&[0x01, 0x00]); // Flags: RD=1
     packet.extend_from_slice(&[0x00, 0x01]); // QDCOUNT: 1
     packet.extend_from_slice(&[0x00, 0x00]); // ANCOUNT: 0
     packet.extend_from_slice(&[0x00, 0x00]); // NSCOUNT: 0
     packet.extend_from_slice(&[0x00, 0x00]); // ARCOUNT: 0
 
     // Question Section
-    // QNAME: ドメイン名をラベル形式に変換
-    // "example.com" → "\x07example\x03com\x00"
     for label in domain.split('.') {
         if label.len() > 63 {
             return Err("DNS label too long");
@@ -1114,11 +1062,9 @@ fn build_dns_query(query_id: u16, domain: &str) -> Result<Vec<u8>, &'static str>
         packet.push(label.len() as u8);
         packet.extend_from_slice(label.as_bytes());
     }
-    packet.push(0x00); // ラベル終端
+    packet.push(0x00);
 
-    // QTYPE: A (1)
     packet.extend_from_slice(&DNS_TYPE_A.to_be_bytes());
-    // QCLASS: IN (1)
     packet.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
 
     Ok(packet)
@@ -1130,7 +1076,6 @@ fn parse_dns_response(data: &[u8]) -> Result<[u8; 4], &'static str> {
         return Err("DNS response too short");
     }
 
-    // Flags をチェック
     let flags = u16::from_be_bytes([data[2], data[3]]);
     let rcode = flags & 0x000F;
     if rcode != 0 {
@@ -1151,12 +1096,11 @@ fn parse_dns_response(data: &[u8]) -> Result<[u8; 4], &'static str> {
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_dns_name(data, offset)?;
-        offset += 4; // QTYPE (2) + QCLASS (2)
+        offset += 4;
     }
 
     // Answer Section をパース
     for _ in 0..ancount {
-        // NAME (ラベルまたはポインタ)
         offset = skip_dns_name(data, offset)?;
 
         if offset + 10 > data.len() {
@@ -1165,7 +1109,6 @@ fn parse_dns_response(data: &[u8]) -> Result<[u8; 4], &'static str> {
 
         let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
-        // TTL は data[offset+4..offset+8] だが無視
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
         offset += 10;
 
@@ -1173,7 +1116,6 @@ fn parse_dns_response(data: &[u8]) -> Result<[u8; 4], &'static str> {
             return Err("DNS RDATA truncated");
         }
 
-        // A レコード (TYPE=1, CLASS=1, RDLENGTH=4) を探す
         if rtype == DNS_TYPE_A && rclass == DNS_CLASS_IN && rdlength == 4 {
             let ip = [
                 data[offset],
@@ -1195,10 +1137,6 @@ fn parse_dns_response(data: &[u8]) -> Result<[u8; 4], &'static str> {
 }
 
 /// DNS 名をスキップして次のフィールドのオフセットを返す
-///
-/// DNS 名はラベル形式またはポインタ形式。
-/// ラベル形式: \x07example\x03com\x00
-/// ポインタ形式: \xC0\x0C (上位 2 ビットが 11 ならポインタ)
 fn skip_dns_name(data: &[u8], mut offset: usize) -> Result<usize, &'static str> {
     loop {
         if offset >= data.len() {
@@ -1208,16 +1146,13 @@ fn skip_dns_name(data: &[u8], mut offset: usize) -> Result<usize, &'static str> 
         let len = data[offset];
 
         if len == 0 {
-            // ラベル終端
             return Ok(offset + 1);
         }
 
         if (len & 0xC0) == 0xC0 {
-            // ポインタ (2 バイト)
             return Ok(offset + 2);
         }
 
-        // 通常のラベル
         offset += 1 + len as usize;
     }
 }
@@ -1225,22 +1160,6 @@ fn skip_dns_name(data: &[u8], mut offset: usize) -> Result<usize, &'static str> 
 // ============================================================
 // TCP クライアント
 // ============================================================
-//
-// TCP (Transmission Control Protocol) はコネクション指向の
-// 信頼性のあるストリームプロトコル。
-//
-// ## 3-way ハンドシェイク
-//
-// クライアント → サーバー: SYN (seq=x)
-// サーバー → クライアント: SYN-ACK (seq=y, ack=x+1)
-// クライアント → サーバー: ACK (seq=x+1, ack=y+1)
-//
-// ## コネクション終了 (4-way)
-//
-// クライアント → サーバー: FIN
-// サーバー → クライアント: ACK
-// サーバー → クライアント: FIN
-// クライアント → サーバー: ACK
 
 /// TCP パケットを処理する
 fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
@@ -1269,28 +1188,28 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
     );
 
     let mut send_packet: Option<([u8; 4], u16, u16, u32, u32, u8)> = None;
-    let mut push_accept: Option<u32> = None;
-    {
-        let state = net_state_mut();
+    let mut push_accept: Option<(u32, u16)> = None;
+
+    with_net_state(|state| {
         let idx = find_conn_index_by_tuple(state, ip_header.src_ip, src_port, dst_port);
         if idx.is_none() {
             // リスン中なら SYN を受け付ける
-            if let Some(listen_port) = state.tcp_listen_port {
-                if dst_port == listen_port && tcp_header.has_flag(TCP_FLAG_SYN) {
-                    let id = alloc_conn_id(state);
-                    let mut conn = TcpConnection::new(id, listen_port, ip_header.src_ip, src_port);
-                    conn.state = TcpState::SynReceived;
-                    conn.ack_num = seq + 1;
-                    send_packet = Some((
-                        conn.remote_ip,
-                        conn.remote_port,
-                        conn.local_port,
-                        conn.seq_num,
-                        conn.ack_num,
-                        TCP_FLAG_SYN | TCP_FLAG_ACK,
-                    ));
-                    state.tcp_connections.push(conn);
-                }
+            net_debug!("tcp: no existing conn, listen_ports={:?}, dst_port={}", state.tcp_listen_ports, dst_port);
+            if state.tcp_listen_ports.contains(&dst_port) && tcp_header.has_flag(TCP_FLAG_SYN) {
+                net_debug!("tcp: accepting SYN on port {}, sending SYN+ACK", dst_port);
+                let id = alloc_conn_id(state);
+                let mut conn = TcpConnection::new(id, dst_port, ip_header.src_ip, src_port);
+                conn.state = TcpState::SynReceived;
+                conn.ack_num = seq + 1;
+                send_packet = Some((
+                    conn.remote_ip,
+                    conn.remote_port,
+                    conn.local_port,
+                    conn.seq_num,
+                    conn.ack_num,
+                    TCP_FLAG_SYN | TCP_FLAG_ACK,
+                ));
+                state.tcp_connections.push(conn);
             }
         } else {
             let idx = idx.unwrap();
@@ -1323,8 +1242,8 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                         if ack == conn.seq_num + 1 {
                             conn.seq_num = ack;
                             conn.state = TcpState::Established;
-                            push_accept = Some(conn.id);
-                            net_debug!("tcp: server connection established");
+                            push_accept = Some((conn.id, conn.local_port));
+                            net_debug!("tcp: server connection established on port {}", conn.local_port);
                         }
                     }
                 }
@@ -1396,13 +1315,18 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
             }
         }
 
-        if let Some(id) = push_accept {
-            state.tcp_pending_accept.push_back(id);
+        if let Some((id, port)) = push_accept {
+            net_debug!("tcp: pushing to pending_accept: conn_id={}, port={}, queue_len={}", id, port, state.tcp_pending_accept.len());
+            state.tcp_pending_accept.push_back((id, port));
         }
-    }
+    });
 
     if let Some((dst_ip, dst_port, src_port, seq_num, ack_num, flags)) = send_packet {
-        let _ = send_tcp_packet_internal(dst_ip, dst_port, src_port, seq_num, ack_num, flags, &[]);
+        net_debug!("tcp: sending response to {}.{}.{}.{}:{}, flags={:#04x}", dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port, flags);
+        let result = send_tcp_packet_internal(dst_ip, dst_port, src_port, seq_num, ack_num, flags, &[]);
+        net_debug!("tcp: send result: {:?}", result);
+    } else {
+        net_debug!("tcp: no response to send (SYN dropped?)");
     }
 }
 
@@ -1416,30 +1340,27 @@ fn send_tcp_packet_internal(
     flags: u8,
     payload: &[u8],
 ) -> Result<(), &'static str> {
-    let my_mac = net_state_mut().mac;
+    let my_mac = get_my_mac();
     let dst_mac = BROADCAST_MAC;
 
-    // Ethernet ヘッダー
     let eth_header = EthernetHeader {
         dst_mac,
         src_mac: my_mac,
         ethertype: ETHERTYPE_IPV4.to_be_bytes(),
     };
 
-    // TCP ヘッダー (20 バイト、オプションなし)
     let tcp_header = TcpHeader {
         src_port: src_port.to_be_bytes(),
         dst_port: dst_port.to_be_bytes(),
         seq_num: seq_num.to_be_bytes(),
         ack_num: ack_num.to_be_bytes(),
-        data_offset_reserved: 0x50, // 5 * 4 = 20 bytes
+        data_offset_reserved: 0x50,
         flags,
-        window: 65535u16.to_be_bytes(), // 最大ウィンドウサイズ
-        checksum: [0, 0], // 後で計算
+        window: 65535u16.to_be_bytes(),
+        checksum: [0, 0],
         urgent_ptr: [0, 0],
     };
 
-    // IP ヘッダー
     let tcp_length = 20 + payload.len();
     let total_length = 20 + tcp_length;
     let ip_header = Ipv4Header {
@@ -1447,7 +1368,7 @@ fn send_tcp_packet_internal(
         tos: 0,
         total_length: (total_length as u16).to_be_bytes(),
         identification: [0, 0],
-        flags_fragment: [0x40, 0x00], // Don't Fragment
+        flags_fragment: [0x40, 0x00],
         ttl: 64,
         protocol: IP_PROTO_TCP,
         checksum: [0, 0],
@@ -1455,68 +1376,43 @@ fn send_tcp_packet_internal(
         dst_ip,
     };
 
-    // IP ヘッダーチェックサムを計算
     let ip_header_bytes = unsafe {
         core::slice::from_raw_parts(&ip_header as *const _ as *const u8, 20)
     };
     let ip_checksum = calculate_checksum(ip_header_bytes);
 
+    let tcp_checksum = calculate_tcp_checksum(&MY_IP, &dst_ip, &tcp_header, payload);
 
-    // TCP チェックサムを計算（疑似ヘッダー + TCP ヘッダー + データ）
-    let tcp_checksum = calculate_tcp_checksum(
-        &MY_IP,
-        &dst_ip,
-        &tcp_header,
-        payload,
-    );
-
-
-    // パケットを構築
     let mut packet = Vec::with_capacity(14 + 20 + tcp_length);
 
-    // Ethernet ヘッダー
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
     });
 
-    // IP ヘッダー（チェックサムを設定）
     let mut ip_header_with_checksum = ip_header;
     ip_header_with_checksum.checksum = ip_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&ip_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // TCP ヘッダー（チェックサムを設定）
     let mut tcp_header_with_checksum = tcp_header;
     tcp_header_with_checksum.checksum = tcp_checksum.to_be_bytes();
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&tcp_header_with_checksum as *const _ as *const u8, 20)
     });
 
-    // TCP ペイロード
     packet.extend_from_slice(payload);
 
-    // ローカル宛（自分自身 or ループバック）のパケットは
-    // ネットワークに出さず、直接パケットハンドラに戻す（ソフトウェアループバック）
+    // ローカル宛のパケットはソフトウェアループバック
     if is_local_ip(&dst_ip) {
         handle_packet(&packet);
         Ok(())
-    } else if syscall::net_send_frame(&packet) < 0 {
-        Err("send failed")
     } else {
-        Ok(())
+        send_frame(&packet).map_err(|_| "send failed")
     }
 }
 
-/// TCP チェックサムを計算する
-///
-/// TCP チェックサムは疑似ヘッダーを含めて計算する:
-/// - 送信元 IP (4 bytes)
-/// - 宛先 IP (4 bytes)
-/// - 0x00 (1 byte)
-/// - プロトコル番号 (1 byte, TCP=6)
-/// - TCP 長 (2 bytes)
-/// - TCP ヘッダー + データ
+/// TCP チェックサムを計算する（疑似ヘッダー含む）
 fn calculate_tcp_checksum(
     src_ip: &[u8; 4],
     dst_ip: &[u8; 4],
@@ -1525,39 +1421,26 @@ fn calculate_tcp_checksum(
 ) -> u16 {
     let tcp_len = 20 + payload.len();
 
-    // 疑似ヘッダー + TCP ヘッダー + データを構築
     let mut data = Vec::with_capacity(12 + tcp_len);
 
-    // 疑似ヘッダー
     data.extend_from_slice(src_ip);
     data.extend_from_slice(dst_ip);
     data.push(0);
     data.push(IP_PROTO_TCP);
     data.extend_from_slice(&(tcp_len as u16).to_be_bytes());
 
-    // TCP ヘッダー
     data.extend_from_slice(unsafe {
         core::slice::from_raw_parts(tcp_header as *const _ as *const u8, 20)
     });
 
-    // ペイロード
     data.extend_from_slice(payload);
 
     calculate_checksum(&data)
 }
 
 /// TCP コネクションを確立する（3-way ハンドシェイク）
-///
-/// # 引数
-/// - `dst_ip`: 宛先 IP アドレス
-/// - `dst_port`: 宛先ポート
-///
-/// # 戻り値
-/// - `Ok(conn_id)`: コネクション ID
-/// - `Err(&str)`: エラー
 pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> {
-    let (conn_id, local_port, initial_seq) = {
-        let state = net_state_mut();
+    let (conn_id, local_port, initial_seq) = with_net_state(|state| {
         let id = alloc_conn_id(state);
         let local_port = alloc_local_port(state);
         let mut conn = TcpConnection::new(id, local_port, dst_ip, dst_port);
@@ -1565,52 +1448,53 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
         let initial_seq = conn.seq_num;
         state.tcp_connections.push(conn);
         (id, local_port, initial_seq)
-    };
+    });
 
     net_debug!("tcp: sending SYN");
-    send_tcp_packet_internal(
-        dst_ip,
-        dst_port,
-        local_port,
-        initial_seq,
-        0,
-        TCP_FLAG_SYN,
-        &[],
-    )?;
+    send_tcp_packet_internal(dst_ip, dst_port, local_port, initial_seq, 0, TCP_FLAG_SYN, &[])?;
 
-    // TCP 接続確立を最大 5 秒待つ（100ms × 50 = 5000ms）
+    // TCP 接続確立を最大 5 秒待つ
     for _ in 0..50 {
         poll_and_handle_timeout(100);
 
-        let state = net_state_mut();
-        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
-            let c = &state.tcp_connections[idx];
-            if c.state == TcpState::Established {
-                return Ok(conn_id);
+        let result = with_net_state(|state| {
+            if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+                let c = &state.tcp_connections[idx];
+                if c.state == TcpState::Established {
+                    return Some(Ok(conn_id));
+                }
+                if c.state == TcpState::Closed {
+                    return Some(Err("connection refused"));
+                }
             }
-            if c.state == TcpState::Closed {
-                break;
-            }
-        } else {
-            break;
+            None
+        });
+
+        match result {
+            Some(Ok(id)) => return Ok(id),
+            Some(Err(_)) => break,
+            None => {}
         }
     }
 
-    let state = net_state_mut();
-    let _ = remove_conn_by_id(state, conn_id);
+    with_net_state(|state| {
+        let _ = remove_conn_by_id(state, conn_id);
+    });
     Err("connection failed")
 }
 
 /// TCP のリッスンを開始する
 pub fn tcp_listen(port: u16) -> Result<(), &'static str> {
-    let state = net_state_mut();
-    state.tcp_listen_port = Some(port);
-    Ok(())
+    with_net_state(|state| {
+        if !state.tcp_listen_ports.contains(&port) {
+            state.tcp_listen_ports.push(port);
+        }
+        Ok(())
+    })
 }
 
-/// TCP の accept を待つ（複数接続対応）
-pub fn tcp_accept(timeout_ms: u64) -> Result<u32, &'static str> {
-    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100
+/// TCP の accept を待つ（ポート指定）
+pub fn tcp_accept(timeout_ms: u64, listen_port: u16) -> Result<u32, &'static str> {
     let loops = if timeout_ms == 0 {
         1
     } else {
@@ -1619,11 +1503,19 @@ pub fn tcp_accept(timeout_ms: u64) -> Result<u32, &'static str> {
 
     for _ in 0..loops {
         poll_and_handle_timeout(100);
-        {
-            let state = net_state_mut();
-            if let Some(id) = state.tcp_pending_accept.pop_front() {
-                return Ok(id);
+
+        let result = with_net_state(|state| {
+            if let Some(pos) = state.tcp_pending_accept.iter().position(|(_, port)| *port == listen_port) {
+                let (id, _) = state.tcp_pending_accept.remove(pos).unwrap();
+                net_debug!("tcp_accept: found conn_id={} for port {}", id, listen_port);
+                Some(id)
+            } else {
+                None
             }
+        });
+
+        if let Some(id) = result {
+            return Ok(id);
         }
     }
     Err("timeout")
@@ -1631,8 +1523,7 @@ pub fn tcp_accept(timeout_ms: u64) -> Result<u32, &'static str> {
 
 /// TCP でデータを送信する
 pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
-    let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
-        let state = net_state_mut();
+    let (dst_ip, dst_port, local_port, seq_num, ack_num) = with_net_state(|state| {
         let idx = find_conn_index_by_id(state, conn_id).ok_or("no connection")?;
         let conn = &mut state.tcp_connections[idx];
 
@@ -1643,51 +1534,48 @@ pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
         let result = (conn.remote_ip, conn.remote_port, conn.local_port,
                      conn.seq_num, conn.ack_num);
         conn.seq_num += data.len() as u32;
-        result
-    };
+        Ok(result)
+    })?;
 
     net_debug!("tcp: sending {} bytes", data.len());
-    send_tcp_packet_internal(
-        dst_ip,
-        dst_port,
-        local_port,
-        seq_num,
-        ack_num,
-        TCP_FLAG_ACK | TCP_FLAG_PSH,
-        data,
-    )
+    send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_ACK | TCP_FLAG_PSH, data)
 }
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
 pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
-    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100（デフォルト 5 秒）
     let loops = if timeout_ms == 0 {
-        50 // 100ms × 50 = 5 秒
+        50
     } else {
         (timeout_ms as usize / 100).max(1)
     };
+
     for _ in 0..loops {
         poll_and_handle_timeout(100);
 
-        // 受信バッファをチェック
-        {
-            let state = net_state_mut();
+        let result = with_net_state(|state| {
             if let Some(idx) = find_conn_index_by_id(state, conn_id) {
                 let c = &mut state.tcp_connections[idx];
                 if !c.recv_buffer.is_empty() {
                     let data = core::mem::take(&mut c.recv_buffer);
-                    return Ok(data);
+                    return Some(Ok(data));
                 }
                 if c.state == TcpState::CloseWait || c.state == TcpState::Closed {
                     if !c.recv_buffer.is_empty() {
                         let data = core::mem::take(&mut c.recv_buffer);
-                        return Ok(data);
+                        return Some(Ok(data));
                     }
-                    return Err("connection closed");
+                    return Some(Err("connection closed"));
                 }
+                None
             } else {
-                return Err("no connection");
+                Some(Err("no connection"))
             }
+        });
+
+        match result {
+            Some(Ok(data)) => return Ok(data),
+            Some(Err(e)) => return Err(e),
+            None => {}
         }
     }
 
@@ -1696,8 +1584,7 @@ pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> 
 
 /// TCP コネクションを閉じる
 pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
-    let (dst_ip, dst_port, local_port, seq_num, ack_num) = {
-        let state = net_state_mut();
+    let (dst_ip, dst_port, local_port, seq_num, ack_num) = with_net_state(|state| {
         let idx = find_conn_index_by_id(state, conn_id).ok_or("no connection")?;
         let conn = &mut state.tcp_connections[idx];
 
@@ -1713,41 +1600,34 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
         } else {
             conn.state = TcpState::LastAck;
         }
-        conn.seq_num += 1; // FIN は 1 バイト消費
-        result
-    };
+        conn.seq_num += 1;
+        Ok(result)
+    })?;
 
-    // FIN を送信
     net_debug!("tcp: sending FIN");
-    send_tcp_packet_internal(
-        dst_ip,
-        dst_port,
-        local_port,
-        seq_num,
-        ack_num,
-        TCP_FLAG_FIN | TCP_FLAG_ACK,
-        &[],
-    )?;
+    send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_FIN | TCP_FLAG_ACK, &[])?;
 
-    // ACK を待つ（最大 5 秒: 100ms × 50）
+    // ACK を待つ（最大 5 秒）
     for _ in 0..50 {
         poll_and_handle_timeout(100);
 
-        {
-            let state = net_state_mut();
+        let done = with_net_state(|state| {
             if let Some(idx) = find_conn_index_by_id(state, conn_id) {
                 let c = &state.tcp_connections[idx];
-                if c.state == TcpState::TimeWait || c.state == TcpState::Closed {
-                    break;
-                }
+                c.state == TcpState::TimeWait || c.state == TcpState::Closed
+            } else {
+                true
             }
+        });
+
+        if done {
+            break;
         }
     }
 
-    {
-        let state = net_state_mut();
+    with_net_state(|state| {
         let _ = remove_conn_by_id(state, conn_id);
-    }
+    });
 
     net_debug!("tcp: connection closed");
     Ok(())
@@ -1756,69 +1636,50 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
 // ============================================================
 // UDP ソケット API
 // ============================================================
-//
-// netd の IPC オペコード 8-11 から呼ばれる公開 API。
-// DNS の既存処理（dns_lookup）は引き続き udp_response を使い、
-// ここで管理する UDP ソケットとは独立に動作する。
 
 /// UDP ソケットをバインドする
-///
-/// # 引数
-/// - `port`: バインドするポート番号。0 の場合はエフェメラルポートを自動割り当て。
-///
-/// # 戻り値
-/// - `Ok(socket_id)`: 割り当てられたソケット ID
-/// - `Err`: ポートが既に使用中の場合など
 pub fn udp_bind(port: u16) -> Result<u32, &'static str> {
-    let state = net_state_mut();
+    with_net_state(|state| {
+        let local_port = if port == 0 {
+            let p = state.udp_next_port;
+            let next = state.udp_next_port.wrapping_add(1);
+            state.udp_next_port = if next < 49152 { 49152 } else { next };
+            p
+        } else {
+            if state.udp_sockets.iter().any(|s| s.local_port == port) {
+                return Err("port already in use");
+            }
+            port
+        };
 
-    // ポートを決定（0 ならエフェメラルポート自動割り当て）
-    let local_port = if port == 0 {
-        let p = state.udp_next_port;
-        let next = state.udp_next_port.wrapping_add(1);
-        state.udp_next_port = if next < 49152 { 49152 } else { next };
-        p
-    } else {
-        // 指定ポートが既に使用されていないか確認
-        if state.udp_sockets.iter().any(|s| s.local_port == port) {
-            return Err("port already in use");
-        }
-        port
-    };
+        let id = alloc_conn_id(state);
 
-    // ID は TCP と共有のカウンタから割り当て
-    let id = alloc_conn_id(state);
+        state.udp_sockets.push(UdpSocketEntry {
+            id,
+            local_port,
+            recv_queue: VecDeque::new(),
+        });
 
-    state.udp_sockets.push(UdpSocketEntry {
-        id,
-        local_port,
-        recv_queue: VecDeque::new(),
-    });
-
-    net_debug!("udp: bind socket id={} port={}", id, local_port);
-    Ok(id)
+        net_debug!("udp: bind socket id={} port={}", id, local_port);
+        Ok(id)
+    })
 }
 
 /// UDP ソケットでデータを送信する
-///
-/// # 引数
-/// - `socket_id`: バインド時に返されたソケット ID
-/// - `dst_ip`: 宛先 IP アドレス
-/// - `dst_port`: 宛先ポート
-/// - `data`: 送信データ
 pub fn udp_send_to(
     socket_id: u32,
     dst_ip: [u8; 4],
     dst_port: u16,
     data: &[u8],
 ) -> Result<(), &'static str> {
-    let state = net_state_mut();
-    let sock = state
-        .udp_sockets
-        .iter()
-        .find(|s| s.id == socket_id)
-        .ok_or("no such UDP socket")?;
-    let src_port = sock.local_port;
+    let src_port = with_net_state(|state| {
+        let sock = state
+            .udp_sockets
+            .iter()
+            .find(|s| s.id == socket_id)
+            .ok_or("no such UDP socket")?;
+        Ok(sock.local_port)
+    })?;
 
     net_debug!(
         "udp: send_to socket id={} -> {}.{}.{}.{}:{} len={}",
@@ -1829,27 +1690,17 @@ pub fn udp_send_to(
 }
 
 /// UDP ソケットからデータを受信する（ブロッキング、タイムアウト付き）
-///
-/// # 引数
-/// - `socket_id`: バインド時に返されたソケット ID
-/// - `timeout_ms`: タイムアウト（ミリ秒）。0 = デフォルト 5 秒
-///
-/// # 戻り値
-/// - `Ok((src_ip, src_port, data))`: 受信したデータと送信元情報
-/// - `Err`: タイムアウトまたはソケットが見つからない場合
 pub fn udp_recv_from(
     socket_id: u32,
     timeout_ms: u64,
 ) -> Result<([u8; 4], u16, Vec<u8>), &'static str> {
     let effective_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms };
-    // ポーリングループ: 100ms ごとにチェックし、合計 timeout_ms 待つ
     let loops = (effective_timeout as usize / 100).max(1);
 
     for _ in 0..loops {
         poll_and_handle_timeout(100);
 
-        {
-            let state = net_state_mut();
+        let result = with_net_state(|state| {
             let sock = state
                 .udp_sockets
                 .iter_mut()
@@ -1857,11 +1708,19 @@ pub fn udp_recv_from(
             match sock {
                 Some(s) => {
                     if let Some(item) = s.recv_queue.pop_front() {
-                        return Ok(item);
+                        Some(Ok(item))
+                    } else {
+                        None
                     }
                 }
-                None => return Err("no such UDP socket"),
+                None => Some(Err("no such UDP socket")),
             }
+        });
+
+        match result {
+            Some(Ok(item)) => return Ok(item),
+            Some(Err(e)) => return Err(e),
+            None => {}
         }
     }
 
@@ -1869,53 +1728,33 @@ pub fn udp_recv_from(
 }
 
 /// UDP ソケットを閉じる
-///
-/// ソケットを削除し、受信キューに残っているデータも破棄する。
 pub fn udp_close(socket_id: u32) -> Result<(), &'static str> {
-    let state = net_state_mut();
-    let idx = state
-        .udp_sockets
-        .iter()
-        .position(|s| s.id == socket_id)
-        .ok_or("no such UDP socket")?;
-    state.udp_sockets.remove(idx);
-    net_debug!("udp: close socket id={}", socket_id);
-    Ok(())
+    with_net_state(|state| {
+        let idx = state
+            .udp_sockets
+            .iter()
+            .position(|s| s.id == socket_id)
+            .ok_or("no such UDP socket")?;
+        state.udp_sockets.remove(idx);
+        net_debug!("udp: close socket id={}", socket_id);
+        Ok(())
+    })
 }
 
 /// UDP ソケットのローカルポートを取得する
 pub fn udp_local_port(socket_id: u32) -> Result<u16, &'static str> {
-    let state = net_state_mut();
-    let sock = state
-        .udp_sockets
-        .iter()
-        .find(|s| s.id == socket_id)
-        .ok_or("no such UDP socket")?;
-    Ok(sock.local_port)
+    with_net_state(|state| {
+        let sock = state
+            .udp_sockets
+            .iter()
+            .find(|s| s.id == socket_id)
+            .ok_or("no such UDP socket")?;
+        Ok(sock.local_port)
+    })
 }
 
 // ============================================================
 // IPv6 / ICMPv6 / NDP
-// ============================================================
-//
-// IPv6 パケットの送受信、ICMPv6 Echo (ping6)、
-// NDP (Neighbor Discovery Protocol) の最小実装。
-//
-// ## プロトコル階層
-//
-// [Ethernet] → [IPv6] → [ICMPv6] → Echo Request/Reply, NDP
-//
-// ## QEMU SLIRP の IPv6 設定
-//
-// `-netdev user,id=net0,ipv6=on` で有効化すると:
-//   - ゲスト IPv6: fec0::15（IPv4 の 10.0.2.15 に対応）
-//   - ゲートウェイ: fec0::2
-//   - DNS: fec0::3
-//   - SLIRP が Router Advertisement を送信
-//   - SLIRP が Neighbor Solicitation でゲストの MAC を問い合わせる
-
-// ============================================================
-// ICMPv6 タイプ定数
 // ============================================================
 
 /// ICMPv6 Echo Request
@@ -1929,32 +1768,7 @@ const ICMPV6_NEIGHBOR_SOLICITATION: u8 = 135;
 /// ICMPv6 Neighbor Advertisement (NDP)
 const ICMPV6_NEIGHBOR_ADVERTISEMENT: u8 = 136;
 
-// ============================================================
-// IPv6 ヘッダー
-// ============================================================
-
 /// IPv6 ヘッダー (40 バイト固定)
-///
-/// IPv4 と異なり、IPv6 ヘッダーは固定長 40 バイト。
-/// 拡張ヘッダーは next_header フィールドでチェーンする。
-///
-/// ```text
-///  0                   1                   2                   3
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |Version| Traffic Class |           Flow Label                  |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Payload Length        |  Next Header  |   Hop Limit   |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                                                               |
-/// +                         Source Address                        +
-/// |                         (128 bits)                            |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                                                               |
-/// +                      Destination Address                      +
-/// |                         (128 bits)                            |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct Ipv6Header {
@@ -1962,9 +1776,9 @@ pub struct Ipv6Header {
     pub version_tc_fl: [u8; 4],
     /// ペイロード長（IPv6 ヘッダーを含まない）
     pub payload_length: [u8; 2],
-    /// 次のヘッダー（= IPv4 の protocol に相当。ICMPv6=58, TCP=6, UDP=17）
+    /// 次のヘッダー
     pub next_header: u8,
-    /// Hop Limit（= IPv4 の TTL に相当）
+    /// Hop Limit
     pub hop_limit: u8,
     /// 送信元 IPv6 アドレス (128 bits)
     pub src_ip: [u8; 16],
@@ -1972,19 +1786,7 @@ pub struct Ipv6Header {
     pub dst_ip: [u8; 16],
 }
 
-// ============================================================
-// ICMPv6 ヘッダー
-// ============================================================
-
 /// ICMPv6 ヘッダー (4 バイト共通部分)
-///
-/// ICMPv6 メッセージの先頭 4 バイトは全タイプ共通:
-/// - Type (1 byte)
-/// - Code (1 byte)
-/// - Checksum (2 bytes)
-///
-/// Echo Request/Reply の場合は、この後に Identifier (2B) + Sequence (2B) が続く。
-/// NDP の場合は、この後にタイプ固有のフィールドが続く。
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct Icmpv6Header {
@@ -1997,11 +1799,6 @@ pub struct Icmpv6Header {
 }
 
 /// IPv6 パケットを処理する
-///
-/// 宛先アドレスが以下のいずれかの場合に処理する:
-/// - MY_IPV6 (fec0::15): 自分宛ユニキャスト
-/// - ソリシテッドノードマルチキャスト (ff02::1:ffXX:XXXX): NDP 用
-/// - リンクローカル全ノードマルチキャスト (ff02::1): RA 等
 fn handle_ipv6(_eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 40 {
         return;
@@ -2009,17 +1806,10 @@ fn handle_ipv6(_eth_header: &EthernetHeader, payload: &[u8]) {
 
     let ipv6_header = unsafe { &*(payload.as_ptr() as *const Ipv6Header) };
 
-    // バージョンチェック（上位 4 ビットが 6 であること）
     if (ipv6_header.version_tc_fl[0] >> 4) != 6 {
         return;
     }
 
-    // 宛先アドレスの判定:
-    // 1. 自分宛ユニキャスト (MY_IPV6)
-    // 2. ソリシテッドノードマルチキャスト (ff02::1:ff00:0/104 + 下位 24bit)
-    //    → NDP Neighbor Solicitation の宛先
-    // 3. リンクローカル全ノードマルチキャスト (ff02::1)
-    //    → Router Advertisement の宛先
     let is_my_unicast = ipv6_header.dst_ip == MY_IPV6;
     let is_solicited_node_multicast = is_solicited_node_multicast_for(&ipv6_header.dst_ip, &MY_IPV6);
     let is_all_nodes_multicast = ipv6_header.dst_ip == [0xff, 0x02, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x01];
@@ -2041,29 +1831,15 @@ fn handle_ipv6(_eth_header: &EthernetHeader, payload: &[u8]) {
 }
 
 /// ソリシテッドノードマルチキャストアドレスの判定
-///
-/// ソリシテッドノードマルチキャストは ff02::1:ff00:0/104 に
-/// ターゲットアドレスの下位 24 ビットを付加した形式。
-/// NDP Neighbor Solicitation の宛先として使われる。
-///
-/// 例: MY_IPV6 = fec0::15 → ソリシテッドノード = ff02::1:ff00:0015
 fn is_solicited_node_multicast_for(multicast: &[u8; 16], target: &[u8; 16]) -> bool {
-    // ff02::1:ff00:0/104 のプレフィックス (13 バイト)
     let prefix = [0xff, 0x02, 0,0,0,0,0,0, 0,0,0, 0x01, 0xff];
     if multicast[..13] != prefix {
         return false;
     }
-    // 下位 3 バイトがターゲットアドレスの下位 3 バイトと一致
     multicast[13] == target[13] && multicast[14] == target[14] && multicast[15] == target[15]
 }
 
 /// ICMPv6 パケットを処理する
-///
-/// ICMPv6 メッセージタイプに応じてディスパッチする:
-/// - Echo Request (128) → Echo Reply を返す
-/// - Echo Reply (129) → ping6 の応答として保存
-/// - Router Advertisement (134) → ログのみ（アドレスは固定）
-/// - Neighbor Solicitation (135) → Neighbor Advertisement を返す
 fn handle_icmpv6(ipv6_header: &Ipv6Header, payload: &[u8]) {
     if payload.len() < 4 {
         return;
@@ -2078,16 +1854,15 @@ fn handle_icmpv6(ipv6_header: &Ipv6Header, payload: &[u8]) {
         }
         ICMPV6_ECHO_REPLY => {
             net_debug!("icmpv6: Echo Reply received");
-            // Echo Reply: ヘッダー (4B) + Identifier (2B) + Sequence (2B) + Data
             if payload.len() >= 8 {
                 let id = u16::from_be_bytes([payload[4], payload[5]]);
                 let seq = u16::from_be_bytes([payload[6], payload[7]]);
-                let state = net_state_mut();
-                state.icmpv6_echo_reply = Some((id, seq, ipv6_header.src_ip));
+                with_net_state(|state| {
+                    state.icmpv6_echo_reply = Some((id, seq, ipv6_header.src_ip));
+                });
             }
         }
         ICMPV6_ROUTER_ADVERTISEMENT => {
-            // Router Advertisement は受信するが、アドレスは固定なので処理不要
             net_debug!("icmpv6: Router Advertisement received (ignored)");
         }
         ICMPV6_NEIGHBOR_SOLICITATION => {
@@ -2104,140 +1879,86 @@ fn handle_icmpv6(ipv6_header: &Ipv6Header, payload: &[u8]) {
 }
 
 /// ICMPv6 Echo Reply を送信する
-///
-/// 受信した Echo Request に対して Echo Reply を返す。
-/// ICMPv6 の type を 129 (Echo Reply) に変更し、チェックサムを再計算する。
 fn send_icmpv6_echo_reply(request_ipv6: &Ipv6Header, icmpv6_data: &[u8]) {
     if icmpv6_data.len() < 8 {
         return;
     }
 
-    // Echo Reply ペイロード: ICMPv6 ヘッダー (type=129, code=0) + id + seq + data
     let mut reply_payload = Vec::with_capacity(icmpv6_data.len());
-    // Type=129 (Echo Reply), Code=0, Checksum=0 (後で計算)
     reply_payload.push(ICMPV6_ECHO_REPLY);
     reply_payload.push(0);
-    reply_payload.push(0); // checksum placeholder
     reply_payload.push(0);
-    // Identifier + Sequence + Data はそのままコピー
+    reply_payload.push(0);
     reply_payload.extend_from_slice(&icmpv6_data[4..]);
 
-    // ICMPv6 チェックサムを計算（IPv6 疑似ヘッダー含む）
-    let checksum = calculate_icmpv6_checksum(
-        &MY_IPV6,
-        &request_ipv6.src_ip,
-        &reply_payload,
-    );
+    let checksum = calculate_icmpv6_checksum(&MY_IPV6, &request_ipv6.src_ip, &reply_payload);
     reply_payload[2] = (checksum >> 8) as u8;
     reply_payload[3] = (checksum & 0xFF) as u8;
 
-    // IPv6 パケットとして送信
-    send_ipv6_packet(
-        &request_ipv6.src_ip,
-        IP_PROTO_ICMPV6,
-        &reply_payload,
-    );
+    send_ipv6_packet(&request_ipv6.src_ip, IP_PROTO_ICMPV6, &reply_payload);
 }
 
 /// NDP Neighbor Solicitation を処理する
-///
-/// ターゲットアドレスが MY_IPV6 と一致する場合、
-/// Neighbor Advertisement を返して自分の MAC アドレスを通知する。
-///
-/// Neighbor Solicitation パケット構造:
-///   ICMPv6 Header (4B): type=135, code=0, checksum
-///   Reserved (4B): 0
-///   Target Address (16B): 問い合わせ対象の IPv6 アドレス
-///   [Option: Source Link-Layer Address (8B): type=1, length=1, MAC]
 fn handle_ndp_neighbor_solicitation(_ipv6_header: &Ipv6Header, payload: &[u8]) {
-    // 最小サイズ: ICMPv6 Header(4) + Reserved(4) + Target(16) = 24 バイト
     if payload.len() < 24 {
         return;
     }
 
-    // ターゲットアドレスを取得（offset 8〜23）
     let mut target = [0u8; 16];
     target.copy_from_slice(&payload[8..24]);
 
-    // ターゲットが自分の IPv6 アドレスでなければ無視
     if target != MY_IPV6 {
         net_debug!("ndp: NS target is not MY_IPV6, ignoring");
         return;
     }
 
-    // Neighbor Advertisement を送信
     send_ndp_neighbor_advertisement(&target, &_ipv6_header.src_ip);
 }
 
 /// NDP Neighbor Advertisement を送信する
-///
-/// Neighbor Advertisement パケット構造:
-///   ICMPv6 Header (4B): type=136, code=0, checksum
-///   Flags + Reserved (4B): R=0, S=1, O=1 → 0x60000000
-///   Target Address (16B): 自分の IPv6 アドレス
-///   Option: Target Link-Layer Address (8B): type=2, length=1, MAC(6B)
 fn send_ndp_neighbor_advertisement(target: &[u8; 16], dst_ip: &[u8; 16]) {
-    let my_mac = net_state_mut().mac;
+    let my_mac = get_my_mac();
 
-    // NA ペイロードを構築
     let mut na_payload = Vec::with_capacity(32);
 
-    // ICMPv6 Header: type=136, code=0, checksum=0 (後で計算)
     na_payload.push(ICMPV6_NEIGHBOR_ADVERTISEMENT);
-    na_payload.push(0); // code
-    na_payload.push(0); // checksum placeholder
+    na_payload.push(0);
+    na_payload.push(0);
     na_payload.push(0);
 
-    // Flags: S=1 (Solicited), O=1 (Override) → bit 30 と bit 29
-    // 0x60000000 in big-endian
+    // Flags: S=1 (Solicited), O=1 (Override)
     na_payload.push(0x60);
     na_payload.push(0x00);
     na_payload.push(0x00);
     na_payload.push(0x00);
 
-    // Target Address (16B)
     na_payload.extend_from_slice(target);
 
     // Option: Target Link-Layer Address
-    // type=2 (Target Link-Layer Address), length=1 (8バイト単位)
-    na_payload.push(2);    // type
-    na_payload.push(1);    // length (1 * 8 = 8 bytes)
-    na_payload.extend_from_slice(&my_mac); // 6 bytes
+    na_payload.push(2);
+    na_payload.push(1);
+    na_payload.extend_from_slice(&my_mac);
 
-    // ICMPv6 チェックサムを計算
-    let checksum = calculate_icmpv6_checksum(
-        &MY_IPV6,
-        dst_ip,
-        &na_payload,
-    );
+    let checksum = calculate_icmpv6_checksum(&MY_IPV6, dst_ip, &na_payload);
     na_payload[2] = (checksum >> 8) as u8;
     na_payload[3] = (checksum & 0xFF) as u8;
 
-    // IPv6 パケットとして送信
     send_ipv6_packet(dst_ip, IP_PROTO_ICMPV6, &na_payload);
 }
 
 /// IPv6 パケットを送信する
-///
-/// Ethernet ヘッダー + IPv6 ヘッダー + ペイロードを構築して送信する。
-/// 宛先 MAC は簡易実装のためブロードキャストを使用。
 fn send_ipv6_packet(dst_ip: &[u8; 16], next_header: u8, payload: &[u8]) {
-    let my_mac = net_state_mut().mac;
-
-    // 宛先 MAC: 簡易実装のためブロードキャストを使用
-    // （本来は NDP で解決した MAC を使うべき）
+    let my_mac = get_my_mac();
     let dst_mac = BROADCAST_MAC;
 
-    // Ethernet ヘッダー
     let eth_header = EthernetHeader {
         dst_mac,
         src_mac: my_mac,
         ethertype: ETHERTYPE_IPV6.to_be_bytes(),
     };
 
-    // IPv6 ヘッダー
     let ipv6_header = Ipv6Header {
-        version_tc_fl: [0x60, 0x00, 0x00, 0x00], // Version=6, TC=0, Flow Label=0
+        version_tc_fl: [0x60, 0x00, 0x00, 0x00],
         payload_length: (payload.len() as u16).to_be_bytes(),
         next_header,
         hop_limit: 64,
@@ -2245,40 +1966,26 @@ fn send_ipv6_packet(dst_ip: &[u8; 16], next_header: u8, payload: &[u8]) {
         dst_ip: *dst_ip,
     };
 
-    // パケットを構築
     let mut packet = Vec::with_capacity(14 + 40 + payload.len());
 
-    // Ethernet ヘッダー (14B)
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
     });
 
-    // IPv6 ヘッダー (40B)
     packet.extend_from_slice(unsafe {
         core::slice::from_raw_parts(&ipv6_header as *const _ as *const u8, 40)
     });
 
-    // ペイロード
     packet.extend_from_slice(payload);
 
-    // 送信
-    if syscall::net_send_frame(&packet) < 0 {
+    if send_frame(&packet).is_err() {
         net_debug!("ipv6: failed to send packet");
     } else {
         net_debug!("ipv6: sent packet, next_header={}, len={}", next_header, payload.len());
     }
 }
 
-/// ICMPv6 チェックサムを計算する
-///
-/// ICMPv6 のチェックサムは IPv6 疑似ヘッダーを含めて計算する（RFC 4443）。
-/// IPv4 の ICMP と異なり、疑似ヘッダーの付加は必須。
-///
-/// 疑似ヘッダー構造:
-///   Source Address (16B)
-///   Destination Address (16B)
-///   Upper-Layer Packet Length (4B, big-endian)
-///   Zero (3B) + Next Header (1B = 58 for ICMPv6)
+/// ICMPv6 チェックサムを計算する（IPv6 疑似ヘッダー含む）
 fn calculate_icmpv6_checksum(
     src_ip: &[u8; 16],
     dst_ip: &[u8; 16],
@@ -2286,77 +1993,55 @@ fn calculate_icmpv6_checksum(
 ) -> u16 {
     let icmpv6_len = icmpv6_data.len();
 
-    // 疑似ヘッダー + ICMPv6 データ
     let mut data = Vec::with_capacity(40 + icmpv6_len);
 
-    // 疑似ヘッダー
-    data.extend_from_slice(src_ip);                              // Source Address (16B)
-    data.extend_from_slice(dst_ip);                              // Destination Address (16B)
-    data.extend_from_slice(&(icmpv6_len as u32).to_be_bytes());  // Upper-Layer Packet Length (4B)
-    data.push(0);                                                 // Zero
-    data.push(0);                                                 // Zero
-    data.push(0);                                                 // Zero
-    data.push(IP_PROTO_ICMPV6);                                  // Next Header (58)
+    data.extend_from_slice(src_ip);
+    data.extend_from_slice(dst_ip);
+    data.extend_from_slice(&(icmpv6_len as u32).to_be_bytes());
+    data.push(0);
+    data.push(0);
+    data.push(0);
+    data.push(IP_PROTO_ICMPV6);
 
-    // ICMPv6 データ
     data.extend_from_slice(icmpv6_data);
 
     calculate_checksum(&data)
 }
 
-/// ICMPv6 Echo Request を送信する（ping6 コマンド用）
-///
-/// 指定した IPv6 アドレスに ICMPv6 Echo Request を送信する。
-///
-/// # 引数
-/// - `dst_ip`: 宛先 IPv6 アドレス
-/// - `id`: Echo Request の Identifier
-/// - `seq`: Echo Request の Sequence Number
+/// ICMPv6 Echo Request を送信する（ping6 用）
 pub fn send_icmpv6_echo_request(dst_ip: &[u8; 16], id: u16, seq: u16) {
-    // ICMPv6 Echo Reply バッファをクリア
-    net_state_mut().icmpv6_echo_reply = None;
+    with_net_state(|state| {
+        state.icmpv6_echo_reply = None;
+    });
 
-    // Echo Request ペイロード: type(1) + code(1) + checksum(2) + id(2) + seq(2) + data
     let mut echo_payload = Vec::with_capacity(16);
-    echo_payload.push(ICMPV6_ECHO_REQUEST); // type=128
-    echo_payload.push(0);                    // code=0
-    echo_payload.push(0);                    // checksum placeholder
+    echo_payload.push(ICMPV6_ECHO_REQUEST);
     echo_payload.push(0);
-    echo_payload.extend_from_slice(&id.to_be_bytes());  // Identifier
-    echo_payload.extend_from_slice(&seq.to_be_bytes()); // Sequence Number
-    // 8 バイトのダミーデータ（ping の慣例）
+    echo_payload.push(0);
+    echo_payload.push(0);
+    echo_payload.extend_from_slice(&id.to_be_bytes());
+    echo_payload.extend_from_slice(&seq.to_be_bytes());
     echo_payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
 
-    // ICMPv6 チェックサムを計算
-    let checksum = calculate_icmpv6_checksum(
-        &MY_IPV6,
-        dst_ip,
-        &echo_payload,
-    );
+    let checksum = calculate_icmpv6_checksum(&MY_IPV6, dst_ip, &echo_payload);
     echo_payload[2] = (checksum >> 8) as u8;
     echo_payload[3] = (checksum & 0xFF) as u8;
 
-    // IPv6 パケットとして送信
     send_ipv6_packet(dst_ip, IP_PROTO_ICMPV6, &echo_payload);
 }
 
 /// ICMPv6 Echo Reply を待つ（タイムアウト付き）
-///
-/// # 引数
-/// - `timeout_ms`: タイムアウト（ミリ秒）
-///
-/// # 戻り値
-/// - `Ok((id, seq, src_ip))`: 受信した Echo Reply の情報
-/// - `Err("timeout")`: タイムアウト
 pub fn wait_icmpv6_echo_reply(timeout_ms: u64) -> Result<(u16, u16, [u8; 16]), &'static str> {
-    // 100ms ブロッキング受信なので、ループ回数 = timeout_ms / 100
     let loops = (timeout_ms as usize / 100).max(1);
 
     for _ in 0..loops {
         poll_and_handle_timeout(100);
 
-        let state = net_state_mut();
-        if let Some((id, seq, src_ip)) = state.icmpv6_echo_reply.take() {
+        let result = with_net_state(|state| {
+            state.icmpv6_echo_reply.take()
+        });
+
+        if let Some((id, seq, src_ip)) = result {
             return Ok((id, seq, src_ip));
         }
     }

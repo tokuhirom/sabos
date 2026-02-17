@@ -12,7 +12,6 @@ NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
 FAT32D_ELF = user/target/x86_64-unknown-none/debug/fat32d
-NETD_ELF = user/target/x86_64-unknown-none/debug/netd
 INIT_ELF = user/target/x86_64-unknown-none/debug/init
 SHELL_ELF = user/target/x86_64-unknown-none/debug/shell
 GUI_ELF = user/target/x86_64-unknown-none/debug/gui
@@ -28,6 +27,7 @@ TERM_ELF = user/target/x86_64-unknown-none/debug/term
 LIFE_ELF = user/target/x86_64-unknown-none/debug/life
 MANDELBROT_ELF = user/target/x86_64-unknown-none/debug/mandelbrot
 SNAKE_ELF = user/target/x86_64-unknown-none/debug/snake
+SELFTEST_NET_ELF = user/target/x86_64-unknown-none/debug/selftest_net
 HELLO_STD_ELF = user-std/target/x86_64-sabos/release/sabos-user-std
 ESP_DIR = esp/EFI/BOOT
 
@@ -64,9 +64,9 @@ QEMU_COMMON = qemu-system-x86_64 \
 	-drive format=raw,file=fat:rw:esp \
 	-drive if=virtio,format=raw,file=$(DISK_IMG) \
 	-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
-	-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
+	-netdev user,id=net0,ipv4=on,ipv6=on,hostfwd=tcp::12323-:2323 -device virtio-net-pci,netdev=net0 \
 	-audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
-	-virtfs local,id=fsdev0,path=./user/target,mount_tag=hostfs9p,security_model=none \
+	-virtfs local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none \
 	-device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 # スクリーンショットの出力先（デフォルト: docs/images/screenshot.png）
@@ -108,7 +108,7 @@ build-user-std: patch-sysroot
 		cd ..; \
 		echo "$$NEW_HASH" > $(SYSROOT_HASH_FILE); \
 	fi
-	cd user-std && RUSTUP_TOOLCHAIN=$(NIGHTLY_CHANNEL) RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1 cargo -Zjson-target-spec build --release
+	cd user-std && RUSTC_BOOTSTRAP_SYNTHETIC_TARGET=1 rustup run $(NIGHTLY_CHANNEL) cargo -Zjson-target-spec build --release
 
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
@@ -116,7 +116,7 @@ $(ESP_DIR):
 # FAT32 ディスクイメージを作成する。
 # 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
-# INIT.ELF, SHELL.ELF, NETD.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF, TERM.ELF, LIFE.ELF, MANDEL.ELF を書き込む。
+# INIT.ELF, SHELL.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF, TERM.ELF, LIFE.ELF, MANDEL.ELF を書き込む。
 # USER_ELF (旧シェル) は現在は disk.img に含めない。
 disk-img: build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
@@ -124,7 +124,6 @@ disk-img: build-user
 	echo "Hello from FAT32!" > /tmp/hello.txt
 	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
 	mcopy -i $(DISK_IMG) $(FAT32D_ELF) ::FAT32D.ELF
-	mcopy -i $(DISK_IMG) $(NETD_ELF) ::NETD.ELF
 	mcopy -i $(DISK_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -i $(DISK_IMG) $(SHELL_ELF) ::SHELL.ELF
 	mcopy -i $(DISK_IMG) $(GUI_ELF) ::GUI.ELF
@@ -160,7 +159,6 @@ $(HOSTFS_IMG):
 # 使い方: make hostfs-update → QEMU 再起動 → /host/SHELL.ELF 等でアクセス
 hostfs-update: build-user | $(HOSTFS_IMG)
 	mcopy -o -i $(HOSTFS_IMG) $(FAT32D_ELF) ::FAT32D.ELF
-	mcopy -o -i $(HOSTFS_IMG) $(NETD_ELF) ::NETD.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(SHELL_ELF) ::SHELL.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(GUI_ELF) ::GUI.ELF
@@ -198,9 +196,9 @@ run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 		-drive format=raw,file=fat:rw:esp \
 		-drive if=virtio,format=raw,file=$(DISK_IMG) \
 		-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
-		-netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
+		-netdev user,id=net0,ipv4=on,ipv6=on,hostfwd=tcp::12323-:2323 -device virtio-net-pci,netdev=net0 \
 		-audiodev id=snd0,driver=sdl -device AC97,audiodev=snd0 \
-		-virtfs local,id=fsdev0,path=./user/target,mount_tag=hostfs9p,security_model=none \
+		-virtfs local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
 		-serial stdio
 

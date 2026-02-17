@@ -32,6 +32,7 @@ mod qemu;
 mod shell;
 mod syscall;
 mod net_config;
+mod netstack;
 mod user_ptr;
 mod usermode;
 mod vfs;
@@ -266,6 +267,11 @@ fn main() -> Status {
     framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
     kprintln!();
 
+    // --- ネットワークスタックの初期化 ---
+    // virtio-net が存在する場合、カーネル内ネットワークスタックを初期化する。
+    // MAC アドレスを取得し、TCP/IP/UDP/DNS 等のプロトコル処理をカーネル内で行う。
+    netstack::init();
+
     // --- virtio-9p ドライバの初期化 ---
     // PCI バスから virtio-9p デバイスを探して初期化する。
     // QEMU の `-virtfs` で追加されたデバイスを検出する。
@@ -314,7 +320,7 @@ fn main() -> Status {
 
     // --- init プロセスの起動 ---
     // disk.img から INIT.ELF を読み込んで最初のユーザープロセスとして起動する。
-    // init は netd と shell を起動し、supervisor として常駐する。
+    // init はサービス群と shell を起動し、supervisor として常駐する。
     // init が終了した場合はカーネルシェルにフォールバックする。
     framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
     kprintln!("Loading init from disk...");

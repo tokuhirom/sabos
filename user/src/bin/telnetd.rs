@@ -11,8 +11,6 @@ extern crate alloc;
 
 #[path = "../allocator.rs"]
 mod allocator;
-#[path = "../json.rs"]
-mod json;
 #[path = "../net.rs"]
 mod net;
 #[path = "../print.rs"]
@@ -40,21 +38,16 @@ pub extern "C" fn _start() -> ! {
 
 fn telnetd_main() -> ! {
     let my_id = syscall::getpid();
-
-    // netd の初期化（見つかるまでリトライ）
-    loop {
-        if net::init_netd().is_ok() {
-            break;
-        }
-        syscall::sleep(500);
-    }
+    syscall::write_str("telnetd: starting\n");
 
     loop {
         // リッスン開始
         if net::raw_listen(TELNET_PORT).is_err() {
+            syscall::write_str("telnetd: listen failed, retrying\n");
             syscall::sleep(500);
             continue;
         }
+        syscall::write_str("telnetd: listening on port 2323\n");
 
         let mut sessions: Vec<Session> = Vec::new();
         let mut tcp_buf = [0u8; 256];
@@ -62,12 +55,17 @@ fn telnetd_main() -> ! {
 
         loop {
             // 新規接続の accept（raw API を使用: セッション管理のため conn_id を直接操作）
-            if let Ok(conn_id) = net::raw_accept(0) {
-                if let Some(session) = start_session(my_id, conn_id) {
-                    sessions.push(session);
-                } else {
-                    let _ = net::raw_close(conn_id);
+            // TELNET_PORT への接続のみ accept する（httpd 等の他ポートと混在しないように）
+            match net::raw_accept(0, TELNET_PORT) {
+                Ok(conn_id) => {
+                    syscall::write_str("telnetd: accepted connection!\n");
+                    if let Some(session) = start_session(my_id, conn_id) {
+                        sessions.push(session);
+                    } else {
+                        let _ = net::raw_close(conn_id);
+                    }
                 }
+                Err(_) => {}
             }
 
             // tsh からの出力を処理

@@ -499,6 +499,17 @@ pub fn ipc_recv(sender_out: &mut u64, buf: &mut [u8], timeout_ms: u64) -> Syscal
     unsafe { syscall4(SYS_IPC_RECV, sender_ptr, buf_ptr, buf_len, timeout_ms) as i64 }
 }
 
+/// 特定の送信元からの IPC メッセージのみを受信する
+///
+/// from_sender で指定したタスクからのメッセージだけを受け取る。
+/// 他の送信元からのメッセージはキューに残す。
+/// netd への IPC リクエスト・レスポンスのように、特定サービスとの通信に使用する。
+pub fn ipc_recv_from(from_sender: u64, buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
+    let buf_ptr = buf.as_mut_ptr() as u64;
+    let buf_len = buf.len() as u64;
+    unsafe { syscall4(SYS_IPC_RECV_FROM, from_sender, buf_ptr, buf_len, timeout_ms) as i64 }
+}
+
 /// IPC recv 待ちをキャンセルする
 ///
 /// # 引数
@@ -1620,4 +1631,145 @@ pub fn thread_exit(exit_code: i32) -> ! {
 /// - 負の値（エラー時）
 pub fn thread_join(thread_id: u64, timeout_ms: u64) -> SyscallResult {
     unsafe { syscall2(SYS_THREAD_JOIN, thread_id, timeout_ms) as i64 }
+}
+
+// =================================================================
+// ネットワーク（カーネル内ネットワークスタック直接呼び出し）
+// =================================================================
+
+/// DNS 名前解決
+///
+/// ドメイン名を IPv4 アドレスに解決する。
+/// カーネル内ネットワークスタックが DNS クエリを処理する。
+pub fn net_dns_lookup(domain: &str, result_ip: &mut [u8; 4]) -> SyscallResult {
+    unsafe {
+        syscall3(
+            SYS_NET_DNS_LOOKUP,
+            domain.as_ptr() as u64,
+            domain.len() as u64,
+            result_ip.as_mut_ptr() as u64,
+        ) as i64
+    }
+}
+
+/// TCP 接続の確立
+///
+/// 指定した IP アドレスとポートに TCP 接続する。
+/// 成功時は conn_id を返す。
+pub fn net_tcp_connect(ip: &[u8; 4], port: u16) -> SyscallResult {
+    unsafe {
+        syscall2(
+            SYS_NET_TCP_CONNECT,
+            ip.as_ptr() as u64,
+            port as u64,
+        ) as i64
+    }
+}
+
+/// TCP データ送信
+pub fn net_tcp_send(conn_id: u32, data: &[u8]) -> SyscallResult {
+    unsafe {
+        syscall3(
+            SYS_NET_TCP_SEND,
+            conn_id as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+        ) as i64
+    }
+}
+
+/// TCP データ受信
+///
+/// タイムアウト付き。0 はタイムアウト（データなし）。
+pub fn net_tcp_recv(conn_id: u32, buf: &mut [u8], timeout_ms: u64) -> SyscallResult {
+    unsafe {
+        syscall4(
+            SYS_NET_TCP_RECV,
+            conn_id as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            timeout_ms,
+        ) as i64
+    }
+}
+
+/// TCP 接続のクローズ
+pub fn net_tcp_close(conn_id: u32) -> SyscallResult {
+    unsafe { syscall1(SYS_NET_TCP_CLOSE, conn_id as u64) as i64 }
+}
+
+/// TCP リッスン開始
+pub fn net_tcp_listen(port: u16) -> SyscallResult {
+    unsafe { syscall1(SYS_NET_TCP_LISTEN, port as u64) as i64 }
+}
+
+/// TCP 接続の受け入れ
+///
+/// listen_port で指定したポートへの接続を accept する。
+/// 成功時は conn_id を返す。
+pub fn net_tcp_accept(timeout_ms: u64, listen_port: u16) -> SyscallResult {
+    unsafe {
+        syscall2(
+            SYS_NET_TCP_ACCEPT,
+            timeout_ms,
+            listen_port as u64,
+        ) as i64
+    }
+}
+
+/// UDP ソケットバインド
+///
+/// 成功時は socket_id | (local_port << 32) を返す。
+pub fn net_udp_bind(port: u16) -> SyscallResult {
+    unsafe { syscall1(SYS_NET_UDP_BIND, port as u64) as i64 }
+}
+
+/// UDP データ送信
+///
+/// 引数が多いため、構造体をスタック上に作ってポインタで渡す。
+pub fn net_udp_send_to(socket_id: u32, ip: &[u8; 4], port: u16, data: &[u8]) -> SyscallResult {
+    let args = sabos_syscall::UdpSendToArgs {
+        socket_id,
+        dst_ip: *ip,
+        dst_port: port,
+        _pad: 0,
+        data_ptr: data.as_ptr() as u64,
+        data_len: data.len() as u64,
+    };
+    unsafe { syscall1(SYS_NET_UDP_SEND_TO, &args as *const _ as u64) as i64 }
+}
+
+/// UDP データ受信
+///
+/// 成功時は受信バイト数を返し、src_info に送信元情報を書き込む。
+/// src_info: [ip0, ip1, ip2, ip3, port_lo, port_hi]
+pub fn net_udp_recv_from(socket_id: u32, buf: &mut [u8], timeout_ms: u64, src_info: &mut [u8; 6]) -> SyscallResult {
+    let args = sabos_syscall::UdpRecvFromArgs {
+        socket_id,
+        _pad: 0,
+        buf_ptr: buf.as_mut_ptr() as u64,
+        buf_len: buf.len() as u64,
+        timeout_ms,
+        src_info_ptr: src_info.as_mut_ptr() as u64,
+    };
+    unsafe { syscall1(SYS_NET_UDP_RECV_FROM, &args as *const _ as u64) as i64 }
+}
+
+/// UDP ソケットクローズ
+pub fn net_udp_close(socket_id: u32) -> SyscallResult {
+    unsafe { syscall1(SYS_NET_UDP_CLOSE, socket_id as u64) as i64 }
+}
+
+/// IPv6 ping
+///
+/// 成功時は src_ip に応答元 IPv6 アドレスを書き込む。
+pub fn net_ping6(dst_ip: &[u8; 16], timeout_ms: u32, src_ip: &mut [u8; 16]) -> SyscallResult {
+    unsafe {
+        syscall3(
+            SYS_NET_PING6,
+            dst_ip.as_ptr() as u64,
+            timeout_ms as u64,
+            src_ip.as_mut_ptr() as u64,
+        ) as i64
+    }
 }

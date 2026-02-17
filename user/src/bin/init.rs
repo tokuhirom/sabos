@@ -54,19 +54,12 @@ unsafe impl Sync for Service {}
 ///
 /// fat32d 登録後は、ランタイムのファイル操作（ls, cat 等）が fat32d 経由になる。
 ///
-/// - netd: ネットワークサービス（再起動有効）
 /// - gui: GUI サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
 /// - httpd: HTTP サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
 /// - fat32d: FAT32 ファイルシステムサービス（最後に起動）
-static SERVICES: [Service; 6] = [
-    Service {
-        name: "netd",
-        path: "/NETD.ELF",
-        restart: true,
-        task_id: AtomicU64::new(0),
-    },
+static SERVICES: [Service; 5] = [
     Service {
         name: "gui",
         path: "/GUI.ELF",
