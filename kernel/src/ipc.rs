@@ -106,7 +106,7 @@ pub fn send(sender: u64, dest: u64, data: Vec<u8>) -> Result<(), SyscallError> {
 
 /// メッセージを受信する（Sleep/Wake 方式）
 ///
-/// timeout_ms = 0 の場合は無期限で待つ。
+/// timeout_ms = 0 の場合は非ブロッキング（即座チェックして返却）。
 /// キャンセルされた場合は Cancelled エラーを返す。
 ///
 /// ## 実装パターン
@@ -116,6 +116,12 @@ pub fn send(sender: u64, dest: u64, data: Vec<u8>) -> Result<(), SyscallError> {
 /// 3. IPC_WAITERS に登録 → set_current_sleeping → ダブルチェック → yield
 /// 4. 起床後: キャンセルチェック → try_recv → なければループ先頭に戻る
 pub fn recv(task_id: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
+    // timeout_ms == 0 は非ブロッキング: 即座チェックして返却
+    // ポーリングループ（telnetd, tsh 等）で使われる
+    if timeout_ms == 0 {
+        return try_recv(task_id).ok_or(SyscallError::Timeout);
+    }
+
     // タイムアウト計算（ループ全体の期限）
     let deadline = calc_wake_at(timeout_ms);
 
@@ -203,6 +209,11 @@ fn try_recv_from(task_id: u64, from_sender: u64) -> Option<IpcMessage> {
 /// 受け取りたい場合。同じタスクに対して netd 等からのレスポンスが
 /// 同時に到着しても混入しない。
 pub fn recv_from(task_id: u64, from_sender: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
+    // timeout_ms == 0 は非ブロッキング
+    if timeout_ms == 0 {
+        return try_recv_from(task_id, from_sender).ok_or(SyscallError::Timeout);
+    }
+
     let deadline = calc_wake_at(timeout_ms);
 
     loop {
@@ -418,8 +429,9 @@ fn wake_if_waiting(dest: u64) {
 
 /// タイムアウトから wake_at（タイマーティック）を計算する
 ///
-/// timeout_ms = 0 → 無期限待ち（u64::MAX）
-/// timeout_ms > 0 → 現在 + ticks
+/// 注意: timeout_ms == 0 は呼び出し元（recv, recv_from）で非ブロッキング処理済み。
+/// この関数は timeout_ms > 0 の場合にのみ呼ばれる想定だが、
+/// 万一 0 が渡された場合は u64::MAX（無期限）として扱う。
 fn calc_wake_at(timeout_ms: u64) -> u64 {
     if timeout_ms == 0 {
         u64::MAX
@@ -478,8 +490,17 @@ pub fn send_typed<T: Copy + Send + 'static>(sender: u64, dest: u64, data: T) -> 
 
 /// 型安全 IPC: メッセージを受信する（Sleep/Wake 方式）
 ///
-/// timeout_ms = 0 の場合は無期限で待つ。
+/// timeout_ms = 0 の場合は非ブロッキング（即座チェック）。
 pub fn recv_typed<T: Copy + Send + 'static>(task_id: u64, timeout_ms: u64) -> Result<TypedIpcMessage<T>, SyscallError> {
+    // timeout_ms == 0 は非ブロッキング
+    if timeout_ms == 0 {
+        match try_recv_typed_once::<T>(task_id) {
+            Ok(Some(msg)) => return Ok(msg),
+            Ok(None) => return Err(SyscallError::Timeout),
+            Err(e) => return Err(e),
+        }
+    }
+
     // タイムアウト計算（ループ全体の期限）
     let deadline = calc_wake_at(timeout_ms);
 

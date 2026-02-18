@@ -1350,7 +1350,7 @@ fn sys_ipc_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
 ///   arg1 — 送信元タスクIDの書き込み先（ユーザー空間）
 ///   arg2 — 受信バッファのポインタ（ユーザー空間）
 ///   arg3 — 受信バッファの長さ
-///   arg4 — タイムアウト (ms). 0 は無期限
+///   arg4 — タイムアウト (ms). 0 は非ブロッキング（即座チェック）
 ///
 /// 戻り値:
 ///   読み取ったバイト数（成功時）
@@ -1384,7 +1384,7 @@ fn sys_ipc_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, Sysca
 ///   arg1 — フィルタリングする送信元タスクID
 ///   arg2 — 受信バッファのポインタ（ユーザー空間）
 ///   arg3 — 受信バッファの長さ
-///   arg4 — タイムアウト (ms). 0 は無期限
+///   arg4 — タイムアウト (ms). 0 は非ブロッキング（即座チェック）
 ///
 /// 戻り値:
 ///   読み取ったバイト数（成功時）
@@ -2609,6 +2609,10 @@ fn sys_net_get_mac(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
 ///
 /// 戻り値: 0（成功）、負（エラー）
 fn sys_net_dns_lookup(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する。
+    // syscall は割り込み無効状態で実行されるが、yield_now() / sleep が正しく動作するには
+    // タイマー割り込みが必要。
+    x86_64::instructions::interrupts::enable();
     let domain_slice = user_slice_from_args(arg1, arg2)?;
     let domain_bytes = domain_slice.as_slice();
     let domain = core::str::from_utf8(domain_bytes).map_err(|_| SyscallError::InvalidArgument)?;
@@ -2630,6 +2634,8 @@ fn sys_net_dns_lookup(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallErr
 ///
 /// 戻り値: conn_id（成功）、負（エラー）
 fn sys_net_tcp_connect(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let ip_slice = user_slice_from_args(arg1, 4)?;
     let ip_bytes = ip_slice.as_slice();
     let mut ip = [0u8; 4];
@@ -2667,6 +2673,8 @@ fn sys_net_tcp_send(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError
 ///
 /// 戻り値: 受信バイト数（成功）、0（タイムアウト）、負（エラー）
 fn sys_net_tcp_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let conn_id = arg1 as u32;
     let buf_len = usize::try_from(arg3).map_err(|_| SyscallError::InvalidArgument)?;
     let timeout_ms = arg4;
@@ -2693,6 +2701,8 @@ fn sys_net_tcp_recv(arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result<u64, S
 ///
 /// 戻り値: 0（成功）、負（エラー）
 fn sys_net_tcp_close(arg1: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let conn_id = arg1 as u32;
     crate::netstack::tcp_close(conn_id).map_err(|_| SyscallError::Other)?;
     Ok(0)
@@ -2718,6 +2728,8 @@ fn sys_net_tcp_listen(arg1: u64) -> Result<u64, SyscallError> {
 ///
 /// 戻り値: conn_id（成功）、負（エラー/タイムアウト）
 fn sys_net_tcp_accept(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let timeout_ms = arg1;
     let listen_port = arg2 as u16;
 
@@ -2786,6 +2798,8 @@ fn sys_net_udp_send_to(arg1: u64) -> Result<u64, SyscallError> {
 ///
 /// 戻り値: 受信バイト数（成功）、負（エラー）
 fn sys_net_udp_recv_from(arg1: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let args_size = core::mem::size_of::<sabos_syscall::UdpRecvFromArgs>();
     let args_slice = user_slice_from_args(arg1, args_size as u64)?;
     let args_bytes = args_slice.as_slice();
@@ -2850,6 +2864,8 @@ fn sys_net_udp_close(arg1: u64) -> Result<u64, SyscallError> {
 ///
 /// 戻り値: 0（成功）、負（エラー）
 fn sys_net_ping6(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError> {
+    // wait_net_condition で待ちに入るため、割り込みを有効化する
+    x86_64::instructions::interrupts::enable();
     let dst_slice = user_slice_from_args(arg1, 16)?;
     let dst_bytes = dst_slice.as_slice();
     let mut dst_ip = [0u8; 16];
