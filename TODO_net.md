@@ -74,13 +74,13 @@ QEMU SLIRP では動くが、実ネットワークでは正しく動作しない
 - [ ] ウィンドウサイズの動的管理（固定 65535 からの脱却）
 - [ ] 輻輳制御（スロースタート + 輻輳回避）
 
-## Phase 6: DHCP クライアント
+## Phase 6: DHCP クライアント ✅
 
 IP アドレスの自動取得。ハードコードされた QEMU SLIRP 定数からの脱却。
 
-- [ ] DHCP Discover / Offer / Request / Ack の実装
-- [ ] 取得した IP / ゲートウェイ / DNS サーバーを netstack に設定
-- [ ] `net_config.rs` のハードコード定数を動的設定に置き換え
+- [x] DHCP Discover / Offer / Request / Ack の実装
+- [x] 取得した IP / ゲートウェイ / DNS サーバーを netstack に設定
+- [x] `net_config.rs` のハードコード定数を動的設定に置き換え
 - [ ] リース更新タイマー
 
 ## Phase 7: IPv6 Phase 2（TCP/UDP over IPv6）

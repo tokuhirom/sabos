@@ -51,7 +51,6 @@ pub fn get_subnet_mask() -> [u8; 4] {
 }
 
 /// ネットワーク設定を一括更新する（DHCP 取得時に呼ばれる）
-#[allow(dead_code)]
 pub fn set_config(
     my_ip: [u8; 4],
     gateway_ip: [u8; 4],

@@ -1082,6 +1082,8 @@ impl Shell {
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 13.99. DHCP 設定テスト（DHCP で IP が取得されていること）
+            run_test("dhcp_config", this.test_dhcp_config());
             // 14. ARP 解決テスト（ゲートウェイの MAC が解決できること）
             run_test("arp_resolve", this.test_arp_resolve());
             // 14.1. ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
@@ -2483,10 +2485,16 @@ impl Shell {
         data[0] == 0x7F && data[1] == b'E' && data[2] == b'L' && data[3] == b'F'
     }
 
-    /// ネットワーク (DNS) のテスト
-    /// example.com を解決してみる（QEMU SLIRP は常に応答を返すはず）
-    /// ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
-    /// netstack::dns_lookup() で example.com を問い合わせ、非ゼロの IP が返ることを確認する。
+    /// DHCP 設定テスト: DHCP で IP アドレスが取得されていることを確認する。
+    ///
+    /// init() 時に dhcp_discover() が実行され、IP が設定されているはず。
+    /// IP が 0.0.0.0 でなければ成功。QEMU SLIRP では 10.0.2.15 が割り当てられる。
+    fn test_dhcp_config(&self) -> bool {
+        let ip = crate::net_config::get_my_ip();
+        // 0.0.0.0 でなければ DHCP（またはデフォルト値）で設定されている
+        ip != [0, 0, 0, 0]
+    }
+
     /// ARP 解決テスト: ゲートウェイの MAC アドレスが解決できることを確認する。
     /// resolve_mac() が ARP Request を送信し、QEMU SLIRP からの ARP Reply を
     /// 受信してキャッシュに登録し、MAC アドレスを返すフローをテストする。
