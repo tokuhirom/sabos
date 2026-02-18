@@ -1966,6 +1966,11 @@ pub fn spawn_thread(entry_point: u64, user_stack_top: u64, arg: u64) -> Result<u
     // borrow checker 対策: push 前に必要な値を取り出す
     let parent_task_id = sched.tasks[current].id;
     let parent_env_vars = sched.tasks[current].env_vars.clone();
+    // スレッドは親タスクの stdin/stdout リダイレクトを継承する。
+    // これにより spawn_redirected で起動したプロセス内のスレッドも
+    // パイプ経由で出力をキャプチャできる。
+    let parent_stdin = sched.tasks[current].stdin_handle;
+    let parent_stdout = sched.tasks[current].stdout_handle;
 
     sched.tasks.push(Task {
         id,
@@ -1983,8 +1988,8 @@ pub fn spawn_thread(entry_point: u64, user_stack_top: u64, arg: u64) -> Result<u
         process_leader_id: Some(leader_id),  // スレッドグループのリーダー
         exit_saved_rsp: 0,
         exit_saved_rbp: 0,
-        stdin_handle: None,
-        stdout_handle: None,
+        stdin_handle: parent_stdin,
+        stdout_handle: parent_stdout,
     });
 
     // カーネルスタックの所有権をリーダープロセスに移管する。

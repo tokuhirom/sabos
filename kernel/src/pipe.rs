@@ -40,8 +40,10 @@ pub enum PipeError {
 struct PipeBuffer {
     /// データバッファ（FIFO キュー）
     buf: VecDeque<u8>,
-    /// 書き込み端が閉じられたか
-    writer_closed: bool,
+    /// 書き込み端の参照カウント（0 になったら writer_closed と同義）
+    /// ハンドル複製（duplicate_handle）で同じパイプの write 端が複数存在しうる。
+    /// 例: tsh の run コマンドでは親と子が同じパイプの write 端を持つ。
+    writer_count: usize,
     /// 読み取り端が閉じられたか
     reader_closed: bool,
 }
@@ -62,7 +64,7 @@ pub fn create() -> usize {
 
     let pipe = PipeBuffer {
         buf: VecDeque::new(),
-        writer_closed: false,
+        writer_count: 1,
         reader_closed: false,
     };
 
@@ -127,8 +129,8 @@ pub fn read(pipe_id: usize, buf: &mut [u8]) -> Result<usize, PipeError> {
         .ok_or(PipeError::InvalidPipe)?;
 
     if pipe.buf.is_empty() {
-        if pipe.writer_closed {
-            // writer が閉じていてデータもない → EOF
+        if pipe.writer_count == 0 {
+            // 全 writer が閉じていてデータもない → EOF
             return Ok(0);
         } else {
             // writer はまだ生きているがデータがない → WouldBlock
@@ -145,18 +147,28 @@ pub fn read(pipe_id: usize, buf: &mut [u8]) -> Result<usize, PipeError> {
     Ok(copy_len)
 }
 
-/// 書き込み端を閉じる
+/// 書き込み端を閉じる（参照カウントをデクリメント）
 ///
-/// writer_closed = true にする。
-/// 両端が閉じられていればエントリを解放する。
+/// writer_count が 0 になり、かつ reader_closed なら エントリを解放する。
 pub fn close_writer(pipe_id: usize) {
     let mut table = PIPE_TABLE.lock();
     if let Some(Some(pipe)) = table.get_mut(pipe_id) {
-        pipe.writer_closed = true;
+        pipe.writer_count = pipe.writer_count.saturating_sub(1);
         // 両端が閉じられたらエントリを解放
-        if pipe.reader_closed {
+        if pipe.writer_count == 0 && pipe.reader_closed {
             table[pipe_id] = None;
         }
+    }
+}
+
+/// 書き込み端の参照カウントをインクリメントする
+///
+/// ハンドル複製（duplicate_handle）で同じパイプの PipeWrite ハンドルを
+/// 追加作成する際に呼ぶ。
+pub fn add_writer(pipe_id: usize) {
+    let mut table = PIPE_TABLE.lock();
+    if let Some(Some(pipe)) = table.get_mut(pipe_id) {
+        pipe.writer_count += 1;
     }
 }
 
@@ -169,7 +181,7 @@ pub fn close_reader(pipe_id: usize) {
     if let Some(Some(pipe)) = table.get_mut(pipe_id) {
         pipe.reader_closed = true;
         // 両端が閉じられたらエントリを解放
-        if pipe.writer_closed {
+        if pipe.writer_count == 0 {
             table[pipe_id] = None;
         }
     }

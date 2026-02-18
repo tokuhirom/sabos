@@ -541,13 +541,26 @@ fn sys_spawn_redirected(arg1: u64) -> Result<u64, SyscallError> {
         crate::handle::check_rights(h, crate::handle::HANDLE_RIGHT_WRITE)?;
     }
 
+    // 子プロセス用にハンドルを複製する。
+    // 親と子が同じハンドルテーブルエントリを共有すると、
+    // 一方が close したときにもう一方も無効になってしまう。
+    // パイプの場合は writer の参照カウントも正しくインクリメントされる。
+    let child_stdin = match stdin_handle {
+        Some(ref h) => Some(crate::handle::duplicate_handle(h)?),
+        None => None,
+    };
+    let child_stdout = match stdout_handle {
+        Some(ref h) => Some(crate::handle::duplicate_handle(h)?),
+        None => None,
+    };
+
     // スケジューラにユーザープロセスとして登録（カーネルのページテーブルで実行）
     let (current_cr3, current_flags) = Cr3::read();
     unsafe {
         crate::paging::switch_to_kernel_page_table();
     }
     let task_id = match crate::scheduler::spawn_user_redirected(
-        &process_name, &elf_data, &args_vec, stdin_handle, stdout_handle,
+        &process_name, &elf_data, &args_vec, child_stdin, child_stdout,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -854,8 +867,20 @@ fn sys_handle_read(arg1: u64, arg2: u64, arg3: u64) -> Result<u64, SyscallError>
     let buf_slice = user_slice_from_args(arg2, arg3)?;
     let buf = buf_slice.as_mut_slice();
 
-    let n = crate::handle::read(&handle, buf)?;
-    Ok(n as u64)
+    // パイプの場合は WouldBlock で yield + retry してブロッキング読み取りにする。
+    // パイプの writer がまだ生きているがデータがない状態では WouldBlock が返る。
+    // ファイルの場合は即座に結果が返る（WouldBlock にはならない）。
+    x86_64::instructions::interrupts::enable();
+    loop {
+        match crate::handle::read(&handle, buf) {
+            Ok(n) => return Ok(n as u64),
+            Err(SyscallError::WouldBlock) => {
+                // パイプにデータがまだない → yield して再試行
+                crate::scheduler::yield_now();
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// SYS_HANDLE_WRITE: Handle に書き込む

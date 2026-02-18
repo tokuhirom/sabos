@@ -357,14 +357,13 @@ impl Command {
             if needs_stdin_pipe {
                 let (read_end, write_end) = crate::sys::pipe::pipe()?;
                 // 子には read_end を渡し、親は write_end を保持する
-                // read_end の handle_id/token を取得してから drop せずに渡す
-                // ※ read_end は子に渡すので、ここでは handle 情報だけ取得して
-                //   drop を手動で管理する必要がある
+                // read_end の handle_id/token を取得する。
+                // sys_spawn_redirected がハンドルを複製するため、
+                // 親の read_end は通常通り drop して close する。
                 let child_id = read_end.handle_id();
                 let child_token = read_end.handle_token();
-                // read_end は子プロセスに渡したので、親では close しない
-                // （カーネルが子プロセスの stdin として管理する）
-                core::mem::forget(read_end);
+                // read_end はスコープ終了で drop → close される。
+                // 子プロセスは複製されたハンドルを使うので問題ない。
                 (child_id, child_token, Some(write_end))
             } else {
                 (u64::MAX, 0u64, None)
@@ -375,10 +374,12 @@ impl Command {
             if needs_stdout_pipe {
                 let (read_end, write_end) = crate::sys::pipe::pipe()?;
                 // 子には write_end を渡し、親は read_end を保持する
+                // sys_spawn_redirected がハンドルを複製するため、
+                // 親の write_end は通常通り drop して close する。
                 let child_id = write_end.handle_id();
                 let child_token = write_end.handle_token();
-                // write_end は子プロセスに渡したので、親では close しない
-                core::mem::forget(write_end);
+                // write_end はスコープ終了で drop → close される。
+                // 子プロセスは複製されたハンドルを使うので問題ない。
                 (child_id, child_token, Some(read_end))
             } else {
                 (u64::MAX, 0u64, None)

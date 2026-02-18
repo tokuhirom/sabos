@@ -236,18 +236,28 @@ pub fn duplicate_handle(handle: &Handle) -> Result<Handle, SyscallError> {
     let entry = get_entry(&table, handle)?;
 
     let new_token = next_token();
+    let kind = entry.kind;
+    let pipe_id = entry.pipe_id;
     let new_entry = HandleEntry {
         token: new_token,
         rights: entry.rights,
-        kind: entry.kind,
+        kind,
         path: entry.path.clone(),
         data: entry.data.clone(),
         pos: 0,     // ポジションは先頭にリセット
         dirty: false,
-        pipe_id: entry.pipe_id,
+        pipe_id,
     };
 
     drop(table); // ロックを解放してから insert_entry を呼ぶ
+
+    // パイプの書き込み端を複製する場合は参照カウントをインクリメント
+    if kind == HandleKind::PipeWrite {
+        if let Some(pid) = pipe_id {
+            crate::pipe::add_writer(pid);
+        }
+    }
+
     Ok(insert_entry(new_entry, new_token))
 }
 
