@@ -1071,6 +1071,8 @@ impl Shell {
             run_test("fat32d_service", this.test_fat32d_service());
             // 17. telnetd サービスの起動確認
             run_test("telnetd_service", this.test_telnetd_service());
+            // 17.3. httpd サービスの起動確認（net_poller で TCP accept 競合解消済み）
+            run_test("httpd_service", this.test_httpd_service());
             // 17.5. ルートディレクトリ一覧が取得できることを確認
             run_test("vfs_dirlist", this.test_vfs_dirlist());
         };
@@ -2730,9 +2732,8 @@ impl Shell {
     /// httpd サービスが起動しているかを確認する
     ///
     /// httpd と telnetd が同時に listen できることを検証する。
-    /// 現在は TCP accept 競合問題のため httpd はデフォルト無効。
-    /// TODO: TCP accept 競合を解消後、selftest に復帰させる（TODO_net.md Phase 1）
-    #[allow(dead_code)]
+    /// net_poller の導入により TCP accept 競合が解消されたため、
+    /// httpd をデフォルト起動に復帰し、selftest で確認する。
     fn test_httpd_service(&self) -> bool {
         crate::scheduler::find_task_id_by_name("HTTPD.ELF").is_some()
     }

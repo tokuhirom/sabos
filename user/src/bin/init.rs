@@ -55,17 +55,23 @@ unsafe impl Sync for Service {}
 /// fat32d 登録後は、ランタイムのファイル操作（ls, cat 等）が fat32d 経由になる。
 ///
 /// - gui: GUI サービス（再起動有効）
+/// - httpd: HTTP サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
 /// - fat32d: FAT32 ファイルシステムサービス（最後に起動）
 ///
-/// httpd はデフォルトでは起動しない。telnetd と TCP accept を食い合う問題があるため、
-/// 必要な場合は shell から `spawn /HTTPD.ELF` で手動起動する。
-/// TODO: poll_and_handle_timeout の改善で httpd を復帰させる（TODO_net.md Phase 1）
-static SERVICES: [Service; 4] = [
+/// net_poller の導入により、httpd と telnetd が同時に tcp_accept を呼んでも
+/// パケットを取り合う問題が解消されたため、httpd をデフォルト起動に復帰。
+static SERVICES: [Service; 5] = [
     Service {
         name: "gui",
         path: "/GUI.ELF",
+        restart: true,
+        task_id: AtomicU64::new(0),
+    },
+    Service {
+        name: "httpd",
+        path: "/HTTPD.ELF",
         restart: true,
         task_id: AtomicU64::new(0),
     },

@@ -272,6 +272,13 @@ fn main() -> Status {
     // MAC アドレスを取得し、TCP/IP/UDP/DNS 等のプロトコル処理をカーネル内で行う。
     netstack::init();
 
+    // --- net_poller タスクの起動 ---
+    // パケット受信・処理を専用カーネルタスクに集約する。
+    // 各 syscall（tcp_accept, tcp_recv 等）は個別にパケット受信せず、
+    // net_poller がパケットを処理した後に waiter を起床させる仕組み。
+    // これにより httpd と telnetd が同時に tcp_accept を呼んでも競合しない。
+    scheduler::spawn("net_poller", netstack::net_poller_task);
+
     // --- virtio-9p ドライバの初期化 ---
     // PCI バスから virtio-9p デバイスを探して初期化する。
     // QEMU の `-virtfs` で追加されたデバイスを検出する。

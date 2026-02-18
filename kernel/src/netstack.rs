@@ -19,7 +19,7 @@
 // ## Mutex デッドロック対策
 //
 // NET_STATE と VIRTIO_NET は異なる Mutex。
-// poll_and_handle_timeout(): VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順。
+// net_poller_task(): VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順。
 // handle_packet() 内の send_arp_reply() 等: NET_STATE から MAC 取得→ロック解放→VIRTIO_NET でフレーム送信。
 // MAC アドレスは初期化時に MY_MAC に保持し、NET_STATE のロック不要。
 
@@ -102,6 +102,10 @@ struct NetState {
     udp_next_port: u16,
     /// ICMPv6 Echo Reply を受信したときに保存する (id, seq, src_ip)
     icmpv6_echo_reply: Option<(u16, u16, [u8; 16])>,
+    /// ネットワークイベントを待っているタスク ID のリスト。
+    /// net_poller がパケットを処理した後に全 waiter を起床させる。
+    /// これにより tcp_accept 等が個別にパケット受信する必要がなくなる。
+    net_waiters: Vec<u64>,
 }
 
 /// グローバルなネットワーク状態（spin::Mutex で保護）
@@ -125,6 +129,7 @@ where
             udp_sockets: Vec::new(),
             udp_next_port: 49152,
             icmpv6_echo_reply: None,
+            net_waiters: Vec::new(),
         });
     }
     f(guard.as_mut().unwrap())
@@ -824,67 +829,132 @@ fn calculate_udp_checksum(
     if checksum == 0 { 0xFFFF } else { checksum }
 }
 
-/// 受信パケットをポーリングして処理する（タイムアウト付き）
+// ============================================================
+// net_poller: パケット処理を集約するカーネルタスク
+// ============================================================
+//
+// 従来は各 syscall（tcp_accept, tcp_recv 等）が個別に poll_and_handle_timeout() を
+// 呼んでパケット受信・処理を行っていた。この設計だと、httpd と telnetd が同時に
+// tcp_accept を呼ぶとパケットを取り合い、一方が接続を受け取れなくなる問題があった。
+//
+// net_poller はパケット受信・処理を専用カーネルタスクに集約し、
+// 各 syscall は wait_net_condition() で条件成立を待つだけにする。
+// net_poller がパケットを処理したら全 waiter を起床させ、
+// 各 waiter は自分の条件をチェックする。
+
+/// 現在のタスクをネットワーク waiter として登録する
+fn register_net_waiter() {
+    let task_id = crate::scheduler::current_task_id();
+    with_net_state(|state| {
+        if !state.net_waiters.contains(&task_id) {
+            state.net_waiters.push(task_id);
+        }
+    });
+}
+
+/// 現在のタスクをネットワーク waiter から削除する
+fn unregister_net_waiter() {
+    let task_id = crate::scheduler::current_task_id();
+    with_net_state(|state| {
+        state.net_waiters.retain(|&id| id != task_id);
+    });
+}
+
+/// 全ネットワーク waiter を起床させる
 ///
-/// VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順でデッドロックを防止。
-/// timeout_ms > 0 の場合、最初のフレームが到着するまで enable_and_hlt でスリープ。
+/// NET_STATE のロック内で waiter リストをコピーし、ロック解放後に wake_task を呼ぶ。
+/// これにより NET_STATE と SCHEDULER のロック順序の問題を回避する。
+fn wake_all_net_waiters() {
+    let waiters: Vec<u64> = with_net_state(|state| {
+        state.net_waiters.clone()
+    });
+    for task_id in waiters {
+        crate::scheduler::wake_task(task_id);
+    }
+}
+
+/// ネットワーク条件の成立を待つ汎用関数
 ///
-/// ## 複数プロセス対応
+/// net_poller がパケットを処理して waiter を起床させるまでスリープし、
+/// 起床後に check_fn で条件をチェックする。条件が成立したら結果を返す。
+/// タイムアウトに達したら None を返す。
 ///
-/// フレーム処理後に yield_now() を呼んで他タスクに CPU を譲る。
-/// これにより httpd と telnetd が同時に tcp_accept を呼んでも、
-/// 各タスクが公平に自分のポートの pending キューを確認できる。
-///
-/// enable_and_hlt() は QEMU SLIRP がネットワーク I/O を処理するために必要
-/// （CPU がビジーループしていると SLIRP のイベントループが進まない）。
-pub fn poll_and_handle_timeout(timeout_ms: u64) {
-    // まず即座に受信を試みる
-    if let Some(frame) = recv_frame_nonblocking() {
-        handle_packet(&frame);
-        // 残りのフレームを drain
-        drain_frames();
-        return;
+/// ## 動作フロー
+/// 1. 即座にチェック（既に条件が成立していれば即座に返す）
+/// 2. waiter 登録
+/// 3. sleep/wake ループ: 55ms ごとに自動起床 + net_poller からの wake で即起床
+/// 4. タイムアウト or 条件成立で waiter 解除して返す
+fn wait_net_condition<T, F>(timeout_ms: u64, check_fn: F) -> Option<T>
+where
+    F: Fn() -> Option<T>,
+{
+    // 即座チェック
+    if let Some(result) = check_fn() {
+        return Some(result);
     }
 
     if timeout_ms == 0 {
-        return;
+        return None;
     }
 
-    // タイムアウト付きの待機
+    register_net_waiter();
+
     let start_tick = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
 
     loop {
-        if let Some(frame) = recv_frame_nonblocking() {
-            handle_packet(&frame);
-            // 残りのフレームを drain
-            drain_frames();
-            return;
+        // 1 ティック（約 55ms）後に自動起床するようスリープ設定。
+        // net_poller が wake_task を呼べばそれより早く起きる。
+        let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+        crate::scheduler::set_current_sleeping(now + 1);
+        crate::scheduler::yield_now();
+
+        // 起床後に条件チェック
+        if let Some(result) = check_fn() {
+            unregister_net_waiter();
+            return Some(result);
         }
 
+        // タイムアウトチェック
         let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
         let elapsed_ticks = now.saturating_sub(start_tick);
         let elapsed_ms = elapsed_ticks * 55;
         if elapsed_ms >= timeout_ms {
-            return;
+            unregister_net_waiter();
+            return None;
         }
-
-        // QEMU TCG モードでは、ゲスト CPU がビジーループしていると
-        // SLIRP のネットワーク I/O が処理されない。
-        // ISR ステータスの読み取りで QEMU のイベントループをキックし、
-        // enable_and_hlt() で CPU を一時停止して QEMU に処理時間を与える。
-        kick_virtio_net();
-        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
 
-/// 受信キューに残っているフレームをすべて処理する
-fn drain_frames() {
+/// ネットワークパケットを受信・処理する専用カーネルタスク
+///
+/// 無限ループでパケットを受信し、handle_packet() で処理する。
+/// パケット処理後は全 waiter を起床させて条件チェックを促す。
+/// パケットがないときは enable_and_hlt() で CPU を省電力モードにする
+/// （QEMU SLIRP のイベントループ処理にも必要）。
+pub fn net_poller_task() {
+    net_debug!("net_poller: started");
     loop {
-        if let Some(frame) = recv_frame_nonblocking() {
+        let mut received = false;
+
+        // 受信キューのフレームをすべて処理する
+        while let Some(frame) = recv_frame_nonblocking() {
             handle_packet(&frame);
-        } else {
-            break;
+            received = true;
         }
+
+        // パケットを処理した場合は全 waiter を起床させる
+        if received {
+            wake_all_net_waiters();
+        }
+
+        // QEMU SLIRP のイベントループをキックする
+        kick_virtio_net();
+
+        // CPU を一時停止して割り込みを待つ。
+        // QEMU TCG モードでは、CPU がビジーループしていると
+        // SLIRP のネットワーク I/O が処理されないため、
+        // enable_and_hlt() で QEMU に処理時間を与える。
+        x86_64::instructions::interrupts::enable_and_hlt();
     }
 }
 
@@ -1022,11 +1092,9 @@ pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
             return send_result.map(|_| [0u8; 4]);
         }
 
-        // レスポンスを待つ（最大 5 秒）
-        for _i in 0..50 {
-            poll_and_handle_timeout(100);
-
-            let result = with_net_state(|state| {
+        // net_poller がパケットを処理するのを待ち、DNS レスポンスをチェックする
+        let result = wait_net_condition(5000, || {
+            with_net_state(|state| {
                 if let Some((port, ref data)) = state.udp_response {
                     if port == src_port && data.len() >= 12 {
                         let response_id = u16::from_be_bytes([data[0], data[1]]);
@@ -1036,11 +1104,11 @@ pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
                     }
                 }
                 None
-            });
+            })
+        });
 
-            if let Some(result) = result {
-                return result;
-            }
+        if let Some(result) = result {
+            return result;
         }
     }
 
@@ -1461,11 +1529,9 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
     net_debug!("tcp: sending SYN");
     send_tcp_packet_internal(dst_ip, dst_port, local_port, initial_seq, 0, TCP_FLAG_SYN, &[])?;
 
-    // TCP 接続確立を最大 5 秒待つ
-    for _ in 0..50 {
-        poll_and_handle_timeout(100);
-
-        let result = with_net_state(|state| {
+    // net_poller がパケットを処理するのを待ち、接続状態をチェックする
+    let result = wait_net_condition(5000, || {
+        with_net_state(|state| {
             if let Some(idx) = find_conn_index_by_id(state, conn_id) {
                 let c = &state.tcp_connections[idx];
                 if c.state == TcpState::Established {
@@ -1476,13 +1542,18 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
                 }
             }
             None
-        });
+        })
+    });
 
-        match result {
-            Some(Ok(id)) => return Ok(id),
-            Some(Err(_)) => break,
-            None => {}
+    match result {
+        Some(Ok(id)) => return Ok(id),
+        Some(Err(e)) => {
+            with_net_state(|state| {
+                let _ = remove_conn_by_id(state, conn_id);
+            });
+            return Err(e);
         }
+        None => {}
     }
 
     with_net_state(|state| {
@@ -1502,17 +1573,16 @@ pub fn tcp_listen(port: u16) -> Result<(), &'static str> {
 }
 
 /// TCP の accept を待つ（ポート指定）
+///
+/// net_poller がパケットを処理して pending_accept にエントリを追加するのを待つ。
+/// timeout_ms == 0 の場合は短いデフォルトタイムアウト（100ms）を使用する。
+/// これにより net_poller がパケットを処理する時間を確保する。
 pub fn tcp_accept(timeout_ms: u64, listen_port: u16) -> Result<u32, &'static str> {
-    let loops = if timeout_ms == 0 {
-        1
-    } else {
-        (timeout_ms as usize / 100).max(1)
-    };
+    // timeout_ms == 0 は「短いポーリング」の意味（旧 poll_and_handle_timeout(100) 相当）
+    let effective_timeout = if timeout_ms == 0 { 100 } else { timeout_ms };
 
-    for _ in 0..loops {
-        poll_and_handle_timeout(100);
-
-        let result = with_net_state(|state| {
+    let check = || {
+        with_net_state(|state| {
             if let Some(pos) = state.tcp_pending_accept.iter().position(|(_, port)| *port == listen_port) {
                 let (id, _) = state.tcp_pending_accept.remove(pos).unwrap();
                 net_debug!("tcp_accept: found conn_id={} for port {}", id, listen_port);
@@ -1520,13 +1590,13 @@ pub fn tcp_accept(timeout_ms: u64, listen_port: u16) -> Result<u32, &'static str
             } else {
                 None
             }
-        });
+        })
+    };
 
-        if let Some(id) = result {
-            return Ok(id);
-        }
+    match wait_net_condition(effective_timeout, check) {
+        Some(id) => Ok(id),
+        None => Err("timeout"),
     }
-    Err("timeout")
 }
 
 /// TCP でデータを送信する
@@ -1550,17 +1620,15 @@ pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
 }
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
+///
+/// net_poller がパケットを処理して recv_buffer にデータを追加するのを待つ。
+/// timeout_ms == 0 の場合はデフォルトタイムアウト（5000ms）を使用する。
 pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> {
-    let loops = if timeout_ms == 0 {
-        50
-    } else {
-        (timeout_ms as usize / 100).max(1)
-    };
+    // timeout_ms == 0 は「デフォルトタイムアウト」の意味（旧コードでは 50 ループ × 100ms = 5000ms）
+    let effective_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms };
 
-    for _ in 0..loops {
-        poll_and_handle_timeout(100);
-
-        let result = with_net_state(|state| {
+    let check = || {
+        with_net_state(|state| {
             if let Some(idx) = find_conn_index_by_id(state, conn_id) {
                 let c = &mut state.tcp_connections[idx];
                 if !c.recv_buffer.is_empty() {
@@ -1568,26 +1636,20 @@ pub fn tcp_recv(conn_id: u32, timeout_ms: u64) -> Result<Vec<u8>, &'static str> 
                     return Some(Ok(data));
                 }
                 if c.state == TcpState::CloseWait || c.state == TcpState::Closed {
-                    if !c.recv_buffer.is_empty() {
-                        let data = core::mem::take(&mut c.recv_buffer);
-                        return Some(Ok(data));
-                    }
                     return Some(Err("connection closed"));
                 }
                 None
             } else {
                 Some(Err("no connection"))
             }
-        });
+        })
+    };
 
-        match result {
-            Some(Ok(data)) => return Ok(data),
-            Some(Err(e)) => return Err(e),
-            None => {}
-        }
+    match wait_net_condition(effective_timeout, check) {
+        Some(Ok(data)) => Ok(data),
+        Some(Err(e)) => Err(e),
+        None => Err("timeout"),
     }
-
-    Err("timeout")
 }
 
 /// TCP コネクションを閉じる
@@ -1615,23 +1677,21 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
     net_debug!("tcp: sending FIN");
     send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_FIN | TCP_FLAG_ACK, &[])?;
 
-    // ACK を待つ（最大 5 秒）
-    for _ in 0..50 {
-        poll_and_handle_timeout(100);
-
-        let done = with_net_state(|state| {
+    // net_poller がパケットを処理して接続が TimeWait or Closed になるのを待つ
+    let _done = wait_net_condition(5000, || {
+        with_net_state(|state| {
             if let Some(idx) = find_conn_index_by_id(state, conn_id) {
                 let c = &state.tcp_connections[idx];
-                c.state == TcpState::TimeWait || c.state == TcpState::Closed
+                if c.state == TcpState::TimeWait || c.state == TcpState::Closed {
+                    Some(true)
+                } else {
+                    None
+                }
             } else {
-                true
+                Some(true)
             }
-        });
-
-        if done {
-            break;
-        }
-    }
+        })
+    });
 
     with_net_state(|state| {
         let _ = remove_conn_by_id(state, conn_id);
@@ -1698,17 +1758,18 @@ pub fn udp_send_to(
 }
 
 /// UDP ソケットからデータを受信する（ブロッキング、タイムアウト付き）
+///
+/// net_poller がパケットを処理して recv_queue にデータを追加するのを待つ。
+/// timeout_ms == 0 の場合はデフォルトタイムアウト（5000ms）を使用する。
 pub fn udp_recv_from(
     socket_id: u32,
     timeout_ms: u64,
 ) -> Result<([u8; 4], u16, Vec<u8>), &'static str> {
+    // timeout_ms == 0 は「デフォルトタイムアウト」の意味
     let effective_timeout = if timeout_ms == 0 { 5000 } else { timeout_ms };
-    let loops = (effective_timeout as usize / 100).max(1);
 
-    for _ in 0..loops {
-        poll_and_handle_timeout(100);
-
-        let result = with_net_state(|state| {
+    let check = || {
+        with_net_state(|state| {
             let sock = state
                 .udp_sockets
                 .iter_mut()
@@ -1723,16 +1784,14 @@ pub fn udp_recv_from(
                 }
                 None => Some(Err("no such UDP socket")),
             }
-        });
+        })
+    };
 
-        match result {
-            Some(Ok(item)) => return Ok(item),
-            Some(Err(e)) => return Err(e),
-            None => {}
-        }
+    match wait_net_condition(effective_timeout, check) {
+        Some(Ok(item)) => Ok(item),
+        Some(Err(e)) => Err(e),
+        None => Err("timeout"),
     }
-
-    Err("timeout")
 }
 
 /// UDP ソケットを閉じる
@@ -2039,20 +2098,17 @@ pub fn send_icmpv6_echo_request(dst_ip: &[u8; 16], id: u16, seq: u16) {
 }
 
 /// ICMPv6 Echo Reply を待つ（タイムアウト付き）
+///
+/// net_poller がパケットを処理して icmpv6_echo_reply にデータを格納するのを待つ。
 pub fn wait_icmpv6_echo_reply(timeout_ms: u64) -> Result<(u16, u16, [u8; 16]), &'static str> {
-    let loops = (timeout_ms as usize / 100).max(1);
-
-    for _ in 0..loops {
-        poll_and_handle_timeout(100);
-
-        let result = with_net_state(|state| {
+    let check = || {
+        with_net_state(|state| {
             state.icmpv6_echo_reply.take()
-        });
+        })
+    };
 
-        if let Some((id, seq, src_ip)) = result {
-            return Ok((id, seq, src_ip));
-        }
+    match wait_net_condition(timeout_ms, check) {
+        Some(reply) => Ok(reply),
+        None => Err("timeout"),
     }
-
-    Err("timeout")
 }
