@@ -47,6 +47,11 @@ DISK_IMG = disk.img
 # ゲスト内からは "/host" としてマウントされる。
 HOSTFS_IMG = hostfs.img
 
+# AHCI テスト用ディスクイメージ
+# QEMU の `-device ahci` + `-device ide-hd` で接続する。
+# ゲスト内からは "/ahci" としてマウントされる。
+AHCI_IMG = ahci-test.img
+
 # QEMU の共通オプション
 # -drive if=virtio で virtio-blk デバイスとしてディスクイメージを接続する。
 # 1台目: disk.img（システムディスク）、2台目: hostfs.img（ホスト共有用）
@@ -164,6 +169,16 @@ $(HOSTFS_IMG):
 	mkfs.fat -F 32 $@
 	@echo "Host filesystem image created: $@"
 
+# AHCI テスト用ディスクイメージを作成する（初回のみ）。
+# 64MB FAT32 としてフォーマットし、テスト用ファイルを書き込む。
+$(AHCI_IMG):
+	dd if=/dev/zero of=$@ bs=1M count=64
+	mkfs.fat -F 32 $@
+	mkdir -p logs
+	echo "Hello from AHCI!" > logs/ahci-hello.txt
+	mcopy -i $@ logs/ahci-hello.txt ::HELLO.TXT
+	@echo "AHCI test image created: $@"
+
 # ホスト共有用ディスクイメージにユーザーバイナリをコピーする。
 # mcopy -o（上書きモード）で変更されたバイナリだけを高速に更新する。
 # disk.img の再作成（dd + mkfs.fat）は不要。
@@ -192,13 +207,13 @@ hostfs-update: build-user | $(HOSTFS_IMG)
 # QEMU を起動する（シリアル出力モード）。
 # run-qemu.sh が既存 QEMU の自動 pkill、ログの ./logs/ 保存を担当する。
 # disk.img が無ければ自動作成される（ファイルターゲット）。
-run: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
+run: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG) $(AHCI_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-qemu.sh --serial
 
 # QEMU を起動する（GUI モード）。
 # run-qemu.sh が既存 QEMU の自動 pkill、ログの ./logs/ 保存を担当する。
-run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
+run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG) $(AHCI_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-qemu.sh --gui
 
@@ -231,6 +246,7 @@ clean:
 	rm -rf esp
 	rm -f $(DISK_IMG)
 	rm -f $(HOSTFS_IMG)
+	rm -f $(AHCI_IMG)
 
 # PAL ファイルの syscall 番号を検証する。
 # libs/sabos-syscall/src/lib.rs を正として、rust-std-sabos/*.rs の番号が一致するかチェック。
@@ -242,7 +258,7 @@ check-syscall:
 # CI で使う場合はこのターゲットを呼ぶ。
 # 自動テストでは disk-img（PHONY）で毎回再作成する。
 # テスト対象のバイナリが最新であることを保証するため。
-test: check-syscall build build-user-std $(ESP_DIR) disk-img $(HOSTFS_IMG)
+test: check-syscall build build-user-std $(ESP_DIR) disk-img $(HOSTFS_IMG) $(AHCI_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh
 

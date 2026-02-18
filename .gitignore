@@ -1,6 +1,7 @@
 disk.img
 disk_test.img
 hostfs.img
+ahci-test.img
 esp/
 kernel/target/
 user/target/

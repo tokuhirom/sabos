@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod ac97;
 mod acpi;
+mod ahci;
 mod allocator;
 mod apic;
 mod console;
@@ -300,6 +301,26 @@ fn main() -> Status {
             for (i, d) in devs.iter().enumerate() {
                 kprintln!("  [{}] {} sectors ({} MiB)", i, d.capacity(), d.capacity() * 512 / 1024 / 1024);
             }
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- AHCI (SATA) ドライバの初期化 ---
+    // PCI バスから AHCI コントローラを探して初期化する。
+    // SATA ディスクが検出されたポートには IDENTIFY DEVICE を発行して容量を取得する。
+    // 実機では onboard SATA コントローラがここで検出される。
+    kprint!("Initializing AHCI... ");
+    ahci::init();
+    {
+        let devs = ahci::AHCI_DEVICES.lock();
+        let count = devs.len();
+        if count > 0 {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("OK ({} device(s))", count);
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found");

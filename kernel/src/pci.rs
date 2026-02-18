@@ -368,6 +368,24 @@ pub fn find_virtio_net() -> Option<PciDevice> {
     None
 }
 
+/// AHCI (SATA) コントローラを PCI バスから探す。
+///
+/// AHCI コントローラの識別:
+///   class_code = 0x01 (Mass Storage Controller)
+///   subclass   = 0x06 (Serial ATA Controller)
+///   prog_if    = 0x01 (AHCI 1.0)
+///
+/// QEMU の `-device ahci` で追加されたデバイスを検出する。
+/// 実機では Intel ICH / PCH シリーズ等のオンボード SATA コントローラが該当する。
+/// 見つかった全コントローラを Vec で返す。
+pub fn find_ahci_controllers() -> Vec<PciDevice> {
+    let devices = enumerate_all_buses();
+    devices
+        .into_iter()
+        .filter(|dev| dev.class_code == 0x01 && dev.subclass == 0x06 && dev.prog_if == 0x01)
+        .collect()
+}
+
 /// virtio-9p デバイスを PCI バスから探す。
 ///
 /// virtio デバイスの識別:

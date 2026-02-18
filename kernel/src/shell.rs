@@ -1030,6 +1030,12 @@ impl Shell {
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 11.5. AHCI コントローラ検出テスト
+            run_test("ahci_detect", this.test_ahci_detect());
+
+            // 11.6. AHCI セクタ読み取りテスト
+            run_test("ahci_read", this.test_ahci_read());
+
             // 12. virtio-blk のテスト
             run_test("virtio_blk", this.test_virtio_blk());
 
@@ -2246,6 +2252,32 @@ impl Shell {
 
     /// virtio-blk のテスト
     /// セクタ 0 を読み取り、ブートシグネチャ (0x55AA) を確認
+    /// AHCI コントローラが PCI で検出できることを確認するテスト。
+    /// QEMU に `-device ahci` が設定されていれば、
+    /// PCI バスに class=0x01/subclass=0x06/prog_if=0x01 のデバイスが見つかるはず。
+    fn test_ahci_detect(&self) -> bool {
+        let controllers = crate::pci::find_ahci_controllers();
+        !controllers.is_empty()
+    }
+
+    /// AHCI デバイスのセクタ 0 を読み取り、FAT32 ブートシグネチャ (0x55AA) を確認するテスト。
+    /// ahci-test.img が FAT32 でフォーマットされていれば、
+    /// セクタ 0 の末尾 2 バイトが 0x55, 0xAA であるはず。
+    fn test_ahci_read(&self) -> bool {
+        let mut devs = crate::ahci::AHCI_DEVICES.lock();
+        if let Some(d) = devs.get_mut(0) {
+            let mut buf = [0u8; 512];
+            match d.read_sector(0, &mut buf) {
+                Ok(()) => {
+                    buf[510] == 0x55 && buf[511] == 0xAA
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
     fn test_virtio_blk(&self) -> bool {
         let mut devs = crate::virtio_blk::VIRTIO_BLKS.lock();
         if let Some(d) = devs.get_mut(0) {

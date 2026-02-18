@@ -106,6 +106,9 @@ build_qemu_args() {
         -device virtio-net-pci,netdev=net0
         -virtfs "local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none"
         -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
+        -device ahci,id=ahci0
+        -drive "if=none,format=raw,file=ahci-test.img,id=ahci-disk0"
+        -device "ide-hd,drive=ahci-disk0,bus=ahci0.0"
         -serial stdio
         -monitor "telnet:127.0.0.1:${MONITOR_PORT},server,nowait"
     )
