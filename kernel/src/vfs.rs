@@ -479,22 +479,6 @@ pub fn delete_dir(path: &str) -> Result<(), VfsError> {
     fs.delete_dir(&relative)
 }
 
-/// 既存のマウントポイントの FileSystem を差し替える（remount）。
-///
-/// fat32d 登録時に "/" と "/host" を Fat32IpcFs に切り替えるために使う。
-/// BTreeMap::insert により既存エントリが置換される。
-///
-/// # 引数
-/// - `mount_point`: 差し替え対象のマウントポイント（例: "/", "/host"）
-/// - `factory`: 新しい FileSystem のファクトリ関数
-pub fn remount(
-    mount_point: &str,
-    factory: Box<dyn Fn() -> Box<dyn FileSystem> + Send + Sync>,
-) {
-    let mut vfs = VFS.lock();
-    vfs.mount(mount_point, factory);
-}
-
 /// ファイルの全内容を読み取る（便利関数）
 ///
 /// FileSystem の read_file() メソッドを直接呼ぶ。

@@ -10,7 +10,6 @@ mod allocator;
 mod console;
 mod elf;
 mod fat32;
-mod fat32_ipc;
 mod framebuffer;
 mod futex;
 mod gdt;

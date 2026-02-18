@@ -198,7 +198,7 @@ fn dispatch_inner(nr: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> Result
         SYS_DIR_CREATE => sys_dir_create(arg1, arg2),
         SYS_DIR_REMOVE => sys_dir_remove(arg1, arg2),
         SYS_FS_STAT => sys_fs_stat(arg1, arg2),
-        SYS_FS_REGISTER => sys_fs_register(),
+        // SYS_FS_REGISTER(18) は削除済み（モノリシック化により不要）
         // システム情報
         SYS_GET_MEM_INFO => sys_get_mem_info(arg1, arg2),
         SYS_GET_TASK_LIST => sys_get_task_list(arg1, arg2),
@@ -1601,20 +1601,6 @@ fn sys_fs_stat(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     buf[..json_bytes.len()].copy_from_slice(json_bytes);
 
     Ok(json_bytes.len() as u64)
-}
-
-/// SYS_FS_REGISTER: fat32d がファイルシステムサービスを登録する
-///
-/// fat32d が初期化完了後に呼び出す。カーネルは呼び出し元タスクを fat32d として記録し、
-/// VFS の "/" と "/host" を Fat32IpcFs（IPC プロキシ）に切り替える。
-/// 以後のファイル操作は fat32d 経由で行われる。
-///
-/// 引数: なし
-/// 戻り値: 0（成功）
-fn sys_fs_register() -> Result<u64, SyscallError> {
-    let task_id = crate::scheduler::current_task_id();
-    crate::fat32_ipc::activate_fat32d(task_id);
-    Ok(0)
 }
 
 /// SYS_DIR_LIST: ディレクトリの内容を一覧

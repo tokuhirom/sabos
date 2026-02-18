@@ -205,9 +205,8 @@ fn try_recv_from(task_id: u64, from_sender: u64) -> Option<IpcMessage> {
 /// 他の送信元からのメッセージはキューに残し、無視する。
 ///
 /// ## 使用場面
-/// Fat32IpcFs が fat32d にリクエストを送信し、fat32d からのレスポンスのみを
-/// 受け取りたい場合。同じタスクに対して netd 等からのレスポンスが
-/// 同時に到着しても混入しない。
+/// 特定の送信元からのレスポンスのみを受信したい場合。
+/// 同じタスクに対して他の送信元からのメッセージが同時に到着しても混入しない。
 pub fn recv_from(task_id: u64, from_sender: u64, timeout_ms: u64) -> Result<IpcMessage, SyscallError> {
     // timeout_ms == 0 は非ブロッキング
     if timeout_ms == 0 {

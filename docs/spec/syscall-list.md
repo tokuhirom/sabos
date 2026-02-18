@@ -66,11 +66,7 @@ SABOS のシステムコール番号と引数・戻り値の対応表。
 - `17` `SYS_FS_STAT(buf_ptr, buf_len) -> n`
   - ファイルシステムの統計情報を JSON 形式でバッファに書き込む
   - 出力例: `{"fs":"fat32","total_bytes":...,"used_bytes":...,"free_bytes":...,"cluster_bytes":...,"total_clusters":...,"free_clusters":...}`
-- `18` `SYS_FS_REGISTER() -> 0`
-  - ファイルシステムサービス（fat32d）が自身をカーネルに登録する
-  - 呼び出し元タスクの task_id を fat32d として記録し、VFS の `/` と `/host` を Fat32IpcFs（IPC プロキシ）に remount する
-  - 以後のファイル操作は fat32d に IPC で転送される
-  - fat32d 再起動時に再度呼び出すことで再登録が可能
+- `18` 予約（SYS_FS_REGISTER は削除済み — モノリシック化により不要）
 
 ## システム情報 (20-29)
 

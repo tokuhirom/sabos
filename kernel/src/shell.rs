@@ -1067,8 +1067,6 @@ impl Shell {
         };
 
         let run_service = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
-            // 16.7. fat32d サービスの起動確認
-            run_test("fat32d_service", this.test_fat32d_service());
             // 17. telnetd サービスの起動確認
             run_test("telnetd_service", this.test_telnetd_service());
             // 17.3. httpd サービスの起動確認（net_poller で TCP accept 競合解消済み）
@@ -2714,14 +2712,6 @@ impl Shell {
         }
         kprintln!("[selftest] gui_ipc: window mouse ok");
         true
-    }
-
-    /// fat32d サービスが起動しているかを確認する
-    ///
-    /// fat32d は FAT32 ファイルシステムサービス。
-    /// VFS の "/" と "/host" を IPC プロキシ経由で処理する。
-    fn test_fat32d_service(&self) -> bool {
-        crate::scheduler::find_task_id_by_name("FAT32D.ELF").is_some()
     }
 
     /// telnetd サービスが起動しているかを確認する

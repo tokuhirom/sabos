@@ -2,13 +2,10 @@
 //
 // 最初のユーザープロセスとしてカーネルから起動される。
 // 責務:
-// 1. サービス（netd）を起動
+// 1. サービス（gui, httpd, telnetd）を起動
 // 2. シェルを起動
 // 3. クラッシュしたサービスを再起動（restart: true のサービスのみ）
 // 4. シェルが終了しても init 自体は終了しない（supervisor として常駐）
-//
-// マイクロカーネルアーキテクチャへの第一歩として、
-// カーネルからサービス管理をユーザー空間に移行する。
 
 #![no_std]
 #![no_main]
@@ -46,23 +43,14 @@ unsafe impl Sync for Service {}
 
 /// 管理するサービスの一覧
 ///
-/// **起動順序が重要**:
-/// fat32d は最後に起動する。これにより他サービスの ELF ロードが
-/// カーネル内 FAT32 経由（高速）で行われる。fat32d を最初に起動すると
-/// VFS が IPC プロキシに切り替わり、以後の ELF ロードが fat32d IPC 経由
-/// （毎回ディスク読み出し + コンテキストスイッチ）になって遅い。
-///
-/// fat32d 登録後は、ランタイムのファイル操作（ls, cat 等）が fat32d 経由になる。
-///
 /// - gui: GUI サービス（再起動有効）
 /// - httpd: HTTP サービス（再起動有効）
 /// - telnetd: Telnet サービス（再起動有効）
 /// - shell: ユーザーシェル（再起動無効 — ユーザーが明示的に終了したら終わり）
-/// - fat32d: FAT32 ファイルシステムサービス（最後に起動）
 ///
 /// net_poller の導入により、httpd と telnetd が同時に tcp_accept を呼んでも
 /// パケットを取り合う問題が解消されたため、httpd をデフォルト起動に復帰。
-static SERVICES: [Service; 5] = [
+static SERVICES: [Service; 4] = [
     Service {
         name: "gui",
         path: "/GUI.ELF",
@@ -85,12 +73,6 @@ static SERVICES: [Service; 5] = [
         name: "shell",
         path: "/SHELL.ELF",
         restart: false,
-        task_id: AtomicU64::new(0),
-    },
-    Service {
-        name: "fat32d",
-        path: "/FAT32D.ELF",
-        restart: true,
         task_id: AtomicU64::new(0),
     },
 ];
@@ -137,15 +119,6 @@ fn start_services() {
             syscall::write_str(")\n");
         }
 
-        // fat32d 起動後は初期化完了を待つ。
-        // fat32d が SYS_FS_REGISTER を呼んで VFS を IPC プロキシに切り替えるまで
-        // 200ms 待機する。fat32d は最後に起動されるので、他サービスの ELF は
-        // カーネル内 FAT32 で高速にロード済み。以後のランタイムファイル操作
-        // （ls, cat 等）が fat32d 経由になる。
-        if service.name == "fat32d" {
-            syscall::write_str("[init] Waiting for fat32d to register...\n");
-            syscall::sleep(200);
-        }
     }
 }
 

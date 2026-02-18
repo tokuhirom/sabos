@@ -7,11 +7,10 @@ unexport RUSTUP_TOOLCHAIN
 # -Zjson-target-spec は nightly 専用フラグのため、toolchain 指定が必須。
 NIGHTLY_CHANNEL := $(shell grep 'channel' rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')
 
-.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img hostfs-update test test-bin check-syscall
+.PHONY: build build-user build-user-std patch-sysroot run run-gui screenshot clean disk-img disk-img-force hostfs-update test test-bin check-syscall
 
 KERNEL_EFI = kernel/target/x86_64-unknown-uefi/debug/sabos.efi
 USER_ELF = user/target/x86_64-unknown-none/debug/sabos-user
-FAT32D_ELF = user/target/x86_64-unknown-none/debug/fat32d
 INIT_ELF = user/target/x86_64-unknown-none/debug/init
 SHELL_ELF = user/target/x86_64-unknown-none/debug/shell
 GUI_ELF = user/target/x86_64-unknown-none/debug/gui
@@ -113,17 +112,21 @@ build-user-std: patch-sysroot
 $(ESP_DIR):
 	mkdir -p $(ESP_DIR)
 
-# FAT32 ディスクイメージを作成する。
+# FAT32 ディスクイメージを作成する（ファイルターゲット）。
+# disk.img が存在しない場合のみ作成される。
 # 64MB のイメージを dd で作り、mkfs.fat -F 32 で FAT32 フォーマットする。
 # mtools (mcopy) でテストファイルを書き込む。
 # INIT.ELF, SHELL.ELF, GUI.ELF, CALC.ELF, PAD.ELF, TETRIS.ELF, ED.ELF, HTTPD.ELF, TELNETD.ELF, TSH.ELF, EXIT0.ELF, TERM.ELF, LIFE.ELF, MANDEL.ELF を書き込む。
 # USER_ELF (旧シェル) は現在は disk.img に含めない。
-disk-img: build-user
+# order-only 依存（| build-user）にすることで、disk.img が既に存在すれば
+# build-user が更新されても再作成しない。明示的に再作成したい場合は make disk-img。
+$(DISK_IMG): | build-user
 	dd if=/dev/zero of=$(DISK_IMG) bs=1M count=64
 	mkfs.fat -F 32 $(DISK_IMG)
-	echo "Hello from FAT32!" > /tmp/hello.txt
-	mcopy -i $(DISK_IMG) /tmp/hello.txt ::HELLO.TXT
-	mcopy -i $(DISK_IMG) $(FAT32D_ELF) ::FAT32D.ELF
+	mkdir -p logs
+	echo "Hello from FAT32!" > logs/hello.txt
+	mcopy -i $(DISK_IMG) logs/hello.txt ::HELLO.TXT
+	rm -f logs/hello.txt
 	mcopy -i $(DISK_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -i $(DISK_IMG) $(SHELL_ELF) ::SHELL.ELF
 	mcopy -i $(DISK_IMG) $(GUI_ELF) ::GUI.ELF
@@ -146,6 +149,14 @@ disk-img: build-user
 	fi
 	@echo "Disk image created: $(DISK_IMG)"
 
+# disk.img を強制的に再作成する（.PHONY な disk-img は後方互換用）
+disk-img: build-user
+	rm -f $(DISK_IMG)
+	$(MAKE) $(DISK_IMG)
+
+# disk-img-force は disk-img のエイリアス
+disk-img-force: disk-img
+
 # ホスト共有用ディスクイメージを作成する（初回のみ）。
 # 64MB FAT32 としてフォーマットする。
 $(HOSTFS_IMG):
@@ -158,7 +169,6 @@ $(HOSTFS_IMG):
 # disk.img の再作成（dd + mkfs.fat）は不要。
 # 使い方: make hostfs-update → QEMU 再起動 → /host/SHELL.ELF 等でアクセス
 hostfs-update: build-user | $(HOSTFS_IMG)
-	mcopy -o -i $(HOSTFS_IMG) $(FAT32D_ELF) ::FAT32D.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(INIT_ELF) ::INIT.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(SHELL_ELF) ::SHELL.ELF
 	mcopy -o -i $(HOSTFS_IMG) $(GUI_ELF) ::GUI.ELF
@@ -179,28 +189,18 @@ hostfs-update: build-user | $(HOSTFS_IMG)
 	fi
 	@echo "Host filesystem updated: $(HOSTFS_IMG)"
 
+# QEMU を起動する（シリアル出力モード）。
+# run-qemu.sh が既存 QEMU の自動 pkill、ログの ./logs/ 保存を担当する。
+# disk.img が無ければ自動作成される（ファイルターゲット）。
 run: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
-	$(QEMU_COMMON) \
-		-serial stdio \
-		-display none
+	./scripts/run-qemu.sh --serial
 
+# QEMU を起動する（GUI モード）。
+# run-qemu.sh が既存 QEMU の自動 pkill、ログの ./logs/ 保存を担当する。
 run-gui: build $(ESP_DIR) $(DISK_IMG) $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
-	qemu-system-x86_64 \
-		-machine q35 \
-		-m 256 \
-		-cpu max \
-		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
-		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_VARS) \
-		-drive format=raw,file=fat:rw:esp \
-		-drive if=virtio,format=raw,file=$(DISK_IMG) \
-		-drive if=virtio,format=raw,file=$(HOSTFS_IMG) \
-		-netdev user,id=net0,ipv4=on,ipv6=on,hostfwd=tcp::12323-:2323 -device virtio-net-pci,netdev=net0 \
-		-audiodev id=snd0,driver=sdl -device AC97,audiodev=snd0 \
-		-virtfs local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none \
-		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		-serial stdio
+	./scripts/run-qemu.sh --gui
 
 # スクリーンショットを撮る
 # 使い方:
@@ -240,6 +240,8 @@ check-syscall:
 # 自動テストを実行する。
 # QEMU を起動して selftest コマンドを実行し、結果を検証する。
 # CI で使う場合はこのターゲットを呼ぶ。
+# 自動テストでは disk-img（PHONY）で毎回再作成する。
+# テスト対象のバイナリが最新であることを保証するため。
 test: check-syscall build build-user-std $(ESP_DIR) disk-img $(HOSTFS_IMG)
 	cp $(KERNEL_EFI) $(ESP_DIR)/BOOTX64.EFI
 	./scripts/run-selftest.sh
