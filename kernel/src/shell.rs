@@ -1036,6 +1036,12 @@ impl Shell {
             // 11.6. AHCI セクタ読み取りテスト
             run_test("ahci_read", this.test_ahci_read());
 
+            // 11.7. NVMe コントローラ検出テスト
+            run_test("nvme_detect", this.test_nvme_detect());
+
+            // 11.8. NVMe セクタ読み取りテスト
+            run_test("nvme_read", this.test_nvme_read());
+
             // 12. virtio-blk のテスト
             run_test("virtio_blk", this.test_virtio_blk());
 
@@ -2265,6 +2271,32 @@ impl Shell {
     /// セクタ 0 の末尾 2 バイトが 0x55, 0xAA であるはず。
     fn test_ahci_read(&self) -> bool {
         let mut devs = crate::ahci::AHCI_DEVICES.lock();
+        if let Some(d) = devs.get_mut(0) {
+            let mut buf = [0u8; 512];
+            match d.read_sector(0, &mut buf) {
+                Ok(()) => {
+                    buf[510] == 0x55 && buf[511] == 0xAA
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// NVMe コントローラが PCI で検出できることを確認するテスト。
+    /// QEMU に `-device nvme` が設定されていれば、
+    /// PCI バスに class=0x01/subclass=0x08/prog_if=0x02 のデバイスが見つかるはず。
+    fn test_nvme_detect(&self) -> bool {
+        let controllers = crate::pci::find_nvme_controllers();
+        !controllers.is_empty()
+    }
+
+    /// NVMe デバイスのセクタ 0 を読み取り、FAT32 ブートシグネチャ (0x55AA) を確認するテスト。
+    /// nvme-test.img が FAT32 でフォーマットされていれば、
+    /// セクタ 0 の末尾 2 バイトが 0x55, 0xAA であるはず。
+    fn test_nvme_read(&self) -> bool {
+        let mut devs = crate::nvme::NVME_DEVICES.lock();
         if let Some(d) = devs.get_mut(0) {
             let mut buf = [0u8; 512];
             match d.read_sector(0, &mut buf) {

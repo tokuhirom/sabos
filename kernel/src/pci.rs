@@ -195,7 +195,6 @@ pub fn enumerate_bus() -> Vec<PciDevice> {
 /// BAR の type bits ([2:1]) が 0b10 の場合、次の BAR と合わせて 64 ビットアドレスになる。
 ///
 /// bar_index は最初の BAR のインデックス（0〜4）。次の BAR (bar_index+1) も読み取る。
-#[allow(dead_code)]
 pub fn read_bar64(bus: u8, device: u8, function: u8, bar_index: u8) -> u64 {
     let low = read_bar(bus, device, function, bar_index);
     let high = read_bar(bus, device, function, bar_index + 1);
@@ -383,6 +382,24 @@ pub fn find_ahci_controllers() -> Vec<PciDevice> {
     devices
         .into_iter()
         .filter(|dev| dev.class_code == 0x01 && dev.subclass == 0x06 && dev.prog_if == 0x01)
+        .collect()
+}
+
+/// NVMe コントローラを PCI バスから探す。
+///
+/// NVMe コントローラの識別:
+///   class_code = 0x01 (Mass Storage Controller)
+///   subclass   = 0x08 (Non-Volatile Memory Controller)
+///   prog_if    = 0x02 (NVM Express)
+///
+/// QEMU の `-device nvme` で追加されたデバイスを検出する。
+/// 実機では PCIe 接続の NVMe SSD が該当する。
+/// 見つかった全コントローラを Vec で返す。
+pub fn find_nvme_controllers() -> Vec<PciDevice> {
+    let devices = enumerate_all_buses();
+    devices
+        .into_iter()
+        .filter(|dev| dev.class_code == 0x01 && dev.subclass == 0x08 && dev.prog_if == 0x02)
         .collect()
 }
 

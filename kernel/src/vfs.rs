@@ -373,6 +373,18 @@ pub fn init() {
         }));
     }
 
+    // NVMe デバイスがあれば "/nvme" にマウントする。
+    // 実機では PCIe 接続の NVMe SSD が NVMe ドライバ経由で見える。
+    // QEMU でも `-device nvme` でテスト可能。
+    let nvme_count = crate::nvme::device_count();
+    if nvme_count >= 1 {
+        vfs.mount("/nvme", Box::new(|| {
+            Box::new(crate::fat32::Fat32::new_fs_with_backend(
+                crate::fat32::BlockBackend::Nvme(0),
+            ))
+        }));
+    }
+
     // 初期化結果をログ出力
     let mut msg = alloc::string::String::from("VFS initialized: / -> fat32, /proc -> procfs");
     if dev_count >= 2 {
@@ -383,6 +395,9 @@ pub fn init() {
     }
     if ahci_count >= 1 {
         msg.push_str(", /ahci -> fat32[ahci0]");
+    }
+    if nvme_count >= 1 {
+        msg.push_str(", /nvme -> fat32[nvme0]");
     }
     crate::kprintln!("{}", msg);
 }

@@ -21,6 +21,7 @@ mod interrupts;
 mod ipc;
 mod memory;
 mod mouse;
+mod nvme;
 mod paging;
 mod panic;
 mod pipe;
@@ -318,6 +319,24 @@ fn main() -> Status {
     {
         let devs = ahci::AHCI_DEVICES.lock();
         let count = devs.len();
+        if count > 0 {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!("OK ({} device(s))", count);
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- NVMe の初期化 ---
+    // NVMe (Non-Volatile Memory Express) コントローラを PCI バスから探して初期化する。
+    // 実機では PCIe 接続の NVMe SSD が検出される。
+    kprint!("Initializing NVMe... ");
+    nvme::init();
+    {
+        let count = nvme::device_count();
         if count > 0 {
             framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
             kprintln!("OK ({} device(s))", count);

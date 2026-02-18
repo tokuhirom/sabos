@@ -89,14 +89,16 @@ Phase 0 が完了した上で、実機で起動してシェルを操作できる
 
 **推定工数**: 特大（xHCI spec は複雑。段階的に進める）
 
-### 1-3. NVMe ドライバ（オプション）
+### 1-3. NVMe ドライバ ✅ 完了
 
 **なぜ必要**: 最近の PC は NVMe SSD が主流。AHCI があれば初期は不要だが、実用上は必要。
 
-- PCI クラス 01h/08h (NVMe) の検出
-- Admin Queue / I/O Queue の作成
-- Identify Controller / Namespace
-- Read/Write コマンド
+- ✅ PCI クラス 01h/08h (NVMe) の検出
+- ✅ Admin Queue / I/O Queue の作成
+- ✅ Identify Controller / Namespace
+- ✅ Read/Write コマンド
+- ✅ VFS 統合（`/nvme` マウント）
+- ✅ selftest 追加（nvme_detect, nvme_read）
 
 **推定工数**: 中（NVMe spec は AHCI より素直）
 

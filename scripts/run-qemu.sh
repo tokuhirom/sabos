@@ -109,6 +109,8 @@ build_qemu_args() {
         -device ahci,id=ahci0
         -drive "if=none,format=raw,file=ahci-test.img,id=ahci-disk0"
         -device "ide-hd,drive=ahci-disk0,bus=ahci0.0"
+        -drive "if=none,format=raw,file=nvme-test.img,id=nvme-disk0"
+        -device "nvme,drive=nvme-disk0,serial=NVME0001"
         -serial stdio
         -monitor "telnet:127.0.0.1:${MONITOR_PORT},server,nowait"
     )

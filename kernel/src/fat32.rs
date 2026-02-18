@@ -24,6 +24,8 @@ pub enum BlockBackend {
     VirtioBlk(usize),
     /// AHCI (SATA) デバイス。dev_index はデバイスリスト内のインデックス。
     Ahci(usize),
+    /// NVMe デバイス。dev_index はデバイスリスト内のインデックス。
+    Nvme(usize),
 }
 
 /// カーネル用のブロックデバイス。
@@ -57,6 +59,14 @@ impl BlockDevice for KernelBlockDevice {
                     Err(BlockError::IoError)
                 }
             }
+            BlockBackend::Nvme(idx) => {
+                let mut devs = crate::nvme::NVME_DEVICES.lock();
+                if let Some(d) = devs.get_mut(idx) {
+                    d.read_sector(sector, buf).map_err(|_| BlockError::IoError)
+                } else {
+                    Err(BlockError::IoError)
+                }
+            }
         }
     }
 
@@ -72,6 +82,14 @@ impl BlockDevice for KernelBlockDevice {
             }
             BlockBackend::Ahci(idx) => {
                 let mut devs = crate::ahci::AHCI_DEVICES.lock();
+                if let Some(d) = devs.get_mut(idx) {
+                    d.write_sector(sector, buf).map_err(|_| BlockError::IoError)
+                } else {
+                    Err(BlockError::IoError)
+                }
+            }
+            BlockBackend::Nvme(idx) => {
+                let mut devs = crate::nvme::NVME_DEVICES.lock();
                 if let Some(d) = devs.get_mut(idx) {
                     d.write_sector(sector, buf).map_err(|_| BlockError::IoError)
                 } else {
@@ -117,7 +135,7 @@ impl Fat32 {
     /// 指定したバックエンドで Fat32 を初期化する。
     pub fn new_with_backend(backend: BlockBackend) -> Result<Self, &'static str> {
         let dev_index = match backend {
-            BlockBackend::VirtioBlk(idx) | BlockBackend::Ahci(idx) => idx,
+            BlockBackend::VirtioBlk(idx) | BlockBackend::Ahci(idx) | BlockBackend::Nvme(idx) => idx,
         };
         let inner = Fat32Fs::new_with_device(KernelBlockDevice { dev_index, backend })?;
         Ok(Fat32 { inner })
