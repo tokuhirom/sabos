@@ -854,16 +854,15 @@ impl Shell {
 
     /// ip コマンド: IP 設定を表示する。
     fn cmd_ip(&self) {
+        let my_ip = crate::net_config::get_my_ip();
+        let gw = crate::net_config::get_gateway_ip();
+        let dns = crate::net_config::get_dns_server_ip();
+        let mask = crate::net_config::get_subnet_mask();
         kprintln!("IP Configuration:");
-        kprintln!("  IP Address: {}.{}.{}.{}",
-            crate::net_config::MY_IP[0], crate::net_config::MY_IP[1],
-            crate::net_config::MY_IP[2], crate::net_config::MY_IP[3]);
-        kprintln!("  Gateway:    {}.{}.{}.{}",
-            crate::net_config::GATEWAY_IP[0], crate::net_config::GATEWAY_IP[1],
-            crate::net_config::GATEWAY_IP[2], crate::net_config::GATEWAY_IP[3]);
-        kprintln!("  DNS:        {}.{}.{}.{}",
-            crate::net_config::DNS_SERVER_IP[0], crate::net_config::DNS_SERVER_IP[1],
-            crate::net_config::DNS_SERVER_IP[2], crate::net_config::DNS_SERVER_IP[3]);
+        kprintln!("  IP Address:   {}.{}.{}.{}", my_ip[0], my_ip[1], my_ip[2], my_ip[3]);
+        kprintln!("  Subnet Mask:  {}.{}.{}.{}", mask[0], mask[1], mask[2], mask[3]);
+        kprintln!("  Gateway:      {}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
+        kprintln!("  DNS:          {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
 
         let drv = crate::virtio_net::VIRTIO_NET.lock();
         if let Some(ref d) = *drv {
@@ -2492,7 +2491,7 @@ impl Shell {
     /// resolve_mac() が ARP Request を送信し、QEMU SLIRP からの ARP Reply を
     /// 受信してキャッシュに登録し、MAC アドレスを返すフローをテストする。
     fn test_arp_resolve(&self) -> bool {
-        match crate::netstack::resolve_mac(&crate::net_config::GATEWAY_IP) {
+        match crate::netstack::resolve_mac(&crate::net_config::get_gateway_ip()) {
             Ok(mac) => {
                 // ゼロ MAC でなければ成功
                 mac != [0, 0, 0, 0, 0, 0]

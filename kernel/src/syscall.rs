@@ -1915,9 +1915,9 @@ fn sys_get_net_info(arg1: u64, arg2: u64) -> Result<u64, SyscallError> {
     let buf = buf_slice.as_mut_slice();
 
     // ネットワーク情報を取得
-    let my_ip = crate::net_config::MY_IP;
-    let gateway = crate::net_config::GATEWAY_IP;
-    let dns = crate::net_config::DNS_SERVER_IP;
+    let my_ip = crate::net_config::get_my_ip();
+    let gateway = crate::net_config::get_gateway_ip();
+    let dns = crate::net_config::get_dns_server_ip();
 
     // テキスト形式で書き込む
     let mut writer = SliceWriter::new(buf);

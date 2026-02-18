@@ -27,17 +27,11 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::net_config::GATEWAY_IP;
+use crate::net_config::{get_my_ip, get_gateway_ip, get_dns_server_ip, get_subnet_mask};
 use crate::serial_println;
-
-/// ゲストの IP アドレス (QEMU user mode デフォルト)
-pub const MY_IP: [u8; 4] = [10, 0, 2, 15];
 
 /// ループバック IP アドレス (127.0.0.1)
 pub const LOOPBACK_IP: [u8; 4] = [127, 0, 0, 1];
-
-/// DNS サーバーの IP アドレス (QEMU user mode デフォルト)
-pub const DNS_SERVER_IP: [u8; 4] = [10, 0, 2, 3];
 
 /// ブロードキャスト MAC アドレス
 pub const BROADCAST_MAC: [u8; 6] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
@@ -652,7 +646,7 @@ fn handle_arp(_eth_header: &EthernetHeader, payload: &[u8]) {
     match arp.oper_u16() {
         ARP_OP_REQUEST => {
             // ARP Request で、宛先 IP が自分の場合は Reply を返す
-            if arp.tpa == MY_IP {
+            if arp.tpa == get_my_ip() {
                 net_debug!(
                     "net: ARP Request for {}.{}.{}.{} from {}.{}.{}.{}",
                     arp.tpa[0], arp.tpa[1], arp.tpa[2], arp.tpa[3],
@@ -692,7 +686,7 @@ fn send_arp_reply(request: &ArpPacket) {
         plen: 4,
         oper: ARP_OP_REPLY.to_be_bytes(),
         sha: my_mac,
-        spa: MY_IP,
+        spa: get_my_ip(),
         tha: request.sha,
         tpa: request.spa,
     };
@@ -734,7 +728,7 @@ fn send_arp_request(target_ip: [u8; 4]) {
         plen: 4,
         oper: ARP_OP_REQUEST.to_be_bytes(),
         sha: my_mac,
-        spa: MY_IP,
+        spa: get_my_ip(),
         tha: [0; 6], // 不明（これから問い合わせる）
         tpa: target_ip,
     };
@@ -771,10 +765,17 @@ pub fn resolve_mac(dst_ip: &[u8; 4]) -> Result<[u8; 6], &'static str> {
 
     // サブネット判定: 10.0.2.0/24（最初の 3 バイトが一致するか）
     // サブネット外の場合はゲートウェイの MAC を解決する
-    let resolve_ip = if dst_ip[0] == MY_IP[0] && dst_ip[1] == MY_IP[1] && dst_ip[2] == MY_IP[2] {
+    // サブネットマスクを使ってサブネット判定する
+    let my_ip = get_my_ip();
+    let mask = get_subnet_mask();
+    let resolve_ip = if (dst_ip[0] & mask[0]) == (my_ip[0] & mask[0])
+        && (dst_ip[1] & mask[1]) == (my_ip[1] & mask[1])
+        && (dst_ip[2] & mask[2]) == (my_ip[2] & mask[2])
+        && (dst_ip[3] & mask[3]) == (my_ip[3] & mask[3])
+    {
         *dst_ip
     } else {
-        GATEWAY_IP
+        get_gateway_ip()
     };
 
     // ARP キャッシュを検索
@@ -802,7 +803,7 @@ pub fn resolve_mac(dst_ip: &[u8; 4]) -> Result<[u8; 6], &'static str> {
 
 /// 指定された IP がローカル（自分宛）かどうかを判定する
 fn is_local_ip(ip: &[u8; 4]) -> bool {
-    *ip == MY_IP || *ip == LOOPBACK_IP
+    *ip == get_my_ip() || *ip == LOOPBACK_IP || *ip == [255, 255, 255, 255]
 }
 
 /// IPv4 パケットを処理する
@@ -893,7 +894,7 @@ fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
         ttl: 64,
         protocol: IP_PROTO_ICMP,
         checksum: [0, 0],
-        src_ip: MY_IP,
+        src_ip: get_my_ip(),
         dst_ip: request_ip.src_ip,
     };
 
@@ -1190,7 +1191,8 @@ pub fn send_udp_packet(
         checksum: [0, 0],
     };
 
-    let udp_checksum = calculate_udp_checksum(&MY_IP, &dst_ip, &udp_header, payload);
+    let my_ip = get_my_ip();
+    let udp_checksum = calculate_udp_checksum(&my_ip, &dst_ip, &udp_header, payload);
 
     let total_length = 20 + udp_length;
     let ip_header = Ipv4Header {
@@ -1202,7 +1204,7 @@ pub fn send_udp_packet(
         ttl: 64,
         protocol: IP_PROTO_UDP,
         checksum: [0, 0],
-        src_ip: MY_IP,
+        src_ip: my_ip,
         dst_ip,
     };
 
@@ -1260,7 +1262,7 @@ pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
         });
 
         net_debug!("dns: sending query for '{}' (attempt {})", domain, attempt);
-        let send_result = send_udp_packet(DNS_SERVER_IP, DNS_PORT, src_port, &query_packet);
+        let send_result = send_udp_packet(get_dns_server_ip(), DNS_PORT, src_port, &query_packet);
         if send_result.is_err() {
             return send_result.map(|_| [0u8; 4]);
         }
@@ -1625,7 +1627,7 @@ fn send_tcp_packet_internal(
         ttl: 64,
         protocol: IP_PROTO_TCP,
         checksum: [0, 0],
-        src_ip: MY_IP,
+        src_ip: get_my_ip(),
         dst_ip,
     };
 
@@ -1634,7 +1636,7 @@ fn send_tcp_packet_internal(
     };
     let ip_checksum = calculate_checksum(ip_header_bytes);
 
-    let tcp_checksum = calculate_tcp_checksum(&MY_IP, &dst_ip, &tcp_header, payload);
+    let tcp_checksum = calculate_tcp_checksum(&get_my_ip(), &dst_ip, &tcp_header, payload);
 
     let mut packet = Vec::with_capacity(14 + 20 + tcp_length);
 
