@@ -27,6 +27,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::net_config::GATEWAY_IP;
 use crate::serial_println;
 
 /// ゲストの IP アドレス (QEMU user mode デフォルト)
@@ -85,6 +86,18 @@ pub struct UdpSocketEntry {
     pub recv_queue: VecDeque<([u8; 4], u16, Vec<u8>)>,
 }
 
+/// ARP キャッシュエントリ
+///
+/// IP アドレスから MAC アドレスへのマッピングを保持する。
+/// ARP Reply 受信時やパケット受信時に学習し、送信時に参照する。
+struct ArpEntry {
+    ip: [u8; 4],
+    mac: [u8; 6],
+}
+
+/// ARP キャッシュの最大エントリ数
+const ARP_CACHE_MAX: usize = 64;
+
 /// ネットワークスタックの内部状態
 struct NetState {
     mac: [u8; 6],
@@ -106,6 +119,10 @@ struct NetState {
     /// net_poller がパケットを処理した後に全 waiter を起床させる。
     /// これにより tcp_accept 等が個別にパケット受信する必要がなくなる。
     net_waiters: Vec<u64>,
+    /// ARP キャッシュ: IP → MAC のマッピングテーブル
+    /// 送信時に宛先 MAC を解決するために使う。
+    /// ARP Reply 受信時や ARP Request 受信時（送信元）に学習する。
+    arp_cache: Vec<ArpEntry>,
 }
 
 /// グローバルなネットワーク状態（spin::Mutex で保護）
@@ -130,6 +147,7 @@ where
             udp_next_port: 49152,
             icmpv6_echo_reply: None,
             net_waiters: Vec::new(),
+            arp_cache: Vec::new(),
         });
     }
     f(guard.as_mut().unwrap())
@@ -156,6 +174,43 @@ pub fn init() {
 /// MAC アドレスを取得する（ロック不要版）
 fn get_my_mac() -> [u8; 6] {
     *MY_MAC.lock()
+}
+
+// ============================================================
+// ARP キャッシュ操作
+// ============================================================
+
+/// ARP キャッシュから IP に対応する MAC アドレスを検索する
+fn arp_lookup(ip: &[u8; 4]) -> Option<[u8; 6]> {
+    with_net_state(|state| {
+        for entry in &state.arp_cache {
+            if entry.ip == *ip {
+                return Some(entry.mac);
+            }
+        }
+        None
+    })
+}
+
+/// ARP キャッシュに IP → MAC のマッピングを追加/更新する
+///
+/// 既存エントリがあれば MAC を更新する。
+/// キャッシュが満杯（64 エントリ）の場合は最も古いエントリ（先頭）を削除する。
+fn arp_update(ip: [u8; 4], mac: [u8; 6]) {
+    with_net_state(|state| {
+        // 既存エントリを探して更新
+        for entry in state.arp_cache.iter_mut() {
+            if entry.ip == ip {
+                entry.mac = mac;
+                return;
+            }
+        }
+        // 新規追加（キャッシュが満杯なら先頭を削除）
+        if state.arp_cache.len() >= ARP_CACHE_MAX {
+            state.arp_cache.remove(0);
+        }
+        state.arp_cache.push(ArpEntry { ip, mac });
+    });
 }
 
 // ============================================================
@@ -580,6 +635,9 @@ pub fn handle_packet(data: &[u8]) {
 }
 
 /// ARP パケットを処理する
+///
+/// ARP Request: 自分宛なら Reply を返す。送信元をキャッシュに学習する。
+/// ARP Reply: 送信元をキャッシュに学習する（ARP Request の応答）。
 fn handle_arp(_eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 28 {
         return;
@@ -587,14 +645,31 @@ fn handle_arp(_eth_header: &EthernetHeader, payload: &[u8]) {
 
     let arp = unsafe { &*(payload.as_ptr() as *const ArpPacket) };
 
-    // ARP Request で、宛先 IP が自分の場合は Reply を返す
-    if arp.oper_u16() == ARP_OP_REQUEST && arp.tpa == MY_IP {
-        net_debug!(
-            "net: ARP Request for {}.{}.{}.{} from {}.{}.{}.{}",
-            arp.tpa[0], arp.tpa[1], arp.tpa[2], arp.tpa[3],
-            arp.spa[0], arp.spa[1], arp.spa[2], arp.spa[3]
-        );
-        send_arp_reply(arp);
+    // すべての ARP パケットから送信元 IP/MAC を学習する
+    // （Gratuitous ARP にも対応）
+    arp_update(arp.spa, arp.sha);
+
+    match arp.oper_u16() {
+        ARP_OP_REQUEST => {
+            // ARP Request で、宛先 IP が自分の場合は Reply を返す
+            if arp.tpa == MY_IP {
+                net_debug!(
+                    "net: ARP Request for {}.{}.{}.{} from {}.{}.{}.{}",
+                    arp.tpa[0], arp.tpa[1], arp.tpa[2], arp.tpa[3],
+                    arp.spa[0], arp.spa[1], arp.spa[2], arp.spa[3]
+                );
+                send_arp_reply(arp);
+            }
+        }
+        ARP_OP_REPLY => {
+            // ARP Reply を受信（arp_update は上で済み）
+            net_debug!(
+                "net: ARP Reply: {}.{}.{}.{} is {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                arp.spa[0], arp.spa[1], arp.spa[2], arp.spa[3],
+                arp.sha[0], arp.sha[1], arp.sha[2], arp.sha[3], arp.sha[4], arp.sha[5]
+            );
+        }
+        _ => {}
     }
 }
 
@@ -639,13 +714,99 @@ fn send_arp_reply(request: &ArpPacket) {
     }
 }
 
+/// ARP Request を送信する
+///
+/// 指定した IP アドレスの MAC アドレスを問い合わせる。
+/// 宛先 MAC = ブロードキャスト、ターゲット MAC = 00:00:00:00:00:00（不明）。
+fn send_arp_request(target_ip: [u8; 4]) {
+    let my_mac = get_my_mac();
+
+    let eth_header = EthernetHeader {
+        dst_mac: BROADCAST_MAC,
+        src_mac: my_mac,
+        ethertype: ETHERTYPE_ARP.to_be_bytes(),
+    };
+
+    let arp_request = ArpPacket {
+        htype: ARP_HTYPE_ETHERNET.to_be_bytes(),
+        ptype: ETHERTYPE_IPV4.to_be_bytes(),
+        hlen: 6,
+        plen: 4,
+        oper: ARP_OP_REQUEST.to_be_bytes(),
+        sha: my_mac,
+        spa: MY_IP,
+        tha: [0; 6], // 不明（これから問い合わせる）
+        tpa: target_ip,
+    };
+
+    let mut packet = Vec::with_capacity(42);
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&eth_header as *const _ as *const u8, 14)
+    });
+    packet.extend_from_slice(unsafe {
+        core::slice::from_raw_parts(&arp_request as *const _ as *const u8, 28)
+    });
+
+    if send_frame(&packet).is_err() {
+        net_debug!("net: failed to send ARP Request");
+    } else {
+        net_debug!(
+            "net: sent ARP Request for {}.{}.{}.{}",
+            target_ip[0], target_ip[1], target_ip[2], target_ip[3]
+        );
+    }
+}
+
+/// 宛先 IP アドレスに対応する MAC アドレスを解決する
+///
+/// 1. ブロードキャスト IP → ブロードキャスト MAC
+/// 2. サブネット外 → ゲートウェイの MAC を解決対象にする
+/// 3. ARP キャッシュを検索 → ヒットすれば返す
+/// 4. ミスなら ARP Request を送信し、応答を待つ（最大 3 回リトライ）
+pub fn resolve_mac(dst_ip: &[u8; 4]) -> Result<[u8; 6], &'static str> {
+    // ブロードキャスト IP はそのままブロードキャスト MAC
+    if *dst_ip == [255, 255, 255, 255] {
+        return Ok(BROADCAST_MAC);
+    }
+
+    // サブネット判定: 10.0.2.0/24（最初の 3 バイトが一致するか）
+    // サブネット外の場合はゲートウェイの MAC を解決する
+    let resolve_ip = if dst_ip[0] == MY_IP[0] && dst_ip[1] == MY_IP[1] && dst_ip[2] == MY_IP[2] {
+        *dst_ip
+    } else {
+        GATEWAY_IP
+    };
+
+    // ARP キャッシュを検索
+    if let Some(mac) = arp_lookup(&resolve_ip) {
+        return Ok(mac);
+    }
+
+    // キャッシュミス: ARP Request を送信して応答を待つ
+    // 最大 3 回リトライ、各回 1000ms タイムアウト
+    for _ in 0..3 {
+        send_arp_request(resolve_ip);
+
+        // ARP Reply を待つ（wait_net_condition で net_poller からの wake を受け取る）
+        let result = wait_net_condition(1000, || {
+            arp_lookup(&resolve_ip)
+        });
+
+        if let Some(mac) = result {
+            return Ok(mac);
+        }
+    }
+
+    Err("ARP resolve timeout")
+}
+
 /// 指定された IP がローカル（自分宛）かどうかを判定する
 fn is_local_ip(ip: &[u8; 4]) -> bool {
     *ip == MY_IP || *ip == LOOPBACK_IP
 }
 
 /// IPv4 パケットを処理する
-fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
+fn handle_ipv4(eth_header: &EthernetHeader, payload: &[u8]) {
     if payload.len() < 20 {
         return;
     }
@@ -660,6 +821,14 @@ fn handle_ipv4(_eth_header: &EthernetHeader, payload: &[u8]) {
     // 宛先 IP がローカルでなければ無視
     if !is_local_ip(&ip_header.dst_ip) {
         return;
+    }
+
+    // 受信した IPv4 パケットの送信元 IP/MAC を ARP キャッシュに学習する。
+    // これにより、ICMP Echo Reply 等の応答パケット送信時に
+    // ARP Request なしで即座に MAC を解決できる。
+    let src_mac = eth_header.src_mac;
+    if src_mac != BROADCAST_MAC {
+        arp_update(ip_header.src_ip, src_mac);
     }
 
     let ip_payload = &payload[header_len..];
@@ -699,9 +868,13 @@ fn handle_icmp(ip_header: &Ipv4Header, payload: &[u8]) {
 }
 
 /// ICMP Echo Reply を送信する
+///
+/// net_poller タスクから呼ばれるため、ブロッキングする resolve_mac() は使えない。
+/// ARP キャッシュから検索し、見つからなければフォールバックでブロードキャスト MAC を使う。
+/// （通常は handle_ipv4 で送信元 MAC を学習済みなのでキャッシュヒットする）
 fn send_icmp_echo_reply(request_ip: &Ipv4Header, icmp_data: &[u8]) {
     let my_mac = get_my_mac();
-    let dst_mac = BROADCAST_MAC;
+    let dst_mac = arp_lookup(&request_ip.src_ip).unwrap_or(BROADCAST_MAC);
 
     let eth_header = EthernetHeader {
         dst_mac,
@@ -1001,7 +1174,7 @@ pub fn send_udp_packet(
     payload: &[u8],
 ) -> Result<(), &'static str> {
     let my_mac = get_my_mac();
-    let dst_mac = BROADCAST_MAC;
+    let dst_mac = resolve_mac(&dst_ip)?;
 
     let eth_header = EthernetHeader {
         dst_mac,
@@ -1407,6 +1580,10 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
 }
 
 /// TCP パケットを送信する（内部用）
+///
+/// net_poller タスクから呼ばれる場合があるため、ブロッキングする resolve_mac() は使えない。
+/// ARP キャッシュから検索し、見つからなければフォールバックでブロードキャスト MAC を使う。
+/// 呼び出し元（tcp_connect 等）で事前に resolve_mac() を呼んでキャッシュを温めておくこと。
 fn send_tcp_packet_internal(
     dst_ip: [u8; 4],
     dst_port: u16,
@@ -1417,7 +1594,7 @@ fn send_tcp_packet_internal(
     payload: &[u8],
 ) -> Result<(), &'static str> {
     let my_mac = get_my_mac();
-    let dst_mac = BROADCAST_MAC;
+    let dst_mac = arp_lookup(&dst_ip).unwrap_or(BROADCAST_MAC);
 
     let eth_header = EthernetHeader {
         dst_mac,
@@ -1516,6 +1693,11 @@ fn calculate_tcp_checksum(
 
 /// TCP コネクションを確立する（3-way ハンドシェイク）
 pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> {
+    // SYN 送信前に ARP キャッシュを温めておく。
+    // send_tcp_packet_internal は net_poller から呼ばれる可能性があるため
+    // ブロッキングする resolve_mac() を使えない。ここで事前解決する。
+    resolve_mac(&dst_ip)?;
+
     let (conn_id, local_port, initial_seq) = with_net_state(|state| {
         let id = alloc_conn_id(state);
         let local_port = alloc_local_port(state);

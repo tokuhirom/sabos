@@ -1083,7 +1083,9 @@ impl Shell {
         };
 
         let run_net = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
-            // 14. ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
+            // 14. ARP 解決テスト（ゲートウェイの MAC が解決できること）
+            run_test("arp_resolve", this.test_arp_resolve());
+            // 14.1. ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
             run_test("network_dns", this.test_network_dns());
         };
 
@@ -2486,6 +2488,19 @@ impl Shell {
     /// example.com を解決してみる（QEMU SLIRP は常に応答を返すはず）
     /// ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
     /// netstack::dns_lookup() で example.com を問い合わせ、非ゼロの IP が返ることを確認する。
+    /// ARP 解決テスト: ゲートウェイの MAC アドレスが解決できることを確認する。
+    /// resolve_mac() が ARP Request を送信し、QEMU SLIRP からの ARP Reply を
+    /// 受信してキャッシュに登録し、MAC アドレスを返すフローをテストする。
+    fn test_arp_resolve(&self) -> bool {
+        match crate::netstack::resolve_mac(&crate::net_config::GATEWAY_IP) {
+            Ok(mac) => {
+                // ゼロ MAC でなければ成功
+                mac != [0, 0, 0, 0, 0, 0]
+            }
+            Err(_) => false,
+        }
+    }
+
     fn test_network_dns(&self) -> bool {
         match crate::netstack::dns_lookup("example.com") {
             Ok(ip) => ip != [0, 0, 0, 0],

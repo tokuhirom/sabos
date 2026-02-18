@@ -43,16 +43,16 @@ user-std プログラムから `std::net` を使うと壊れる。カーネル�
 - [ ] DNS 解決を `SYS_NET_DNS_LOOKUP` syscall に書き換え
 - [ ] HELLOSTD.ELF の net テストが PASS することを確認
 
-## Phase 3: ARP キャッシュの実装
+## Phase 3: ARP キャッシュの実装 ✅
 
 現在すべての送信フレームで宛先 MAC にブロードキャストを使用している。
 QEMU SLIRP では動くが、実ネットワークでは正しく動作しない。
 
-- [ ] ARP テーブル（IP → MAC のキャッシュ）を netstack に追加
-- [ ] 送信時に ARP テーブルを参照し、ミスなら ARP Request を送信
-- [ ] ARP Reply を受信したらテーブルを更新
-- [ ] ゲートウェイ MAC の解決（デフォルトルートの場合はゲートウェイの MAC を使う）
-- [ ] `send_tcp_packet_internal`, `send_udp_packet`, `send_icmp_echo_reply` 等からブロードキャスト MAC を除去
+- [x] ARP テーブル（IP → MAC のキャッシュ）を netstack に追加
+- [x] 送信時に ARP テーブルを参照し、ミスなら ARP Request を送信
+- [x] ARP Reply を受信したらテーブルを更新
+- [x] ゲートウェイ MAC の解決（デフォルトルートの場合はゲートウェイの MAC を使う）
+- [x] `send_tcp_packet_internal`, `send_udp_packet`, `send_icmp_echo_reply` 等からブロードキャスト MAC を除去
 
 ## Phase 4: TCP ISN / DNS ID のランダム化
 

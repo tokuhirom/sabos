@@ -162,14 +162,14 @@ QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続す�
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（49 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（57 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（49 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（57 項目）:
 
 ```
 sabos> selftest
@@ -179,7 +179,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 49/49 PASSED ===
+=== SELFTEST END: 57/57 PASSED ===
 ```
 
 ## CI/CD
@@ -278,7 +278,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 49/49 PASSED ===
+=== SELFTEST END: 57/57 PASSED ===
 ```
 
 ### シェルの起動フロー
