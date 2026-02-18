@@ -107,18 +107,39 @@ lazy_static! {
         // #DB: デバッグ例外
         idt.debug.set_handler_fn(debug_handler);
 
+        // #NMI: Non-Maskable Interrupt（HW ウォッチドッグ、メモリエラー等）
+        idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
+
         // #BP: ブレークポイント（int3 命令）
         // デバッグ用。意図的に発生させてテストできる。
         idt.breakpoint.set_handler_fn(breakpoint_handler);
 
+        // #OF: Overflow（INTO 命令でオーバーフローフラグが立っている場合）
+        idt.overflow.set_handler_fn(overflow_handler);
+
+        // #BR: Bound Range Exceeded（BOUND 命令で範囲外）
+        idt.bound_range_exceeded.set_handler_fn(bound_range_handler);
+
         // #UD: 不正オペコード（CPU が理解できない命令を実行しようとした）
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+
+        // #NM: Device Not Available（x87 FPU が使えない状態でFPU命令を実行）
+        idt.device_not_available.set_handler_fn(device_not_available_handler);
 
         // #GP: 一般保護違反（特権違反、不正なメモリアクセス等）
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
 
         // #PF: ページフォルト（マッピングされていないメモリへのアクセス等）
         idt.page_fault.set_handler_fn(page_fault_handler);
+
+        // #TS: Invalid TSS（タスク切り替え時に TSS が不正）
+        idt.invalid_tss.set_handler_fn(invalid_tss_handler);
+
+        // #NP: Segment Not Present（セグメントの P ビットが 0）
+        idt.segment_not_present.set_handler_fn(segment_not_present_handler);
+
+        // #SS: Stack-Segment Fault（スタックセグメント関連のエラー）
+        idt.stack_segment_fault.set_handler_fn(stack_segment_fault_handler);
 
         // #DF: ダブルフォルト（例外ハンドラ実行中に別の例外が起きた場合）
         // これが最後の砦。ここでも失敗するとトリプルフォルト → CPU リセット。
@@ -128,6 +149,18 @@ lazy_static! {
                 .set_handler_fn(double_fault_handler)
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
+
+        // #MF: x87 Floating-Point Exception（x87 FPU の演算エラー）
+        idt.x87_floating_point.set_handler_fn(x87_fp_handler);
+
+        // #AC: Alignment Check（アライメント違反、Ring 3 + AM=1 + AC=1 で発生）
+        idt.alignment_check.set_handler_fn(alignment_check_handler);
+
+        // #MC: Machine Check（ハードウェアの致命的エラー、回復不能）
+        idt.machine_check.set_handler_fn(machine_check_handler);
+
+        // #XM: SIMD Floating-Point Exception（SSE/AVX の演算エラー）
+        idt.simd_floating_point.set_handler_fn(simd_fp_handler);
 
         // --- ハードウェア割り込みハンドラの登録 (32番〜) ---
 
@@ -203,6 +236,10 @@ extern "x86-interrupt" fn debug_handler(stack_frame: InterruptStackFrame) {
     panic!("CPU EXCEPTION: DEBUG (#DB)\n{:#?}", stack_frame);
 }
 
+extern "x86-interrupt" fn nmi_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: NON-MASKABLE INTERRUPT (#NMI)\n{:#?}", stack_frame);
+}
+
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     // ブレークポイントは致命的ではないので panic しない。
     // ただし今はシリアルもフレームバッファもハンドラから使えないので、
@@ -210,8 +247,20 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     let _ = stack_frame;
 }
 
+extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: OVERFLOW (#OF)\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: BOUND RANGE EXCEEDED (#BR)\n{:#?}", stack_frame);
+}
+
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
     panic!("CPU EXCEPTION: INVALID OPCODE (#UD)\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: DEVICE NOT AVAILABLE (#NM)\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -266,6 +315,36 @@ extern "x86-interrupt" fn page_fault_handler(
     );
 }
 
+extern "x86-interrupt" fn invalid_tss_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "CPU EXCEPTION: INVALID TSS (#TS)\nError code: {}\n{:#?}",
+        error_code, stack_frame
+    );
+}
+
+extern "x86-interrupt" fn segment_not_present_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "CPU EXCEPTION: SEGMENT NOT PRESENT (#NP)\nError code: {}\n{:#?}",
+        error_code, stack_frame
+    );
+}
+
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "CPU EXCEPTION: STACK-SEGMENT FAULT (#SS)\nError code: {}\n{:#?}",
+        error_code, stack_frame
+    );
+}
+
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
@@ -278,13 +357,56 @@ extern "x86-interrupt" fn double_fault_handler(
     );
 }
 
+extern "x86-interrupt" fn x87_fp_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: x87 FLOATING-POINT (#MF)\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn alignment_check_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    panic!(
+        "CPU EXCEPTION: ALIGNMENT CHECK (#AC)\nError code: {}\n{:#?}",
+        error_code, stack_frame
+    );
+}
+
+extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
+    // Machine Check は回復不能な致命的ハードウェアエラー。
+    // diverging ハンドラとして実装する（戻れない）。
+    panic!("CPU EXCEPTION: MACHINE CHECK (#MC)\n{:#?}", stack_frame);
+}
+
+extern "x86-interrupt" fn simd_fp_handler(stack_frame: InterruptStackFrame) {
+    panic!("CPU EXCEPTION: SIMD FLOATING-POINT (#XM)\n{:#?}", stack_frame);
+}
+
+// =================================================================
+// EOI (End Of Interrupt) ヘルパー
+// =================================================================
+//
+// APIC モードと PIC モードで EOI の送信先が異なる。
+// この関数で切り替えを隠蔽し、ハンドラ側のコードを統一する。
+
+/// 割り込みハンドラから EOI を送信する。
+/// APIC が有効なら Local APIC に、そうでなければ PIC に EOI を送る。
+fn eoi(vector: u8) {
+    if crate::apic::is_apic_active() {
+        crate::apic::local_apic_eoi();
+    } else {
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(vector);
+        }
+    }
+}
+
 // =================================================================
 // ハードウェア割り込みハンドラの実装 (32番〜)
 // =================================================================
 //
-// ハードウェア割り込みは CPU 例外と違って、処理後に PIC に
+// ハードウェア割り込みは CPU 例外と違って、処理後に割り込みコントローラに
 // EOI (End Of Interrupt) を送る必要がある。
-// EOI を送らないと PIC は「まだ処理中」と判断して、
+// EOI を送らないと割り込みコントローラは「まだ処理中」と判断して、
 // 同じ優先度以下の割り込みをブロックし続ける。
 
 /// IRQ 0: タイマー割り込みハンドラ。
@@ -302,11 +424,8 @@ extern "x86-interrupt" fn double_fault_handler(
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    // EOI を先に送る（プリエンプション前に PIC をクリアする）
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
+    // EOI を先に送る（プリエンプション前に割り込みコントローラをクリアする）
+    eoi(InterruptIndex::Timer.as_u8());
 
     // プリエンプティブスケジューリング:
     // 現在のタスクを中断して、次の Ready タスクに切り替える。
@@ -366,11 +485,8 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
         }
     }
 
-    // PIC に EOI を送る。
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    // 割り込みコントローラに EOI を送る。
+    eoi(InterruptIndex::Keyboard.as_u8());
 }
 
 /// IRQ 12: マウス割り込みハンドラ。
@@ -381,8 +497,5 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     let byte = unsafe { Port::<u8>::new(0x60).read() };
     crate::mouse::handle_irq_byte(byte);
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
-    }
+    eoi(InterruptIndex::Mouse.as_u8());
 }

@@ -101,49 +101,50 @@ pub fn read_bar(bus: u8, device: u8, function: u8, bar_index: u8) -> u32 {
     pci_config_read32(bus, device, function, offset)
 }
 
-/// PCI バス 0 のすべてのデバイスを列挙する。
+/// 指定されたバスのすべてのデバイスをスキャンし、結果を devices に追加する。
 ///
-/// バス 0 のデバイス 0〜31、各デバイスのファンクション 0〜7 をスキャンする。
-/// ベンダー ID が 0xFFFF のデバイスは存在しない（空スロット）のでスキップ。
+/// PCI-to-PCI ブリッジ (class=0x06, subclass=0x04) を検出した場合、
+/// ブリッジの secondary bus 番号を読み取って再帰的にスキャンする。
+/// これにより複数バスにまたがるデバイスも列挙できる。
 ///
-/// マルチファンクションデバイスの判定:
-///   ファンクション 0 のヘッダータイプ (offset 0x0E) の bit 7 が:
-///   1 = マルチファンクション → ファンクション 1〜7 もスキャン
-///   0 = シングルファンクション → ファンクション 0 のみ
-pub fn enumerate_bus() -> Vec<PciDevice> {
-    let mut devices = Vec::new();
+/// depth は再帰の深さ制限（無限ループ防止）。PCI の仕様上バスは 256 本まで。
+fn scan_bus(bus: u8, devices: &mut Vec<PciDevice>, depth: u8) {
+    // 再帰の深さ制限（PCI バスは最大 256 本なので 8 階層で十分）
+    if depth > 8 {
+        return;
+    }
 
     for device_num in 0..32u8 {
         // まずファンクション 0 を確認
-        let vendor_id = pci_config_read16(0, device_num, 0, 0x00);
+        let vendor_id = pci_config_read16(bus, device_num, 0, 0x00);
         if vendor_id == 0xFFFF {
             // デバイスが存在しない
             continue;
         }
 
         // ヘッダータイプを読んでマルチファンクションか判定
-        let header_type = pci_config_read16(0, device_num, 0, 0x0E) as u8;
+        let header_type = pci_config_read16(bus, device_num, 0, 0x0E) as u8;
         let is_multi_function = (header_type & 0x80) != 0;
 
         // スキャンするファンクション数を決定
         let max_func = if is_multi_function { 8 } else { 1 };
 
         for func in 0..max_func {
-            let vid = pci_config_read16(0, device_num, func, 0x00);
+            let vid = pci_config_read16(bus, device_num, func, 0x00);
             if vid == 0xFFFF {
                 continue;
             }
 
-            let did = pci_config_read16(0, device_num, func, 0x02);
+            let did = pci_config_read16(bus, device_num, func, 0x02);
 
             // クラスコード (offset 0x08): [31:24]=class, [23:16]=subclass, [15:8]=prog_if
-            let class_reg = pci_config_read32(0, device_num, func, 0x08);
+            let class_reg = pci_config_read32(bus, device_num, func, 0x08);
             let class_code = ((class_reg >> 24) & 0xFF) as u8;
             let subclass = ((class_reg >> 16) & 0xFF) as u8;
             let prog_if = ((class_reg >> 8) & 0xFF) as u8;
 
             devices.push(PciDevice {
-                bus: 0,
+                bus,
                 device: device_num,
                 function: func,
                 vendor_id: vid,
@@ -152,10 +153,128 @@ pub fn enumerate_bus() -> Vec<PciDevice> {
                 subclass,
                 prog_if,
             });
+
+            // PCI-to-PCI ブリッジを検出した場合、secondary bus を再帰スキャン
+            // class=0x06 (Bridge), subclass=0x04 (PCI-to-PCI)
+            if class_code == 0x06 && subclass == 0x04 {
+                // offset 0x18: Primary Bus (8bit) | Secondary Bus (8bit) | ...
+                // secondary bus は offset 0x19 (= 0x18 の上位バイト側)
+                let bus_reg = pci_config_read32(bus, device_num, func, 0x18);
+                let secondary_bus = ((bus_reg >> 8) & 0xFF) as u8;
+                if secondary_bus != 0 && secondary_bus != bus {
+                    scan_bus(secondary_bus, devices, depth + 1);
+                }
+            }
         }
     }
+}
 
+/// すべての PCI バスを再帰的に列挙する。
+///
+/// バス 0 からスキャンを開始し、PCI-to-PCI ブリッジ経由で
+/// 下流のバスも再帰的にスキャンする。
+/// 実機では複数のバスにデバイスが分散していることがある
+/// （例: NVMe が PCIe ブリッジ配下にある場合など）。
+pub fn enumerate_all_buses() -> Vec<PciDevice> {
+    let mut devices = Vec::new();
+    scan_bus(0, &mut devices, 0);
     devices
+}
+
+/// PCI バス 0 のすべてのデバイスを列挙する（後方互換性のエイリアス）。
+///
+/// 内部的には enumerate_all_buses() を呼び出し、全バスをスキャンする。
+pub fn enumerate_bus() -> Vec<PciDevice> {
+    enumerate_all_buses()
+}
+
+/// 64 ビット BAR の値を読み取る（Phase 1 以降の NVMe 等で使用予定）。
+///
+/// PCI の BAR は 32 ビットだが、メモリマップド I/O で 4GB 以上のアドレスを使う場合、
+/// 2 つの連続する BAR を使って 64 ビットアドレスを表現する。
+/// BAR の type bits ([2:1]) が 0b10 の場合、次の BAR と合わせて 64 ビットアドレスになる。
+///
+/// bar_index は最初の BAR のインデックス（0〜4）。次の BAR (bar_index+1) も読み取る。
+#[allow(dead_code)]
+pub fn read_bar64(bus: u8, device: u8, function: u8, bar_index: u8) -> u64 {
+    let low = read_bar(bus, device, function, bar_index);
+    let high = read_bar(bus, device, function, bar_index + 1);
+    // 下位 BAR のベースアドレス部分（bit [31:4]）と上位 BAR を結合
+    ((high as u64) << 32) | (low as u64)
+}
+
+/// PCI ケイパビリティリストの先頭オフセットを返す。
+///
+/// PCI デバイスがケイパビリティリストをサポートしているかどうかは、
+/// Status レジスタ (offset 0x06) の bit 4 (Capabilities List) で判定する。
+/// サポートしている場合、Capabilities Pointer (offset 0x34) に
+/// 最初のケイパビリティ構造体のオフセットが格納されている。
+fn capabilities_pointer(bus: u8, device: u8, function: u8) -> Option<u8> {
+    let status = pci_config_read16(bus, device, function, 0x06);
+    // bit 4: Capabilities List フラグ
+    if status & (1 << 4) == 0 {
+        return None;
+    }
+    // Capabilities Pointer (offset 0x34) の下位 8 ビットがオフセット
+    let cap_ptr = (pci_config_read32(bus, device, function, 0x34) & 0xFF) as u8;
+    if cap_ptr == 0 {
+        return None;
+    }
+    Some(cap_ptr)
+}
+
+/// PCI ケイパビリティの種類を表す定数。
+#[allow(dead_code)]
+pub mod capability_id {
+    /// MSI (Message Signaled Interrupts) ケイパビリティ
+    pub const MSI: u8 = 0x05;
+    /// MSI-X ケイパビリティ
+    pub const MSIX: u8 = 0x11;
+}
+
+/// PCI ケイパビリティ情報（Phase 1 以降の MSI/MSI-X 設定で使用予定）。
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PciCapability {
+    /// ケイパビリティ ID（capability_id 定数参照）
+    pub id: u8,
+    /// Configuration Space 内のオフセット
+    pub offset: u8,
+}
+
+/// PCI ケイパビリティリストを走査し、すべてのケイパビリティを返す。
+///
+/// ケイパビリティリストはリンクリスト構造になっている:
+///   各エントリの [7:0] = Capability ID, [15:8] = Next Pointer
+///   Next Pointer が 0 でリスト終端。
+///
+/// Phase 0 では MSI/MSI-X の**検出のみ**を目的とする（設定は Phase 1 以降）。
+#[allow(dead_code)]
+pub fn enumerate_capabilities(bus: u8, device: u8, function: u8) -> Vec<PciCapability> {
+    let mut caps = Vec::new();
+    let mut offset = match capabilities_pointer(bus, device, function) {
+        Some(ptr) => ptr,
+        None => return caps,
+    };
+
+    // リンクリストを辿る（最大 48 回で打ち切り。無限ループ防止）
+    for _ in 0..48 {
+        if offset == 0 {
+            break;
+        }
+        let cap_reg = pci_config_read32(bus, device, function, offset);
+        let cap_id = (cap_reg & 0xFF) as u8;
+        let next_ptr = ((cap_reg >> 8) & 0xFF) as u8;
+
+        caps.push(PciCapability {
+            id: cap_id,
+            offset,
+        });
+
+        offset = next_ptr;
+    }
+
+    caps
 }
 
 /// virtio-blk デバイスを PCI バスから探す。
@@ -172,7 +291,7 @@ pub fn enumerate_bus() -> Vec<PciDevice> {
 /// 複数の virtio-blk デバイス (device_id=0x1001) が PCI バス上に現れる。
 /// 見つかった全デバイスを Vec で返す。
 pub fn find_all_virtio_blk() -> alloc::vec::Vec<PciDevice> {
-    let devices = enumerate_bus();
+    let devices = enumerate_all_buses();
     devices
         .into_iter()
         .filter(|dev| dev.vendor_id == 0x1AF4 && dev.device_id == 0x1001)
@@ -221,7 +340,7 @@ pub fn pci_config_write16(bus: u8, device: u8, function: u8, offset: u8, value: 
 /// QEMU の `-device AC97` でエミュレートされるデバイス。
 /// 見つかった最初のデバイスを返す。見つからなければ None。
 pub fn find_ac97() -> Option<PciDevice> {
-    let devices = enumerate_bus();
+    let devices = enumerate_all_buses();
     for dev in devices {
         if dev.vendor_id == 0x8086 && dev.device_id == 0x2415 {
             return Some(dev);
@@ -238,7 +357,7 @@ pub fn find_ac97() -> Option<PciDevice> {
 ///
 /// 見つかった最初のデバイスを返す。見つからなければ None。
 pub fn find_virtio_net() -> Option<PciDevice> {
-    let devices = enumerate_bus();
+    let devices = enumerate_all_buses();
     for dev in devices {
         // virtio vendor ID = 0x1AF4
         // virtio-net legacy device ID = 0x1000
@@ -258,7 +377,7 @@ pub fn find_virtio_net() -> Option<PciDevice> {
 /// QEMU の `-virtfs` オプションで作成される virtio-9p デバイスを検出する。
 /// 見つかった最初のデバイスを返す。見つからなければ None。
 pub fn find_virtio_9p() -> Option<PciDevice> {
-    let devices = enumerate_bus();
+    let devices = enumerate_all_buses();
     for dev in devices {
         if dev.vendor_id == 0x1AF4 && dev.device_id == 0x1009 {
             return Some(dev);

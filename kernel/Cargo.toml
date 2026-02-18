@@ -16,6 +16,8 @@ sabos-fat-core = { path = "../libs/fat-core" }
 sabos-fat32 = { path = "../libs/fat32" }
 sabos-textutil = { path = "../libs/textutil" }
 sabos-syscall = { path = "../libs/sabos-syscall" }
+acpi = { version = "5.0", default-features = false, features = ["alloc"] }
+x2apic = "0.5"
 
 [features]
 # 起動時のデモを有効化する。普段は無効にしてシェルの起動を優先する。

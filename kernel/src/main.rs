@@ -6,7 +6,9 @@
 extern crate alloc;
 
 mod ac97;
+mod acpi;
 mod allocator;
+mod apic;
 mod console;
 mod elf;
 mod fat32;
@@ -43,9 +45,15 @@ mod virtio_net;
 // #[macro_export] で定義されたマクロはクレートルートに配置される。
 
 use core::fmt::Write;
+use core::sync::atomic::{AtomicU64, Ordering};
 use uefi::prelude::*;
 use uefi::proto::console::gop::GraphicsOutput;
 use uefi::mem::memory_map::{MemoryMap, MemoryType};
+
+/// RSDP の物理アドレス。
+/// UEFI Configuration Table から取得する。ACPI テーブルパースに必要。
+/// Exit Boot Services の前に取得して保存する（UEFI サービスが使えるうちに）。
+static RSDP_PHYS_ADDR: AtomicU64 = AtomicU64::new(0);
 
 use crate::framebuffer::FramebufferInfo;
 
@@ -102,6 +110,45 @@ fn main() -> Status {
 
     // --- GOP のプロトコルハンドルを解放する ---
     drop(gop);
+
+    // --- RSDP アドレスの取得 ---
+    // UEFI Configuration Table から ACPI の RSDP (Root System Description Pointer) を探す。
+    // RSDP は ACPI テーブル群のルートで、ここから MADT (APIC 情報) 等にアクセスできる。
+    // Exit Boot Services の後は UEFI テーブルにアクセスできなくなるため、
+    // ここで取得して static 変数に保存する。
+    // ACPI 2.0 (ACPI2_GUID) を優先し、なければ ACPI 1.0 (ACPI_GUID) にフォールバック。
+    {
+        use uefi::table::cfg::{ACPI_GUID, ACPI2_GUID};
+        // with_config_table のクロージャは Fn（不変参照キャプチャ）なので、
+        // AtomicU64 に直接書き込むことで可変参照の問題を回避する。
+        uefi::system::with_config_table(|entries| {
+            // まず ACPI 2.0 を探す（新しい規格を優先）
+            for entry in entries {
+                if entry.guid == ACPI2_GUID {
+                    RSDP_PHYS_ADDR.store(entry.address as u64, Ordering::Relaxed);
+                    return;
+                }
+            }
+            // ACPI 2.0 がなければ ACPI 1.0 にフォールバック
+            for entry in entries {
+                if entry.guid == ACPI_GUID {
+                    RSDP_PHYS_ADDR.store(entry.address as u64, Ordering::Relaxed);
+                    return;
+                }
+            }
+        });
+        let rsdp_addr = RSDP_PHYS_ADDR.load(Ordering::Relaxed);
+        if rsdp_addr != 0 {
+            RSDP_PHYS_ADDR.store(rsdp_addr, Ordering::Relaxed);
+            uefi::system::with_stdout(|stdout| {
+                write!(stdout, "RSDP found at {:#x}\r\n", rsdp_addr).ok();
+            });
+        } else {
+            uefi::system::with_stdout(|stdout| {
+                let _ = stdout.write_str("RSDP not found in UEFI config table\r\n");
+            });
+        }
+    }
 
     // =================================================================
     // Exit Boot Services — ここが UEFI アプリからカーネルへの分岐点
@@ -219,6 +266,22 @@ fn main() -> Status {
     scheduler::init();
     framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
     kprintln!("Scheduler initialized.");
+    kprintln!();
+
+    // --- ACPI テーブルのパース ---
+    // UEFI から取得した RSDP アドレスを使って ACPI テーブルをパースする。
+    // APIC（割り込みコントローラ）の情報を取得する。
+    // ヒープが必要なので allocator::init() の後に呼ぶ。
+    {
+        let rsdp_addr = RSDP_PHYS_ADDR.load(Ordering::Relaxed);
+        acpi::init(rsdp_addr);
+    }
+
+    // --- APIC の初期化 ---
+    // ACPI から取得した情報を元に Local APIC + I/O APIC を初期化する。
+    // PIC から APIC に移行し、タイマー・キーボード・マウスの割り込みを APIC 経由にする。
+    // ACPI 情報がない場合は PIC のまま動作する。
+    apic::init();
     kprintln!();
 
     // --- virtio-blk ドライバの初期化 ---

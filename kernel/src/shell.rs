@@ -1011,6 +1011,22 @@ impl Shell {
 
             // 11.18. waitpid のテスト（spawn → waitpid で task_id と exit_code を検証）
             run_test("waitpid", this.test_waitpid());
+
+            // 11.19. ACPI テーブル検出のテスト（APIC 情報が取得できること）
+            run_test("acpi_detect", crate::acpi::get_apic_info().is_some());
+
+            // 11.20. APIC 有効化のテスト（PIC から APIC に移行済みであること）
+            run_test("apic_active", crate::apic::is_apic_active());
+
+            // 11.21. PCI マルチバス列挙のテスト
+            // enumerate_all_buses() の結果がバス 0 のデバイスを含むことを確認。
+            // QEMU では必ずバス 0 にデバイスがある。
+            run_test("pci_multibus", {
+                let all_devices = crate::pci::enumerate_all_buses();
+                let bus0_count = all_devices.iter().filter(|d| d.bus == 0).count();
+                // バス 0 に少なくとも 1 デバイス存在すること
+                bus0_count > 0
+            });
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
