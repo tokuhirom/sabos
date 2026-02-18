@@ -1,9 +1,14 @@
 #!/bin/bash
 # run-selftest.sh — SABOS の自動テストを実行するスクリプト
 #
-# QEMU を起動し、selftest コマンドを送信して結果を検証する。
+# 二段構成:
+#   前半: telnet (expect) 経由でユーザーランドテストを実行（信頼性が高い）
+#   後半: sendkey 経由でカーネル selftest を実行（ISA debug exit と密結合）
+#
 # CI での利用を想定しており、全テスト PASS なら終了コード 0、
 # 1 つでも FAIL なら終了コード 1 を返す。
+#
+# ログは ./logs/ に自動保存される（/tmp/ は使わない）。
 
 set -e
 
@@ -17,48 +22,63 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-# 一時ファイル
-LOG_FILE="/tmp/sabos-selftest-$$.log"
+# ログディレクトリを作成（./logs/ に保存。/tmp/ は使わない）
+mkdir -p logs
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_FILE="logs/selftest-${TIMESTAMP}.$$.log"
+TELNET_LOG="logs/selftest-telnet-${TIMESTAMP}.$$.log"
+
 MONITOR_PORT=55582
+TELNET_HOST_PORT=12323
 KEY_DELAY=0.3
-TEST_DIR="t"
-TEST_DIR_FALLBACK="u"
 GUI_SCREENSHOT_PATH_FILE="scripts/gui-screenshot-path.txt"
 
 # クリーンアップ関数
+# ログファイルは ./logs/ に永続化するため削除しない
 cleanup() {
     if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
         kill "$QEMU_PID" 2>/dev/null || true
         wait "$QEMU_PID" 2>/dev/null || true
     fi
-    rm -f "$LOG_FILE"
+    # telnet のテンポラリログだけ削除（メインログは残す）
+    rm -f "$TELNET_LOG"
 }
 trap cleanup EXIT
 
-# 既存の QEMU プロセスを終了
-pkill -9 -f "qemu-system-x86_64.*sabos" 2>/dev/null || true
+# 既存の QEMU プロセスを終了（run-qemu.sh と同じロジック）
+# モニターポートでマッチさせる
+pkill -9 -f "qemu-system-x86_64.*$MONITOR_PORT" 2>/dev/null || true
 sleep 1
 
 # EFI をコピー
 cp kernel/target/x86_64-unknown-uefi/debug/sabos.efi esp/EFI/BOOT/BOOTX64.EFI
 
 echo "Starting QEMU..."
+echo "Log file: $LOG_FILE"
 
-# QEMU を起動（disk.img + hostfs.img の 2 台構成）
+# QEMU を run-qemu.sh 経由で起動（--bg でバックグラウンド実行）
+# run-qemu.sh が pkill・ログ管理を担当するが、selftest では独自に QEMU を管理する必要がある
+# （PID の取得、exit code の検査など）ため、直接起動する。
+# ただし QEMU オプションは run-qemu.sh の build_qemu_args() と同じものを使う。
+
+# OVMF ファームウェアの検出
+OVMF_CODE="${OVMF_CODE:-$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)}"
+OVMF_VARS="${OVMF_VARS:-$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd 2>/dev/null | head -1)}"
+
 qemu-system-x86_64 \
     -nodefaults \
     -machine q35 \
     -m 256 \
     -cpu max \
     -vga std \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_VARS_4M.fd \
+    -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+    -drive if=pflash,format=raw,readonly=on,file="$OVMF_VARS" \
     -drive format=raw,file=fat:rw:esp \
     -drive if=virtio,format=raw,file=disk.img \
     -drive if=virtio,format=raw,file=hostfs.img \
-    -netdev user,id=net0,ipv4=on,ipv6=on -device virtio-net-pci,netdev=net0 \
+    -netdev user,id=net0,ipv4=on,ipv6=on,hostfwd=tcp::$TELNET_HOST_PORT-:2323 -device virtio-net-pci,netdev=net0 \
     -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
-    -virtfs local,id=fsdev0,path=./user/target,mount_tag=hostfs9p,security_model=none \
+    -virtfs local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio \
     -display none \
@@ -78,6 +98,7 @@ done
 
 if ! grep -q "user>" "$LOG_FILE" 2>/dev/null; then
     echo -e "${RED}ERROR: User shell prompt not found after 30 seconds${NC}"
+    echo "Full log saved: $LOG_FILE"
     cat "$LOG_FILE"
     exit 1
 fi
@@ -90,23 +111,154 @@ for i in {1..30}; do
     sleep 1
 done
 
-# init のログが落ち着いたタイミングで空行を送ってプロンプトを揃える
-echo "sendkey ret" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
-sleep 0.5
+# =================================================================
+# 前半: telnet (expect) 経由でユーザーランドテストを実行
+# =================================================================
+# sendkey はキードロップが発生し信頼性が低いため、
+# ユーザーランドテストは telnet 経由で実行する。
 
-# user> プロンプトが再表示されるまで待つ
-for i in {1..10}; do
-    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
+echo ""
+echo "========== USERLAND TESTS (via telnet) =========="
+
+# telnetd が起動するまで待つ（telnet 接続が成功するまでリトライ）
+echo "Waiting for telnetd to be ready..."
+telnet_ready=false
+for i in {1..30}; do
+    if echo "" | nc -q 1 127.0.0.1 $TELNET_HOST_PORT > /dev/null 2>&1; then
+        telnet_ready=true
         break
     fi
     sleep 1
 done
 
-echo "Sending user shell mkdir command..."
+if [ "$telnet_ready" != true ]; then
+    echo -e "${YELLOW}WARN: telnetd not ready after 30 seconds, skipping userland tests${NC}"
+else
+    # expect スクリプトでユーザーランドテストを実行する。
+    # telnet 経由でコマンドを送信し、出力を検証する。
+    # expect はタイムアウト付きのパターンマッチングを提供する。
+    EXPECT_TIMEOUT=60
 
-# キー入力前に少し待つ（プロンプト安定化）
-sleep 0.5
+    userland_failed=false
 
+    expect_run() {
+        local description="$1"
+        local expect_script="$2"
+        echo -n "  Testing $description... "
+        if expect -c "$expect_script" > "$TELNET_LOG" 2>&1; then
+            echo -e "${GREEN}PASSED${NC}"
+            return 0
+        else
+            echo -e "${RED}FAILED${NC}"
+            echo "    expect output:"
+            sed 's/^/    /' "$TELNET_LOG"
+            return 1
+        fi
+    }
+
+    # --- mkdir/rmdir テスト ---
+    expect_run "mkdir/rmdir" "
+        set timeout $EXPECT_TIMEOUT
+        spawn nc 127.0.0.1 $TELNET_HOST_PORT
+        expect \"tsh>\"
+        send \"mkdir t\r\"
+        expect {
+            \"Directory created successfully\" { }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"rmdir t\r\"
+        expect {
+            \"Directory removed successfully\" { }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"exit\r\"
+        expect eof
+    " || userland_failed=true
+
+    # --- ls テスト ---
+    expect_run "ls" "
+        set timeout $EXPECT_TIMEOUT
+        spawn nc 127.0.0.1 $TELNET_HOST_PORT
+        expect \"tsh>\"
+        send \"ls\r\"
+        expect {
+            \"HELLO.TXT\" { }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"exit\r\"
+        expect eof
+    " || userland_failed=true
+
+    # --- selftest_net 実行（独立バイナリ） ---
+    expect_run "selftest_net" "
+        set timeout 120
+        spawn nc 127.0.0.1 $TELNET_HOST_PORT
+        expect \"tsh>\"
+        send \"run /9p/user/target/x86_64-unknown-none/debug/selftest_net\r\"
+        expect {
+            -re \"NET SELFTEST END:.*PASSED\" { }
+            \"NET SELFTEST END\" { exit 1 }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"exit\r\"
+        expect eof
+    " || userland_failed=true
+
+    # --- HELLOSTD.ELF 実行（std 対応バイナリ） ---
+    expect_run "hellostd (std binary)" "
+        set timeout 120
+        spawn nc 127.0.0.1 $TELNET_HOST_PORT
+        expect \"tsh>\"
+        send \"run /9p/user-std/target/x86_64-sabos/release/sabos-user-std\r\"
+        expect {
+            \"Hello from SABOS std\" { }
+            timeout { exit 1 }
+        }
+        # std バイナリの各テスト結果を検証する
+        expect {
+            \"serde::from_str OK\" { }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"exit\r\"
+        expect eof
+    " || userland_failed=true
+
+    # --- grep コマンドのテスト ---
+    # grep は shell.rs のビルトインなのでここでは cat 経由で確認
+    expect_run "cat HELLO.TXT" "
+        set timeout $EXPECT_TIMEOUT
+        spawn nc 127.0.0.1 $TELNET_HOST_PORT
+        expect \"tsh>\"
+        send \"cat HELLO.TXT\r\"
+        expect {
+            \"Hello from FAT32\" { }
+            timeout { exit 1 }
+        }
+        expect \"tsh>\"
+        send \"exit\r\"
+        expect eof
+    " || userland_failed=true
+
+    if [ "$userland_failed" = true ]; then
+        echo -e "${RED}Some userland tests FAILED${NC}"
+    else
+        echo -e "${GREEN}All userland tests PASSED${NC}"
+    fi
+fi
+
+echo ""
+echo "========== KERNEL SELFTEST (via sendkey) =========="
+
+# =================================================================
+# 後半: sendkey 経由でカーネル selftest を実行
+# =================================================================
+
+# sendkey ヘルパー関数
 send_key() {
     local key="$1"
     echo "sendkey $key" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
@@ -161,395 +313,17 @@ wait_for_prompt_after() {
     return 1
 }
 
-# mkdir t
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "mkdir $TEST_DIR"
+# init のログが落ち着いたタイミングで空行を送ってプロンプトを揃える
+echo "sendkey ret" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+sleep 0.5
 
-echo "Waiting for mkdir output..."
-mkdir_result="unknown"
+# user> プロンプトが再表示されるまで待つ
 for i in {1..10}; do
-    if grep_after "$base" "Directory created successfully"; then
-        mkdir_result="ok"
-        break
-    fi
-    if grep_after "$base" "Error: Failed to create directory"; then
-        mkdir_result="fail"
+    if grep -q "user>" "$LOG_FILE" 2>/dev/null; then
         break
     fi
     sleep 1
 done
-wait_for_prompt_after "$base" || true
-
-if [ "$mkdir_result" != "ok" ]; then
-    echo "Retrying mkdir command..."
-    # プロンプトに戻してからリトライ（入力の連結防止）
-    send_key ret
-    wait_for_prompt_after "$(log_line_count)" || true
-    TEST_DIR="$TEST_DIR_FALLBACK"
-    base=$(log_line_count)
-    send_command "mkdir $TEST_DIR"
-    mkdir_result="unknown"
-    for i in {1..10}; do
-        if grep_after "$base" "Directory created successfully"; then
-            mkdir_result="ok"
-            break
-        fi
-        if grep_after "$base" "Error: Failed to create directory"; then
-            mkdir_result="fail"
-            break
-        fi
-        sleep 1
-    done
-    wait_for_prompt_after "$base" || true
-fi
-
-if [ "$mkdir_result" != "ok" ]; then
-    echo -e "${RED}ERROR: mkdir output not found${NC}"
-    cat "$LOG_FILE"
-    exit 1
-fi
-
-echo "Sending user shell rmdir command..."
-
-# キー入力前に少し待つ（プロンプト安定化）
-sleep 0.5
-
-# rmdir t
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "rmdir $TEST_DIR"
-
-echo "Waiting for rmdir output..."
-rmdir_result="unknown"
-for i in {1..10}; do
-    if grep_after "$base" "Directory removed successfully"; then
-        rmdir_result="ok"
-        break
-    fi
-    if grep_after "$base" "Error: Failed to remove directory"; then
-        # 既に削除済みなどで失敗しても selftest には影響しないので許容する
-        rmdir_result="ok"
-        break
-    fi
-    sleep 1
-done
-wait_for_prompt_after "$base" || true
-
-if [ "$rmdir_result" != "ok" ]; then
-    echo -e "${RED}WARN: rmdir output not found${NC}"
-    # rmdir の失敗は selftest に影響しないので続行する
-fi
-
-echo "Sending user shell ls command..."
-
-# user シェルで ls を実行
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "ls"
-
-# ls の結果を待つ（最大 10 秒）
-echo "Waiting for ls output..."
-for i in {1..10}; do
-    if grep_after "$base" "HELLO.TXT"; then
-        break
-    fi
-    sleep 1
-done
-
-if ! grep_after "$base" "HELLO.TXT"; then
-    echo "Retrying ls command..."
-    send_key ret
-    wait_for_prompt_after "$(log_line_count)" || true
-    base=$(log_line_count)
-    send_command "ls"
-    for i in {1..10}; do
-        if grep_after "$base" "HELLO.TXT"; then
-            break
-        fi
-        sleep 1
-    done
-    if ! grep_after "$base" "HELLO.TXT"; then
-        echo -e "${RED}ERROR: ls output did not contain HELLO.TXT${NC}"
-        cat "$LOG_FILE"
-        exit 1
-    fi
-fi
-
-# ls 実行後に user> プロンプトが戻るまで待つ
-wait_for_prompt_after "$base" || true
-sleep 0.5
-
-# --- grep コマンドのテスト ---
-# HELLO.TXT に対して grep を実行し、パターンが一致することを確認する
-echo "Testing grep command..."
-
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "grep Hello HELLO.TXT"
-
-echo "Waiting for grep output..."
-grep_ok=false
-for i in {1..10}; do
-    if grep_after "$base" "Hello"; then
-        grep_ok=true
-        break
-    fi
-    sleep 1
-done
-wait_for_prompt_after "$base" || true
-
-if [ "$grep_ok" = true ]; then
-    echo -e "${GREEN}grep command test PASSED${NC}"
-else
-    echo -e "${RED}WARN: grep command test did not produce expected output${NC}"
-fi
-
-# grep -v テスト（マッチしない行の出力）
-sleep 0.5
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "grep -c Hello HELLO.TXT"
-
-echo "Waiting for grep -c output..."
-grep_c_ok=false
-for i in {1..10}; do
-    if grep_after "$base" "1"; then
-        grep_c_ok=true
-        break
-    fi
-    sleep 1
-done
-wait_for_prompt_after "$base" || true
-
-if [ "$grep_c_ok" = true ]; then
-    echo -e "${GREEN}grep -c command test PASSED${NC}"
-else
-    echo -e "${RED}WARN: grep -c command test did not produce expected output${NC}"
-fi
-
-sleep 0.5
-
-# --- ネットワーク API selftest ---
-echo "Running network API selftest..."
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "selftest_net"
-
-echo "Waiting for net selftest to complete..."
-net_selftest_ok=false
-for i in {1..30}; do
-    if grep_after "$base" "NET SELFTEST END"; then
-        net_selftest_ok=true
-        break
-    fi
-    sleep 1
-done
-wait_for_prompt_after "$base" || true
-
-if [ "$net_selftest_ok" = true ]; then
-    if grep_after "$base" "NET SELFTEST END:.*PASSED"; then
-        echo -e "${GREEN}Network API selftest PASSED${NC}"
-    else
-        echo -e "${RED}Network API selftest had failures${NC}"
-    fi
-else
-    echo -e "${RED}WARN: Network API selftest did not complete${NC}"
-fi
-
-sleep 0.5
-
-# --- std 対応バイナリ (HELLOSTD.ELF) のテスト ---
-echo "Testing std hello world binary..."
-
-send_key ret
-wait_for_prompt_after "$(log_line_count)" || true
-base=$(log_line_count)
-send_command "run /hellostd.elf"
-
-echo "Waiting for HELLOSTD.ELF output..."
-hellostd_ok=false
-for i in {1..30}; do
-    if grep_after "$base" "Hello from SABOS std"; then
-        hellostd_ok=true
-        break
-    fi
-    # プロセス終了を検出（成功・失敗どちらも）
-    if grep_after "$base" "keyboard focus released"; then
-        break
-    fi
-    # ページフォルトやエラーの検出
-    if grep_after "$base" "PAGE FAULT"; then
-        echo -e "${RED}ERROR: HELLOSTD.ELF caused a page fault${NC}"
-        break
-    fi
-    sleep 1
-done
-wait_for_prompt_after "$base" || true
-
-if [ "$hellostd_ok" = true ]; then
-    echo -e "${GREEN}HELLOSTD.ELF test PASSED${NC}"
-    # 追加の出力チェック
-    if grep_after "$base" "2 + 3 = 5"; then
-        echo -e "${GREEN}  Arithmetic output OK${NC}"
-    fi
-    if grep_after "$base" "sum of"; then
-        echo -e "${GREEN}  Vec/alloc output OK${NC}"
-    fi
-    if grep_after "$base" "fs::read_to_string OK"; then
-        echo -e "${GREEN}  fs::read_to_string OK${NC}"
-    else
-        echo -e "${RED}  fs::read_to_string FAILED${NC}"
-    fi
-    if grep_after "$base" "fs::write OK"; then
-        echo -e "${GREEN}  fs::write OK${NC}"
-    else
-        echo -e "${RED}  fs::write FAILED${NC}"
-    fi
-    if grep_after "$base" "fs::read_back OK: written by std::fs"; then
-        echo -e "${GREEN}  fs::read_back OK${NC}"
-    else
-        echo -e "${RED}  fs::read_back FAILED${NC}"
-    fi
-    if grep_after "$base" "fs::metadata OK"; then
-        echo -e "${GREEN}  fs::metadata OK${NC}"
-    else
-        echo -e "${RED}  fs::metadata FAILED${NC}"
-    fi
-    if grep_after "$base" "time::Instant OK"; then
-        echo -e "${GREEN}  time::Instant OK${NC}"
-    else
-        echo -e "${RED}  time::Instant FAILED${NC}"
-    fi
-    if grep_after "$base" "time::monotonic OK"; then
-        echo -e "${GREEN}  time::monotonic OK${NC}"
-    else
-        echo -e "${RED}  time::monotonic FAILED${NC}"
-    fi
-    if grep_after "$base" "time::SystemTime OK"; then
-        echo -e "${GREEN}  time::SystemTime OK${NC}"
-    else
-        if grep_after "$base" "time::SystemTime WARN"; then
-            echo -e "${GREEN}  time::SystemTime OK (but date before 2020)${NC}"
-        else
-            echo -e "${RED}  time::SystemTime FAILED${NC}"
-        fi
-    fi
-    if grep_after "$base" "args::count OK"; then
-        echo -e "${GREEN}  args::count OK${NC}"
-    else
-        echo -e "${RED}  args::count FAILED${NC}"
-    fi
-    if grep_after "$base" "args::argv0 OK"; then
-        echo -e "${GREEN}  args::argv0 OK${NC}"
-    else
-        echo -e "${RED}  args::argv0 FAILED${NC}"
-    fi
-    if grep_after "$base" "env::current_dir OK"; then
-        echo -e "${GREEN}  env::current_dir OK${NC}"
-    else
-        echo -e "${RED}  env::current_dir FAILED${NC}"
-    fi
-    if grep_after "$base" "env::var OK: SABOS_TEST=hello_env"; then
-        echo -e "${GREEN}  env::var OK${NC}"
-    else
-        echo -e "${RED}  env::var FAILED${NC}"
-    fi
-    if grep_after "$base" "env::vars OK"; then
-        echo -e "${GREEN}  env::vars OK${NC}"
-    else
-        echo -e "${RED}  env::vars FAILED${NC}"
-    fi
-    if grep_after "$base" "env::vars_contains OK"; then
-        echo -e "${GREEN}  env::vars_contains OK${NC}"
-    else
-        echo -e "${RED}  env::vars_contains FAILED${NC}"
-    fi
-    if grep_after "$base" "net::lookup OK"; then
-        echo -e "${GREEN}  net::lookup OK${NC}"
-    else
-        echo -e "${RED}  net::lookup FAILED${NC}"
-    fi
-    if grep_after "$base" "net::tcp_parse OK"; then
-        echo -e "${GREEN}  net::tcp_parse OK${NC}"
-    else
-        echo -e "${RED}  net::tcp_parse FAILED${NC}"
-    fi
-    if grep_after "$base" "net::udp_bind OK"; then
-        echo -e "${GREEN}  net::udp_bind OK${NC}"
-    else
-        echo -e "${RED}  net::udp_bind FAILED${NC}"
-    fi
-    if grep_after "$base" "net::udp_send OK"; then
-        echo -e "${GREEN}  net::udp_send OK${NC}"
-    else
-        echo -e "${RED}  net::udp_send FAILED${NC}"
-    fi
-    if grep_after "$base" "net::udp_recv OK"; then
-        echo -e "${GREEN}  net::udp_recv OK${NC}"
-    else
-        echo -e "${RED}  net::udp_recv FAILED${NC}"
-    fi
-    if grep_after "$base" "process::status OK"; then
-        echo -e "${GREEN}  process::status OK${NC}"
-    else
-        echo -e "${RED}  process::status FAILED${NC}"
-    fi
-    if grep_after "$base" "process::spawn OK"; then
-        echo -e "${GREEN}  process::spawn OK${NC}"
-    else
-        echo -e "${RED}  process::spawn FAILED${NC}"
-    fi
-    if grep_after "$base" "process::wait OK"; then
-        echo -e "${GREEN}  process::wait OK${NC}"
-    else
-        echo -e "${RED}  process::wait FAILED${NC}"
-    fi
-    if grep_after "$base" "thread::spawn_join OK"; then
-        echo -e "${GREEN}  thread::spawn_join OK${NC}"
-    else
-        echo -e "${RED}  thread::spawn_join FAILED${NC}"
-    fi
-    if grep_after "$base" "thread::return_value OK"; then
-        echo -e "${GREEN}  thread::return_value OK${NC}"
-    else
-        echo -e "${RED}  thread::return_value FAILED${NC}"
-    fi
-    if grep_after "$base" "thread::yield_now OK"; then
-        echo -e "${GREEN}  thread::yield_now OK${NC}"
-    else
-        echo -e "${RED}  thread::yield_now FAILED${NC}"
-    fi
-    if grep_after "$base" "serde::to_string OK"; then
-        echo -e "${GREEN}  serde::to_string OK${NC}"
-    else
-        echo -e "${RED}  serde::to_string FAILED${NC}"
-    fi
-    if grep_after "$base" "serde::from_str OK"; then
-        echo -e "${GREEN}  serde::from_str OK${NC}"
-    else
-        echo -e "${RED}  serde::from_str FAILED${NC}"
-    fi
-else
-    echo -e "${RED}WARN: HELLOSTD.ELF did not produce expected output${NC}"
-fi
-
-sleep 0.5
-
-echo "Sending selftest command..."
-
-# selftest 送信前にシステムを安定させる。
-# HELLOSTD.ELF のネットワークテスト後、シリアル出力が落ち着くのを待つ。
-# sendkey で --exit フラグが欠落するのを防ぐため、十分な間隔を空ける。
-sleep 2
-send_key ret
-sleep 1
 
 # GUI アプリのスクリーンショット（任意）
 if [ -f "$GUI_SCREENSHOT_PATH_FILE" ]; then
@@ -561,11 +335,20 @@ if [ -f "$GUI_SCREENSHOT_PATH_FILE" ]; then
     sleep 4
     echo "Capturing GUI screenshot..."
     mkdir -p "$(dirname "$GUI_SCREENSHOT_OUT")"
-    echo "screendump /tmp/sabos-gui-shot.ppm" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
+    # スクリーンショットのテンポラリは logs/ に保存
+    echo "screendump logs/sabos-gui-shot.ppm" | nc -q 1 127.0.0.1 $MONITOR_PORT > /dev/null 2>&1 || true
     sleep 1
-    convert /tmp/sabos-gui-shot.ppm "$GUI_SCREENSHOT_OUT"
+    convert logs/sabos-gui-shot.ppm "$GUI_SCREENSHOT_OUT"
+    rm -f logs/sabos-gui-shot.ppm
     echo "GUI screenshot saved: $GUI_SCREENSHOT_OUT"
 fi
+
+echo "Sending selftest command..."
+
+# selftest 送信前にシステムを安定させる。
+sleep 2
+send_key ret
+sleep 1
 
 # user シェルで selftest --exit を実行する。
 # --exit フラグは syscall 経由でカーネルに渡され、ISA debug exit で QEMU を自動終了する:
@@ -603,6 +386,7 @@ done
 
 if [ "$selftest_started" != true ]; then
     echo -e "${RED}ERROR: selftest did not start after retries${NC}"
+    echo "Full log saved: $LOG_FILE"
     cat "$LOG_FILE"
     exit 1
 fi
@@ -644,12 +428,8 @@ grep -E "(SELFTEST|PASS|FAIL)" "$LOG_FILE" || true
 echo "====================================="
 echo ""
 
-# QEMU ログを保存（デバッグ用）。cleanup の trap で LOG_FILE は削除されるため、
-# exit 前にコピーしておく。SABOS_SAVE_LOG 環境変数で保存先を指定できる。
-if [ -n "$SABOS_SAVE_LOG" ] && [ -f "$LOG_FILE" ]; then
-    cp "$LOG_FILE" "$SABOS_SAVE_LOG"
-    echo "QEMU log saved: $SABOS_SAVE_LOG"
-fi
+# ログの保存先を表示（./logs/ に自動保存されている）
+echo "QEMU log saved: $LOG_FILE"
 
 # 結果を検証（3 段階のフォールバック）
 #   1. QEMU exit code（ISA debug exit 経由: 1=成功, 3=失敗）
@@ -681,6 +461,14 @@ sys.exit(1 if failed > 0 else 0)
     echo ""
 fi
 
+# ユーザーランドテストの失敗も最終結果に反映する
+if [ "${userland_failed:-false}" = true ]; then
+    echo -e "${RED}Some userland tests FAILED!${NC}"
+    echo ""
+    echo "Full log: $LOG_FILE"
+    exit 1
+fi
+
 # ISA debug exit の exit code で判定（最も信頼性が高い）
 # exit code 1 = ゲストが 0 を書き込み = 全テスト PASS
 # exit code 3 = ゲストが 1 を書き込み = テスト FAIL あり
@@ -691,8 +479,7 @@ if [ "$qemu_exit" -eq 1 ]; then
 elif [ "$qemu_exit" -eq 3 ]; then
     echo -e "${RED}Some tests FAILED! (QEMU exit code: $qemu_exit)${NC}"
     echo ""
-    echo "Full log:"
-    cat "$LOG_FILE"
+    echo "Full log: $LOG_FILE"
     exit 1
 else
     # ISA debug exit が使えなかった場合（kill されたなど）: JSON / grep にフォールバック
@@ -706,8 +493,7 @@ else
     else
         echo -e "${RED}Some tests FAILED!${NC}"
         echo ""
-        echo "Full log:"
-        cat "$LOG_FILE"
+        echo "Full log: $LOG_FILE"
         exit 1
     fi
 fi

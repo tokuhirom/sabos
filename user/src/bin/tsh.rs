@@ -105,7 +105,7 @@ fn handle_line(telnetd_id: u64, line: &[u8]) {
     let cmd = parts.next().unwrap_or("");
     match cmd {
         "help" => {
-            send_output(telnetd_id, "Commands: help ls cat run spawn mem ps ip selftest exit\n");
+            send_output(telnetd_id, "Commands: help ls cat mkdir rmdir run spawn mem ps ip selftest exit\n");
         }
         "ls" => {
             let path = parts.next().unwrap_or("/");
@@ -132,12 +132,74 @@ fn handle_line(telnetd_id: u64, line: &[u8]) {
                 cat_file(telnetd_id, path);
             }
         }
+        "mkdir" => {
+            let path = parts.next().unwrap_or("");
+            if path.is_empty() {
+                send_output(telnetd_id, "Usage: mkdir <path>\n");
+            } else {
+                let result = syscall::dir_create(path);
+                if result < 0 {
+                    send_output(telnetd_id, "Error: Failed to create directory\n");
+                } else {
+                    send_output(telnetd_id, "Directory created successfully\n");
+                }
+            }
+        }
+        "rmdir" => {
+            let path = parts.next().unwrap_or("");
+            if path.is_empty() {
+                send_output(telnetd_id, "Usage: rmdir <path>\n");
+            } else {
+                let result = syscall::dir_remove(path);
+                if result < 0 {
+                    send_output(telnetd_id, "Error: Failed to remove directory\n");
+                } else {
+                    send_output(telnetd_id, "Directory removed successfully\n");
+                }
+            }
+        }
         "run" => {
             let path = parts.next().unwrap_or("");
             if path.is_empty() {
                 send_output(telnetd_id, "Usage: run <path>\n");
             } else {
-                let _ = syscall::exec(path);
+                // パイプを作成して子プロセスの stdout をキャプチャする。
+                // 子プロセスの出力はパイプ経由で読み取り、IPC OUTPUT で telnetd に送信する。
+                match syscall::pipe() {
+                    Ok((read_handle, write_handle)) => {
+                        // 残りの引数を収集
+                        let arg_strs: alloc::vec::Vec<&str> = parts.collect();
+                        let task_id = syscall::spawn_redirected(
+                            path, &arg_strs, None, Some(&write_handle),
+                        );
+                        // 親側の write 端を閉じる（子プロセスが終了すると read が EOF になる）
+                        let _ = syscall::handle_close(&write_handle);
+
+                        if task_id < 0 {
+                            send_output(telnetd_id, "Error: failed to spawn process\n");
+                            let _ = syscall::handle_close(&read_handle);
+                        } else {
+                            // パイプから子プロセスの出力を読み取り、telnetd に転送する
+                            let mut buf = [0u8; 1024];
+                            loop {
+                                let n = syscall::handle_read(&read_handle, &mut buf);
+                                if n <= 0 {
+                                    break;
+                                }
+                                let n = n as usize;
+                                if let Ok(text) = core::str::from_utf8(&buf[..n]) {
+                                    send_output(telnetd_id, text);
+                                }
+                            }
+                            let _ = syscall::handle_close(&read_handle);
+                            // 子プロセスの終了を待つ
+                            let _ = syscall::waitpid(task_id as u64, 0);
+                        }
+                    }
+                    Err(_) => {
+                        send_output(telnetd_id, "Error: failed to create pipe\n");
+                    }
+                }
             }
         }
         "spawn" => {

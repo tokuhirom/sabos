@@ -703,9 +703,34 @@ impl Virtio9p {
             path: 0,
         }; // ルートは dir
 
+        // 空パスの場合は nwname=0 で root_fid をクローンする（ルートディレクトリを参照）
+        if components.is_empty() {
+            let tag = self.alloc_tag();
+            let mut off = 0;
+            off = put_u32(&mut self.tx_buf, off, 0);
+            off = put_u8(&mut self.tx_buf, off, P9_TWALK);
+            off = put_u16(&mut self.tx_buf, off, tag);
+            off = put_u32(&mut self.tx_buf, off, self.root_fid);
+            off = put_u32(&mut self.tx_buf, off, new_fid);
+            off = put_u16(&mut self.tx_buf, off, 0); // nwname=0
+            put_u32(&mut self.tx_buf, 0, off as u32);
+
+            self.transact(off)?;
+
+            let (resp_type, _) = get_u8(&self.rx_buf, 4);
+            if resp_type != P9_RWALK {
+                return Err(V9pError::ProtocolError("expected Rwalk"));
+            }
+
+            return Ok((new_fid, last_qid));
+        }
+
         // 16 コンポーネントずつ walk する（9P の制限）
+        // 注意: `start < components.len()` で正しい。`<=` だと全コンポーネント処理後に
+        // 余分なイテレーションが走り、既に割り当て済みの new_fid への再 walk が発生して
+        // サーバーエラーになる。
         let mut start = 0;
-        while start <= components.len() {
+        while start < components.len() {
             let end = core::cmp::min(start + 16, components.len());
             let chunk = &components[start..end];
 
@@ -741,7 +766,7 @@ impl Virtio9p {
             let (nwqid, mut roff) = get_u16(&self.rx_buf, 7);
 
             // walk 成功: nwqid == nwname ならすべてのコンポーネントが辿れた
-            if (nwqid as usize) != chunk.len() && !chunk.is_empty() {
+            if (nwqid as usize) != chunk.len() {
                 // 部分的な walk — ファイルが見つからなかった
                 // target_fid を clunk する必要はない（walk が失敗した fid はサーバー側で割り当てられていない）
                 return Err(V9pError::ServerError(2)); // ENOENT
@@ -766,10 +791,6 @@ impl Virtio9p {
             }
 
             start = end;
-            // 空のコンポーネント列の場合（nwname=0 = fid クローン）、ループを抜ける
-            if components.is_empty() {
-                break;
-            }
         }
 
         Ok((new_fid, last_qid))

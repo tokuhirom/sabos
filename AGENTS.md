@@ -53,39 +53,6 @@ struct WriteArgs {
 fn sys_write(args: &WriteArgs) -> Result<usize, SyscallError>;
 ```
 
-### アーキテクチャ目標: マイクロカーネル
-
-将来的にはマイクロカーネルアーキテクチャを目指す。
-
-```
-┌─────────────────────────────────────────┐
-│           User Space                     │
-│  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────────┐   │
-│  │Shell│ │FS   │ │Net  │ │Drivers  │   │
-│  └──┬──┘ └──┬──┘ └──┬──┘ └────┬────┘   │
-│     └───────┴───────┴─────────┘         │
-│                  ↓ IPC                   │
-├─────────────────────────────────────────┤
-│           Microkernel                    │
-│  • スケジューラ                          │
-│  • メモリ管理                            │
-│  • IPC (メッセージパッシング)             │
-│  • 割り込みハンドリング                   │
-└─────────────────────────────────────────┘
-```
-
-**メリット:**
-- ドライバやファイルシステムのバグがカーネルをクラッシュさせない
-- コンポーネントを独立して再起動可能
-- カーネルが小さいので形式検証しやすい
-- IPC メッセージに型を付けることで Rust の型安全性を活かせる
-
-**移行ロードマップ:**
-1. 現状: モノリシックカーネルで機能開発を進める
-2. IPC 基盤を設計・実装（型安全なメッセージパッシング）
-3. シェルをユーザー空間に移行
-4. ファイルシステム → ネットワーク → ドライバの順でユーザー空間へ
-
 ## Build & Run
 
 ```bash
@@ -138,13 +105,12 @@ make hostfs-update
 
 | マウントポイント | ファイルシステム | デバイス |
 |----------------|----------------|---------|
-| `/` | fat32d-ipc（Fat32IpcFs） | virtio-blk[0]（disk.img）via fat32d |
+| `/` | fat32（カーネル内） | virtio-blk[0]（disk.img） |
 | `/proc` | ProcFs | なし（疑似ファイルシステム） |
-| `/host` | fat32d-ipc（Fat32IpcFs） | virtio-blk[1]（hostfs.img）via fat32d |
+| `/host` | fat32（カーネル内） | virtio-blk[1]（hostfs.img） |
 | `/9p` | 9P2000.L | virtio-9p（ホスト `./user/target` 共有） |
 
-**ブート時**: カーネル内 FAT32 で `/` と `/host` をマウント。INIT.ELF と全サービスの ELF をカーネル内 FAT32 で高速ロード。
-**fat32d 登録後**: fat32d が SYS_FS_REGISTER を呼ぶと、`/` と `/host` が Fat32IpcFs（IPC プロキシ）に remount される。以後のランタイムファイル操作は fat32d 経由。
+カーネル内 FAT32 で `/` と `/host` をマウント。すべてのファイル操作はカーネル内で完結する。
 
 QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続する（256MB RAM）。カーネルは PCI バスをスキャンして全 virtio デバイスを検出・初期化する。
 
@@ -196,14 +162,14 @@ QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続す�
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（50 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（49 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（50 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（49 項目）:
 
 ```
 sabos> selftest
@@ -213,7 +179,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 50/50 PASSED ===
+=== SELFTEST END: 49/49 PASSED ===
 ```
 
 ## CI/CD
@@ -302,7 +268,7 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果（50 項目全 PASS）:**
+**期待される selftest 結果（49 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
@@ -312,7 +278,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 50/50 PASSED ===
+=== SELFTEST END: 49/49 PASSED ===
 ```
 
 ### シェルの起動フロー
@@ -358,3 +324,13 @@ make run-gui
 **キーボード入力が効かない場合:**
 - GUI モード (`make run-gui`) で実行しているか確認
 - シリアルモード (`make run`) ではキーボード入力は使えない
+
+### ログとテンポラリファイル
+
+- QEMU のログは `./logs/` に自動保存される（タイムスタンプ付き）。`/tmp/` は使わない
+- `make run` / `make run-gui` は `scripts/run-qemu.sh` 経由で QEMU を起動する。既存の QEMU プロセスは自動で pkill される
+- `make run` は `disk.img` が無ければ自動作成する（明示的に再作成したい場合は `make disk-img`）
+- `make test` のログも `./logs/` に保存される。テスト失敗時はログパスが表示される
+- `./tmp/` は .gitignore されているので、ここにテンポラリファイルを書いてもよい
+- `./logs/` も .gitignore されている
+

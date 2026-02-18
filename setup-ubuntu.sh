@@ -9,7 +9,7 @@ echo "=== SABOS 開発環境セットアップ ==="
 # QEMU, OVMF, imagemagick のインストール
 echo "--- apt パッケージのインストール ---"
 sudo apt-get update
-sudo apt-get install -y qemu-system-x86 ovmf imagemagick curl build-essential mtools dosfstools
+sudo apt-get install -y qemu-system-x86 ovmf imagemagick curl build-essential mtools dosfstools expect
 
 # rustup のインストール（未インストールの場合）
 # nightly やターゲットの設定は rust-toolchain.toml で自動的に行われる
