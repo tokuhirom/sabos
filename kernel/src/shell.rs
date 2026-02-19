@@ -1112,6 +1112,8 @@ impl Shell {
             run_test("arp_resolve", this.test_arp_resolve());
             // 14.1. ネットワーク DNS テスト（カーネル内 netstack 直接呼び出し）
             run_test("network_dns", this.test_network_dns());
+            // 14.2. TCP ISN ランダム化テスト（2 つの接続の ISN が異なること）
+            run_test("tcp_isn_random", this.test_tcp_isn_random());
         };
 
         let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2588,6 +2590,15 @@ impl Shell {
             Ok(ip) => ip != [0, 0, 0, 0],
             Err(_) => false,
         }
+    }
+
+    /// TCP ISN ランダム化のテスト。
+    /// 2 つの接続を作成し、ISN が異なることを確認する。
+    /// RDRAND でランダム化しているので、2 つの ISN が一致する確率は 1/2^32。
+    fn test_tcp_isn_random(&self) -> bool {
+        let conn1 = crate::netstack::TcpConnection::new(9990, 40000, [10, 0, 2, 2], 80);
+        let conn2 = crate::netstack::TcpConnection::new(9991, 40001, [10, 0, 2, 2], 80);
+        conn1.seq_num != conn2.seq_num
     }
 
     /// GUI IPC のテスト
