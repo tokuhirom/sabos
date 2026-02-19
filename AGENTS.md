@@ -112,7 +112,18 @@ make hostfs-update
 
 カーネル内 FAT32 で `/` と `/host` をマウント。すべてのファイル操作はカーネル内で完結する。
 
-QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続する（256MB RAM）。カーネルは PCI バスをスキャンして全 virtio デバイスを検出・初期化する。
+QEMU は 2 台の virtio-blk デバイス、virtio-9p デバイス、virtio-net、e1000e NIC を接続する（256MB RAM）。カーネルは PCI バスをスキャンして全デバイスを検出・初期化する。
+
+### ネットワークアーキテクチャ
+
+カーネル内ネットワークスタック（`netstack.rs`）が NIC を抽象化し、virtio-net → e1000e のフォールバック順でデバイスを選択する。QEMU では virtio-net が優先、実機では e1000e が使われる。
+
+| NIC ドライバ | デバイス | 用途 |
+|-------------|---------|------|
+| `virtio_net.rs` | virtio-net-pci | QEMU 仮想 NIC（高速） |
+| `e1000e.rs` | Intel 82574L (e1000e) | 実機 NIC / QEMU テスト |
+
+起動時に DHCP で IP アドレスを自動取得し、ARP キャッシュで MAC アドレスを解決する。
 
 ## ドキュメント一覧
 
@@ -162,14 +173,14 @@ QEMU は 2 台の virtio-blk デバイスと virtio-9p デバイスを接続す�
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（57 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（59 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（57 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（59 項目）:
 
 ```
 sabos> selftest
@@ -179,7 +190,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 57/57 PASSED ===
+=== SELFTEST END: 59/59 PASSED ===
 ```
 
 ## CI/CD
@@ -268,7 +279,7 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果（49 項目全 PASS）:**
+**期待される selftest 結果（59 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
@@ -278,7 +289,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 57/57 PASSED ===
+=== SELFTEST END: 59/59 PASSED ===
 ```
 
 ### シェルの起動フロー
