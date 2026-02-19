@@ -132,6 +132,14 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 const VIRTIO_BLK_S_OK: u8 = 0;
 const _VIRTIO_BLK_S_IOERR: u8 = 1;
 
+/// リトライ回数の上限。
+/// 実機ではストレージの一時的なエラーが起きうるため、
+/// 3 回までリトライすることで一時的エラーを吸収する。
+const IO_RETRY_COUNT: u32 = 3;
+
+/// リトライ間のスピンウェイト回数（約 1ms 相当）。
+const IO_RETRY_SPIN_WAIT: u32 = 100_000;
+
 // ============================================================
 // データ構造体
 // ============================================================
@@ -315,11 +323,9 @@ impl VirtioBlk {
     /// sector: 読み取り開始セクタ番号（0始まり）
     /// buf: 読み取り先バッファ（512 バイトの倍数であること）
     ///
-    /// virtio-blk のリクエスト手順:
-    ///   1. リクエストヘッダー + データバッファ + ステータスバイトの 3 つのディスクリプタをセット
-    ///   2. Available Ring に追加してデバイスに通知
-    ///   3. Used Ring をポーリングして完了を待つ
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        // バリデーションエラーはリトライしても意味がないので即返す
         if sector >= self.capacity {
             return Err("sector out of range");
         }
@@ -327,6 +333,32 @@ impl VirtioBlk {
             return Err("buffer must be multiple of 512 bytes");
         }
 
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.read_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("virtio-blk: read sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("virtio-blk: read sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("virtio-blk: read failed (unreachable)")
+    }
+
+    /// 指定セクタからデータを読み取る内部実装（1 回分）。
+    ///
+    /// virtio-blk のリクエスト手順:
+    ///   1. リクエストヘッダー + データバッファ + ステータスバイトの 3 つのディスクリプタをセット
+    ///   2. Available Ring に追加してデバイスに通知
+    ///   3. Used Ring をポーリングして完了を待つ
+    fn read_sector_once(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
         let sector_count = buf.len() / 512;
 
         // リクエストヘッダーをスタック上に作成
@@ -451,9 +483,9 @@ impl VirtioBlk {
     /// sector: 書き込み先セクタ番号（0始まり）
     /// buf: 書き込むデータ（512 バイトの倍数であること）
     ///
-    /// read_sector と同じ手順だが、リクエストタイプが OUT で、
-    /// データバッファは「デバイスが読む」ので WRITE フラグなし。
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        // バリデーションエラーはリトライしても意味がないので即返す
         if sector >= self.capacity {
             return Err("sector out of range");
         }
@@ -461,6 +493,30 @@ impl VirtioBlk {
             return Err("buffer must be multiple of 512 bytes");
         }
 
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.write_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("virtio-blk: write sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("virtio-blk: write sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("virtio-blk: write failed (unreachable)")
+    }
+
+    /// 指定セクタにデータを書き込む内部実装（1 回分）。
+    ///
+    /// read_sector_once と同じ手順だが、リクエストタイプが OUT で、
+    /// データバッファは「デバイスが読む」ので WRITE フラグなし。
+    fn write_sector_once(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
         let sector_count = buf.len() / 512;
 
         // リクエストヘッダー（VIRTIO_BLK_T_OUT = 書き込みリクエスト）

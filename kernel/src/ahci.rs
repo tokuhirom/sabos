@@ -658,6 +658,19 @@ fn stop_port(port: &mut HbaPort) {
 }
 
 // ============================================================
+// I/O リトライ定数
+// ============================================================
+
+/// リトライ回数の上限。
+/// 実機では SATA リンクの一時的な不安定でエラーが起きうるため、
+/// 3 回までリトライすることで一時的エラーを吸収する。
+const IO_RETRY_COUNT: u32 = 3;
+
+/// リトライ間のスピンウェイト回数（約 1ms 相当）。
+/// リトライ前にデバイスが安定するまで少し待つ。
+const IO_RETRY_SPIN_WAIT: u32 = 100_000;
+
+// ============================================================
 // コマンド発行
 // ============================================================
 
@@ -742,7 +755,9 @@ impl AhciDevice {
     ///
     /// ATA コマンド 0x25 を使い、1 セクタ (512 バイト) を読み取る。
     /// buf は 512 バイト以上であること。
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        // バリデーションエラーはリトライしても意味がないので即返す
         if sector >= self.capacity {
             return Err("AHCI: sector out of range");
         }
@@ -750,6 +765,27 @@ impl AhciDevice {
             return Err("AHCI: buffer too small");
         }
 
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.read_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("AHCI: read sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("AHCI: read sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("AHCI: read failed (unreachable)")
+    }
+
+    /// 指定セクタからデータを読み取る内部実装（1 回分）。
+    fn read_sector_once(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
         // Command Header を設定
         let cmd_header = unsafe { &mut *self.cmd_list };
         cmd_header.flags = 5; // CFL=5, W=0 (読み取り)
@@ -794,7 +830,9 @@ impl AhciDevice {
     ///
     /// ATA コマンド 0x35 を使い、1 セクタ (512 バイト) を書き込む。
     /// buf は 512 バイト以上であること。
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        // バリデーションエラーはリトライしても意味がないので即返す
         if sector >= self.capacity {
             return Err("AHCI: sector out of range");
         }
@@ -802,6 +840,27 @@ impl AhciDevice {
             return Err("AHCI: buffer too small");
         }
 
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.write_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("AHCI: write sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("AHCI: write sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("AHCI: write failed (unreachable)")
+    }
+
+    /// 指定セクタにデータを書き込む内部実装（1 回分）。
+    fn write_sector_once(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
         // Command Header を設定
         let cmd_header = unsafe { &mut *self.cmd_list };
         // CFL=5, W=1 (書き込み: ホスト→デバイス方向)

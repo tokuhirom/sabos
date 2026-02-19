@@ -102,6 +102,14 @@ const IDENTIFY_CNS_NAMESPACE: u32 = 0;
 /// 小さめにして物理メモリの消費を抑える。
 const QUEUE_DEPTH: u16 = 64;
 
+/// リトライ回数の上限。
+/// 実機では NVMe コントローラの一時的なエラーが起きうるため、
+/// 3 回までリトライすることで一時的エラーを吸収する。
+const IO_RETRY_COUNT: u32 = 3;
+
+/// リトライ間のスピンウェイト回数（約 1ms 相当）。
+const IO_RETRY_SPIN_WAIT: u32 = 100_000;
+
 // ============================================================
 // Submission Queue Entry (SQE, 64 bytes)
 // ============================================================
@@ -764,12 +772,38 @@ impl NvmeDevice {
     /// I/O opcode 0x02 で 1 セクタを読み取る。
     /// CDW10-11: Starting LBA (64-bit)
     /// CDW12: Number of Logical Blocks (0-based) = 0 (1 ブロック)
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
-        let io_queue = self.io_queue.as_mut().ok_or("NVMe: I/O queue not created")?;
-
+        // バリデーションエラーはリトライしても意味がないので即返す
+        if self.io_queue.is_none() {
+            return Err("NVMe: I/O queue not created");
+        }
         if buf.len() < self.block_size as usize {
             return Err("NVMe: buffer too small");
         }
+
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.read_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("NVMe: read sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("NVMe: read sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("NVMe: read failed (unreachable)")
+    }
+
+    /// 指定セクタからデータを読み取る内部実装（1 回分）。
+    fn read_sector_once(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
+        let io_queue = self.io_queue.as_mut().ok_or("NVMe: I/O queue not created")?;
 
         let mut sqe = NvmeSqe::zeroed();
         sqe.opcode = IO_CMD_READ;
@@ -788,12 +822,38 @@ impl NvmeDevice {
     /// 指定セクタにデータを書き込む（NVM Write コマンド）。
     ///
     /// I/O opcode 0x01 で 1 セクタを書き込む。
+    /// 一時的なエラーに対しては最大 IO_RETRY_COUNT 回リトライする。
     pub fn write_sector(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
-        let io_queue = self.io_queue.as_mut().ok_or("NVMe: I/O queue not created")?;
-
+        // バリデーションエラーはリトライしても意味がないので即返す
+        if self.io_queue.is_none() {
+            return Err("NVMe: I/O queue not created");
+        }
         if buf.len() < self.block_size as usize {
             return Err("NVMe: buffer too small");
         }
+
+        for attempt in 0..IO_RETRY_COUNT {
+            match self.write_sector_once(sector, buf) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if attempt + 1 < IO_RETRY_COUNT {
+                        serial_println!("NVMe: write sector {} failed (attempt {}): {}, retrying...",
+                            sector, attempt + 1, e);
+                        for _ in 0..IO_RETRY_SPIN_WAIT { core::hint::spin_loop(); }
+                    } else {
+                        serial_println!("NVMe: write sector {} failed after {} attempts: {}",
+                            sector, IO_RETRY_COUNT, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        Err("NVMe: write failed (unreachable)")
+    }
+
+    /// 指定セクタにデータを書き込む内部実装（1 回分）。
+    fn write_sector_once(&mut self, sector: u64, buf: &[u8]) -> Result<(), &'static str> {
+        let io_queue = self.io_queue.as_mut().ok_or("NVMe: I/O queue not created")?;
 
         let mut sqe = NvmeSqe::zeroed();
         sqe.opcode = IO_CMD_WRITE;
