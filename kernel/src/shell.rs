@@ -1024,6 +1024,9 @@ impl Shell {
             // 11.20. APIC 有効化のテスト（PIC から APIC に移行済みであること）
             run_test("apic_active", crate::apic::is_apic_active());
 
+            // 11.22. ACPI FADT 電源管理情報のテスト
+            run_test("acpi_fadt", this.test_acpi_fadt());
+
             // 11.21. PCI マルチバス列挙のテスト
             // enumerate_all_buses() の結果がバス 0 のデバイスを含むことを確認。
             // QEMU では必ずバス 0 にデバイスがある。
@@ -2178,6 +2181,30 @@ impl Shell {
     /// e1000e ドライバが正常に初期化されていることを確認する。
     fn test_e1000e_detect(&self) -> bool {
         crate::e1000e::E1000E.lock().is_some()
+    }
+
+    /// ACPI FADT 電源管理情報のテスト。
+    /// FADT から PM1a Control Block と S5 スリープタイプが正しく取得されていることを確認する。
+    /// これらが取得できていれば shutdown コマンド（ACPI S5 電源OFF）が動作するはず。
+    fn test_acpi_fadt(&self) -> bool {
+        let info = match crate::acpi::get_fadt_info() {
+            Some(i) => i,
+            None => {
+                kprintln!("  FADT info not available");
+                return false;
+            }
+        };
+        // PM1a Control Block が設定されていること（シャットダウンに必要）
+        if info.pm1a_cnt_blk == 0 {
+            kprintln!("  PM1a CNT block is 0");
+            return false;
+        }
+        // S5 スリープタイプが DSDT から取得できていること
+        if info.slp_typa_s5.is_none() {
+            kprintln!("  S5 sleep type not found in DSDT");
+            return false;
+        }
+        true
     }
 
     /// Futex のテスト
