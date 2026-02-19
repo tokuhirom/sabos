@@ -629,7 +629,7 @@ pub enum TcpState {
     CloseWait,
     /// FIN 送信済み（CloseWait から）
     LastAck,
-    /// 最終待機（TIME_WAIT は省略）
+    /// 最終待機（遅延パケットの誤認を防ぐため 2MSL 待機する）
     TimeWait,
 }
 
@@ -651,6 +651,9 @@ pub struct TcpConnection {
     pub ack_num: u32,
     /// 受信バッファ
     pub recv_buffer: Vec<u8>,
+    /// TIME_WAIT 状態の期限（PIT tick）。None なら TIME_WAIT ではない。
+    /// TIME_WAIT 期限が来たら net_poller が接続を削除する。
+    pub time_wait_deadline: Option<u64>,
 }
 
 impl TcpConnection {
@@ -668,6 +671,7 @@ impl TcpConnection {
             seq_num: initial_seq,
             ack_num: 0,
             recv_buffer: Vec::new(),
+            time_wait_deadline: None,
         }
     }
 }
@@ -1241,6 +1245,23 @@ pub fn net_poller_task() {
             wake_all_net_waiters();
         }
 
+        // TIME_WAIT 接続の期限切れチェック
+        // タイマー期限が来た接続を削除して、ポートを再利用可能にする。
+        with_net_state(|state| {
+            let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            state.tcp_connections.retain(|conn| {
+                if conn.state == TcpState::TimeWait {
+                    if let Some(deadline) = conn.time_wait_deadline {
+                        if now >= deadline {
+                            net_debug!("tcp: TIME_WAIT expired for port {}", conn.local_port);
+                            return false; // 削除
+                        }
+                    }
+                }
+                true // 保持
+            });
+        });
+
         // NIC デバイスのイベントフラグをクリアする
         // virtio-net: QEMU SLIRP のイベントループをキック
         // e1000e: ICR を読み取って割り込み原因をクリア
@@ -1656,6 +1677,12 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                         if tcp_header.has_flag(TCP_FLAG_FIN) {
                             conn.ack_num = seq + 1;
                             conn.state = TcpState::TimeWait;
+                            // TIME_WAIT タイマー: 10 秒後に接続を削除する。
+                            // RFC 793 では 2MSL（通常 120 秒）だが、学習用 OS なので短めに設定。
+                            // PIT は約 18.2 Hz なので、10 秒 ≈ 182 ticks。
+                            const TIME_WAIT_TICKS: u64 = 182;
+                            let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                            conn.time_wait_deadline = Some(now + TIME_WAIT_TICKS);
                             send_packet = Some((
                                 conn.remote_ip,
                                 conn.remote_port,
@@ -1673,6 +1700,10 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                     if tcp_header.has_flag(TCP_FLAG_FIN) {
                         conn.ack_num = seq + 1;
                         conn.state = TcpState::TimeWait;
+                        // TIME_WAIT タイマー設定（FinWait1 と同じ）
+                        const TIME_WAIT_TICKS: u64 = 182;
+                        let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                        conn.time_wait_deadline = Some(now + TIME_WAIT_TICKS);
                         send_packet = Some((
                             conn.remote_ip,
                             conn.remote_port,
@@ -2003,8 +2034,15 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
         })
     });
 
+    // TimeWait の場合は接続を残す（net_poller がタイマー期限で削除する）。
+    // Closed の場合のみ即削除する。
     with_net_state(|state| {
-        let _ = remove_conn_by_id(state, conn_id);
+        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+            if state.tcp_connections[idx].state == TcpState::Closed {
+                state.tcp_connections.remove(idx);
+            }
+            // TimeWait の場合はそのまま残す
+        }
     });
 
     net_debug!("tcp: connection closed");
