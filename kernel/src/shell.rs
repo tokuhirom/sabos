@@ -1020,6 +1020,9 @@ impl Shell {
             // 11.22. e1000e NIC 検出テスト
             run_test("e1000e_detect", this.test_e1000e_detect());
 
+            // 11.23. ネットワークリンク状態テスト（QEMU では常に UP）
+            run_test("network_link", this.test_network_link());
+
             // 11.17. パイプのテスト
             run_test("pipe", crate::pipe::test_pipe());
 
@@ -1047,6 +1050,9 @@ impl Shell {
         };
 
         let run_fs = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
+            // 11.4. ストレージ I/O リトライテスト（正常系の通過確認）
+            run_test("storage_retry", this.test_storage_retry());
+
             // 11.5. AHCI コントローラ検出テスト
             run_test("ahci_detect", this.test_ahci_detect());
 
@@ -2213,6 +2219,26 @@ impl Shell {
             return false;
         }
         true
+    }
+
+    /// ストレージ I/O リトライのテスト。
+    /// 正常系で read_sector がリトライなしで成功することを確認する。
+    /// （実際のリトライ発生は QEMU では再現困難なので、正常パスの通過を確認）
+    fn test_storage_retry(&self) -> bool {
+        // AHCI でセクタ 0 を読む（正常なら 1 回目で成功）
+        let mut buf = [0u8; 512];
+        let mut devs = crate::ahci::AHCI_DEVICES.lock();
+        if let Some(d) = devs.get_mut(0) {
+            d.read_sector(0, &mut buf).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// ネットワークリンク状態のテスト。
+    /// QEMU 環境ではリンクが UP であることを確認する。
+    fn test_network_link(&self) -> bool {
+        crate::netstack::is_network_link_up()
     }
 
     /// Futex のテスト
