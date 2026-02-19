@@ -8,6 +8,7 @@ extern crate alloc;
 mod ac97;
 mod acpi;
 mod ahci;
+mod e1000e;
 mod allocator;
 mod apic;
 mod console;
@@ -340,6 +341,29 @@ fn main() -> Status {
         if count > 0 {
             framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
             kprintln!("OK ({} device(s))", count);
+        } else {
+            framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
+            kprintln!("not found");
+        }
+    }
+    framebuffer::set_global_colors((255, 255, 255), (0, 0, 128));
+    kprintln!();
+
+    // --- e1000e NIC の初期化 ---
+    // PCI バスから Intel e1000e NIC を探して初期化する。
+    // QEMU の `-device e1000e` で追加されたデバイスを検出する。
+    // 実機では Intel 82574L 等のオンボード NIC が該当する。
+    kprint!("Initializing e1000e... ");
+    e1000e::init();
+    {
+        let drv = e1000e::E1000E.lock();
+        if let Some(ref d) = *drv {
+            framebuffer::set_global_colors((0, 255, 0), (0, 0, 128));
+            kprintln!(
+                "OK (MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+                d.mac_address[0], d.mac_address[1], d.mac_address[2],
+                d.mac_address[3], d.mac_address[4], d.mac_address[5]
+            );
         } else {
             framebuffer::set_global_colors((255, 255, 0), (0, 0, 128));
             kprintln!("not found");

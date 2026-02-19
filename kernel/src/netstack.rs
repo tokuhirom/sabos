@@ -18,9 +18,9 @@
 //
 // ## Mutex デッドロック対策
 //
-// NET_STATE と VIRTIO_NET は異なる Mutex。
-// net_poller_task(): VIRTIO_NET ロック→受信→ロック解放→handle_packet() の順。
-// handle_packet() 内の send_arp_reply() 等: NET_STATE から MAC 取得→ロック解放→VIRTIO_NET でフレーム送信。
+// NET_STATE と NIC ドライバ (VIRTIO_NET / E1000E) は異なる Mutex。
+// net_poller_task(): NIC ロック→受信→ロック解放→handle_packet() の順。
+// handle_packet() 内の send_arp_reply() 等: NET_STATE から MAC 取得→ロック解放→NIC でフレーム送信。
 // MAC アドレスは初期化時に MY_MAC に保持し、NET_STATE のロック不要。
 
 use alloc::collections::VecDeque;
@@ -148,12 +148,23 @@ where
 }
 
 /// ネットワークスタックを初期化する（MAC 取得）
+///
+/// virtio-net → e1000e の順で NIC を探し、最初に見つかったデバイスの
+/// MAC アドレスを使ってネットワークスタックを初期化する。
+/// DHCP で IP アドレスを取得し、失敗してもデフォルト値が残るので安全。
 pub fn init() {
-    let drv = crate::virtio_net::VIRTIO_NET.lock();
-    if let Some(ref d) = *drv {
-        let mac = d.mac_address;
-        drop(drv); // ロック解放
+    // virtio-net から MAC アドレスを取得
+    let mac = {
+        let drv = crate::virtio_net::VIRTIO_NET.lock();
+        drv.as_ref().map(|d| d.mac_address)
+    };
+    // virtio-net がなければ e1000e から取得
+    let mac = mac.or_else(|| {
+        let drv = crate::e1000e::E1000E.lock();
+        drv.as_ref().map(|d| d.mac_address)
+    });
 
+    if let Some(mac) = mac {
         *MY_MAC.lock() = mac;
         with_net_state(|state| {
             state.mac = mac;
@@ -174,7 +185,7 @@ pub fn init() {
             }
         }
     } else {
-        serial_println!("netstack: virtio-net not available, skipping init");
+        serial_println!("netstack: no network device available, skipping init");
     }
 }
 
@@ -221,28 +232,76 @@ fn arp_update(ip: [u8; 4], mac: [u8; 6]) {
 }
 
 // ============================================================
-// フレーム送受信ヘルパー（VIRTIO_NET 直接操作）
+// フレーム送受信ヘルパー（NIC 抽象化）
 // ============================================================
+//
+// virtio-net と e1000e の両方に対応する。
+// virtio-net が存在すれば優先的に使い、なければ e1000e にフォールバックする。
+// これにより QEMU では virtio-net（高速）、実機では e1000e が自動選択される。
 
-/// Ethernet フレームを送信する
+/// Ethernet フレームを送信する（NIC 抽象化）
+///
+/// virtio-net を優先し、なければ e1000e にフォールバックする。
+/// どちらも存在しなければエラーを返す。
 fn send_frame(data: &[u8]) -> Result<(), &'static str> {
-    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
-    let drv = drv.as_mut().ok_or("virtio-net not available")?;
-    drv.send_packet(data)
+    // virtio-net を優先（QEMU デフォルト）
+    {
+        let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+        if let Some(ref mut d) = *drv {
+            return d.send_packet(data);
+        }
+    }
+    // e1000e にフォールバック
+    {
+        let mut drv = crate::e1000e::E1000E.lock();
+        if let Some(ref mut d) = *drv {
+            return d.send_packet(data);
+        }
+    }
+    Err("no network device available")
 }
 
-/// Ethernet フレームを受信する（ノンブロッキング）
-/// 受信できなければ None を返す
+/// Ethernet フレームを受信する（ノンブロッキング、NIC 抽象化）
+///
+/// virtio-net を優先し、なければ e1000e にフォールバックする。
+/// 受信できなければ None を返す。
 fn recv_frame_nonblocking() -> Option<Vec<u8>> {
-    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
-    drv.as_mut().and_then(|d| d.receive_packet())
+    // virtio-net を優先
+    {
+        let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+        if let Some(ref mut d) = *drv {
+            return d.receive_packet();
+        }
+    }
+    // e1000e にフォールバック
+    {
+        let mut drv = crate::e1000e::E1000E.lock();
+        if let Some(ref mut d) = *drv {
+            return d.receive_packet();
+        }
+    }
+    None
 }
 
-/// ISR ステータスを読み取って QEMU のイベントループをキックする
-fn kick_virtio_net() {
-    let mut drv = crate::virtio_net::VIRTIO_NET.lock();
-    if let Some(d) = drv.as_mut() {
-        d.read_isr_status();
+/// NIC デバイスのイベントフラグをクリアする
+///
+/// virtio-net の場合は ISR ステータスを読み取って QEMU のイベントループをキックする。
+/// e1000e の場合は ICR を読み取って保留中の割り込みをクリアする。
+fn kick_net_device() {
+    // virtio-net
+    {
+        let mut drv = crate::virtio_net::VIRTIO_NET.lock();
+        if let Some(d) = drv.as_mut() {
+            d.read_isr_status();
+            return;
+        }
+    }
+    // e1000e
+    {
+        let mut drv = crate::e1000e::E1000E.lock();
+        if let Some(d) = drv.as_mut() {
+            d.clear_interrupts();
+        }
     }
 }
 
@@ -1134,8 +1193,10 @@ pub fn net_poller_task() {
             wake_all_net_waiters();
         }
 
-        // QEMU SLIRP のイベントループをキックする
-        kick_virtio_net();
+        // NIC デバイスのイベントフラグをクリアする
+        // virtio-net: QEMU SLIRP のイベントループをキック
+        // e1000e: ICR を読み取って割り込み原因をクリア
+        kick_net_device();
 
         // CPU を一時停止して割り込みを待つ。
         // QEMU TCG モードでは、CPU がビジーループしていると
