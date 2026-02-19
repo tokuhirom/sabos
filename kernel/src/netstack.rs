@@ -189,6 +189,25 @@ pub fn init() {
     }
 }
 
+/// ネットワークリンクの状態を返す。
+///
+/// virtio-net を優先し、なければ e1000e を確認する。
+/// いずれのデバイスも存在しなければ false を返す。
+pub fn is_network_link_up() -> bool {
+    // virtio-net を優先チェック
+    let drv = crate::virtio_net::VIRTIO_NET.lock();
+    if let Some(ref d) = *drv {
+        return d.is_link_up();
+    }
+    drop(drv);
+    // e1000e にフォールバック
+    let drv = crate::e1000e::E1000E.lock();
+    if let Some(ref d) = *drv {
+        return d.is_link_up();
+    }
+    false
+}
+
 /// MAC アドレスを取得する（ロック不要版）
 fn get_my_mac() -> [u8; 6] {
     *MY_MAC.lock()

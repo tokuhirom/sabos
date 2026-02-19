@@ -366,6 +366,15 @@ impl VirtioNet {
         unsafe { Port::<u8>::new(self.io_base + 0x13).read() }
     }
 
+    /// virtio-net のリンク状態を返す。
+    /// QEMU 環境では仮想デバイスなので常に link up (true) を返す。
+    /// 実機で VIRTIO_NET_F_STATUS がネゴシエートされた場合は
+    /// デバイスステータスから読み取る拡張が可能。
+    pub fn is_link_up(&self) -> bool {
+        // virtio-net はデバイスが存在すれば link up とみなす
+        true
+    }
+
     /// パケットを送信する
     ///
     /// data: Ethernet フレーム (ヘッダーなし virtio-net ヘッダー)

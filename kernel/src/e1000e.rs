@@ -434,13 +434,25 @@ impl E1000e {
         })
     }
 
+    /// リンク状態を確認する。
+    /// STATUS レジスタの bit 1 (LU: Link Up) を読み取る。
+    /// true ならリンクアップ（ケーブル接続＋通信可能）。
+    pub fn is_link_up(&self) -> bool {
+        let status = mmio_read32(self.bar0, regs::STATUS);
+        status & (1 << 1) != 0
+    }
+
     /// Ethernet フレームを送信する。
     ///
     /// TX ディスクリプタに送信データをセットし、TDT レジスタを更新してハードウェアに送信を指示する。
     /// DD ビットをポーリングして送信完了を待つ。
+    /// リンクダウン時はパケットを送信せずエラーを返す。
     ///
     /// data: Ethernet フレーム全体（MAC ヘッダー含む）
     pub fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
+        if !self.is_link_up() {
+            return Err("e1000e: link is down");
+        }
         if data.len() > 1514 {
             return Err("e1000e: packet too large");
         }

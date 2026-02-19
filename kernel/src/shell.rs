@@ -107,6 +107,7 @@ impl Shell {
             "run" => self.cmd_run(args),
             "spawn" => self.cmd_spawn(args),
             "ip" => self.cmd_ip(),
+            "linkstatus" => self.cmd_linkstatus(),
             "selftest" => self.cmd_selftest(args),
             "ipc_bench" => self.cmd_ipc_bench(args),
             "beep" => self.cmd_beep(args),
@@ -147,6 +148,7 @@ impl Shell {
         kprintln!("  run <path>      - Load and run ELF binary (e.g., run /SUBDIR/APP.ELF)");
         kprintln!("  spawn <path>    - Spawn ELF as background process (e.g., spawn HELLO.ELF)");
         kprintln!("  ip              - Show IP configuration");
+        kprintln!("  linkstatus        - Show network link status");
         kprintln!("  selftest [target] - Run automated self-tests (target: all/base/core/fs/net/gui/service/list)");
         kprintln!("  ipc_bench [n]   - IPC round-trip benchmark (default: 1000 iterations)");
         kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
@@ -882,6 +884,12 @@ impl Shell {
     /// selftest コマンド: 各サブシステムの自動テストを実行する。
     /// CI で使いやすいように、各テスト結果を [PASS]/[FAIL] で出力し、
     /// 最後にサマリーを出力する。
+    /// linkstatus コマンド: ネットワークリンクの状態を表示する。
+    fn cmd_linkstatus(&self) {
+        let link_up = crate::netstack::is_network_link_up();
+        kprintln!("Network link: {}", if link_up { "UP" } else { "DOWN" });
+    }
+
     fn cmd_selftest(&self, args: &str) {
         // 引数パース: `selftest [target] [--exit]`
         // --exit フラグが指定されると、テスト終了後に QEMU を ISA debug exit で終了する。
