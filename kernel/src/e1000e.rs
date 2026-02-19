@@ -273,11 +273,19 @@ impl E1000e {
         pci::pci_config_write16(dev.bus, dev.device, dev.function, 0x04, cmd | 0x06);
 
         // --- BAR0 読み取り ---
-        // e1000e の BAR0 は 64-bit MMIO アドレス（Type 0b10）。
-        // BAR0 (offset 0x10) と BAR1 (offset 0x14) を結合して 64-bit アドレスを得る。
-        let bar0_raw = pci::read_bar64(dev.bus, dev.device, dev.function, 0);
-        // BAR の下位 4 ビットはフラグなのでマスクする
-        let bar0 = bar0_raw & !0xF;
+        // BAR0 の type bits ([2:1]) を確認して 32-bit / 64-bit を判定する。
+        //   00b = 32-bit MMIO
+        //   10b = 64-bit MMIO（BAR0 + BAR1 を結合）
+        let bar0_low = pci::read_bar(dev.bus, dev.device, dev.function, 0);
+        let bar_type = (bar0_low >> 1) & 0x03;
+        let bar0 = if bar_type == 0x02 {
+            // 64-bit MMIO: BAR0 + BAR1 を結合
+            let bar0_raw = pci::read_bar64(dev.bus, dev.device, dev.function, 0);
+            bar0_raw & !0xF
+        } else {
+            // 32-bit MMIO
+            (bar0_low & !0xF) as u64
+        };
         serial_println!("e1000e: BAR0 = {:#x}", bar0);
 
         if bar0 == 0 {

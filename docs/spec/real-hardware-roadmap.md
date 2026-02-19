@@ -124,18 +124,18 @@ Phase 0 が完了した上で、実機で起動してシェルを操作できる
 
 **推定工数**: 中 → **完了**
 
-### 2-3. 実 NIC ドライバ（1 種類）
+### 2-3. 実 NIC ドライバ（1 種類）✅
 
 **なぜ必要**: virtio-net は仮想デバイスで実機に存在しない。
 
-候補（どれか 1 つ、ターゲット HW に応じて選択）:
-- **Intel e1000e** — 広く普及、仕様公開、QEMU でもテスト可能（`-device e1000e`）
-- **Realtek RTL8168** — 安価なマザーボードに多い
-- **Intel I219-LM/I219-V** — 最近のビジネス PC に多い
+- ✅ Intel e1000e (82574L 互換) ドライバを実装
+- ✅ PCI デバイス検出（vendor=0x8086, device=0x10D3）
+- ✅ MMIO 経由の初期化（リセット、MAC アドレス読み取り、RX/TX リング設定）
+- ✅ Legacy descriptor format でのパケット送受信
+- ✅ netstack の NIC 抽象化（virtio-net → e1000e フォールバック）
+- ✅ QEMU テスト通過（59/59 PASSED、e1000e_detect 含む）
 
-**推奨**: e1000e から始める（QEMU で `-device e1000e` でテスト可能）
-
-**推定工数**: 大
+**実装ファイル**: `kernel/src/e1000e.rs`（新規）、`kernel/src/pci.rs`（`find_e1000e` 追加）、`kernel/src/netstack.rs`（NIC 抽象化）
 
 ## Phase 3: 堅牢性・信頼性
 

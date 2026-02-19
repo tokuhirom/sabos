@@ -105,6 +105,8 @@ build_qemu_args() {
         -netdev "user,id=net0,ipv4=on,ipv6=on,hostfwd=tcp::${TELNET_HOST_PORT}-:2323"
         -device virtio-net-pci,netdev=net0
         -virtfs "local,id=fsdev0,path=.,mount_tag=hostfs9p,security_model=none"
+        -netdev "user,id=net1"
+        -device "e1000e,netdev=net1"
         -device "isa-debug-exit,iobase=0xf4,iosize=0x04"
         -device ahci,id=ahci0
         -drive "if=none,format=raw,file=ahci-test.img,id=ahci-disk0"

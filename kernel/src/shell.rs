@@ -1005,6 +1005,9 @@ impl Shell {
             // 11.16. IPC ハンドル委譲のテスト
             run_test("ipc_handle", this.test_ipc_handle());
 
+            // 11.22. e1000e NIC 検出テスト
+            run_test("e1000e_detect", this.test_e1000e_detect());
+
             // 11.17. パイプのテスト
             run_test("pipe", crate::pipe::test_pipe());
 
@@ -2164,6 +2167,13 @@ impl Shell {
     /// AC97 ドライバが正常に初期化されていることを確認する。
     fn test_ac97_detect(&self) -> bool {
         crate::ac97::is_available()
+    }
+
+    /// e1000e NIC の検出テスト。
+    /// QEMU に `-device e1000e` を追加した場合、
+    /// e1000e ドライバが正常に初期化されていることを確認する。
+    fn test_e1000e_detect(&self) -> bool {
+        crate::e1000e::E1000E.lock().is_some()
     }
 
     /// Futex のテスト
