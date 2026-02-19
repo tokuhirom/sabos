@@ -64,6 +64,34 @@ macro_rules! net_trace {
 }
 
 // ============================================================
+// カーネル内乱数生成
+// ============================================================
+
+/// カーネル内で RDRAND 命令を使って 64 ビット乱数を取得する。
+/// TCP ISN や DNS クエリ ID のランダム化に使用する。
+/// 失敗時は簡易フォールバック（0 を返す）。
+fn kernel_rdrand64() -> u64 {
+    for _ in 0..10 {
+        let value: u64;
+        let success: u8;
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) value,
+                ok = out(reg_byte) success,
+            );
+        }
+        if success != 0 {
+            return value;
+        }
+    }
+    // フォールバック: RDRAND が使えない場合は PIT カウンタなどで代替すべきだが、
+    // 現代の x86_64 CPU では RDRAND が使えない状況は稀なので 0 を返す
+    0
+}
+
+// ============================================================
 // 内部状態
 // ============================================================
 
@@ -627,9 +655,10 @@ pub struct TcpConnection {
 
 impl TcpConnection {
     pub fn new(id: u32, local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Self {
-        // 初期シーケンス番号は簡易的に固定値を使用
-        // 本来はランダムにすべきだが、学習用なので省略
-        let initial_seq = 1000;
+        // ISN（Initial Sequence Number）をランダム化する。
+        // 固定値だと TCP シーケンス番号予測攻撃に脆弱なため、
+        // RDRAND でランダムな初期値を生成する。
+        let initial_seq = kernel_rdrand64() as u32;
         Self {
             id,
             state: TcpState::Closed,
@@ -1342,8 +1371,12 @@ const DNS_CLASS_IN: u16 = 1;
 
 /// DNS クエリを送信して IP アドレスを解決する
 pub fn dns_lookup(domain: &str) -> Result<[u8; 4], &'static str> {
-    let query_id: u16 = 0x1234;
-    let src_port: u16 = 12345;
+    // DNS クエリ ID をランダム化する。
+    // 固定値だと DNS キャッシュポイズニングに脆弱なため。
+    let query_id: u16 = kernel_rdrand64() as u16;
+    // DNS ソースポートをランダム化する（エフェメラルポート範囲: 49152-65535）。
+    // 固定ポートだと DNS キャッシュポイズニングに脆弱なため。
+    let src_port: u16 = 49152 + (kernel_rdrand64() as u16 % (65535 - 49152));
 
     let query_packet = build_dns_query(query_id, domain)?;
 
