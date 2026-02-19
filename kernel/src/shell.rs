@@ -111,6 +111,8 @@ impl Shell {
             "ipc_bench" => self.cmd_ipc_bench(args),
             "beep" => self.cmd_beep(args),
             "panic" => self.cmd_panic(),
+            "shutdown" => self.cmd_shutdown(),
+            "reboot" => self.cmd_reboot(),
             "halt" => self.cmd_halt(),
             "exit_qemu" => self.cmd_exit_qemu(args),
             _ => {
@@ -149,7 +151,9 @@ impl Shell {
         kprintln!("  ipc_bench [n]   - IPC round-trip benchmark (default: 1000 iterations)");
         kprintln!("  beep [freq] [ms] - Play beep sound (default: 440Hz 200ms)");
         kprintln!("  panic           - Trigger a kernel panic (for testing)");
-        kprintln!("  halt            - Halt the system");
+        kprintln!("  shutdown        - ACPI S5 shutdown (power off)");
+        kprintln!("  reboot          - ACPI reboot (system reset)");
+        kprintln!("  halt            - Halt the system (HLT loop, no power off)");
         kprintln!("  exit_qemu [code] - Exit QEMU via ISA debug exit (0=success, 1=failure)");
     }
 
@@ -3023,6 +3027,20 @@ impl Shell {
     /// panic ハンドラのテスト用。シリアルと画面に赤字で panic 情報が表示されるはず。
     fn cmd_panic(&self) {
         panic!("User-triggered panic from shell command");
+    }
+
+    /// shutdown コマンド: ACPI S5 シャットダウンで電源を切る。
+    /// PM1a_CNT レジスタに SLP_TYPa と SLP_EN を書き込んで S5 ステートに遷移する。
+    fn cmd_shutdown(&self) {
+        kprintln!("Shutting down...");
+        crate::acpi::acpi_shutdown();
+    }
+
+    /// reboot コマンド: ACPI リセットでシステムを再起動する。
+    /// FADT reset register → 8042 キーボードコントローラ → トリプルフォルトの 3 段フォールバック。
+    fn cmd_reboot(&self) {
+        kprintln!("Rebooting...");
+        crate::acpi::acpi_reboot();
     }
 
     /// halt コマンド: 割り込みを無効化して CPU を停止する。
