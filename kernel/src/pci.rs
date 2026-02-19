@@ -403,6 +403,25 @@ pub fn find_nvme_controllers() -> Vec<PciDevice> {
         .collect()
 }
 
+/// Intel e1000e NIC を PCI バスから探す。
+///
+/// Intel e1000e (82574L 互換) の識別:
+///   vendor_id = 0x8086 (Intel)
+///   device_id = 0x10D3 (82574L) — QEMU e1000e のデフォルト
+///
+/// QEMU の `-device e1000e` で追加されたデバイスを検出する。
+/// 実機では Intel 82574L や同系統の NIC が該当する。
+/// 見つかった最初のデバイスを返す。見つからなければ None。
+pub fn find_e1000e() -> Option<PciDevice> {
+    let devices = enumerate_all_buses();
+    for dev in devices {
+        if dev.vendor_id == 0x8086 && dev.device_id == 0x10D3 {
+            return Some(dev);
+        }
+    }
+    None
+}
+
 /// virtio-9p デバイスを PCI バスから探す。
 ///
 /// virtio デバイスの識別:
