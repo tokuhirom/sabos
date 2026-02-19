@@ -1114,6 +1114,8 @@ impl Shell {
             run_test("network_dns", this.test_network_dns());
             // 14.2. TCP ISN ランダム化テスト（2 つの接続の ISN が異なること）
             run_test("tcp_isn_random", this.test_tcp_isn_random());
+            // 14.3. TCP 再送タイマーテスト（UnackedPacket の記録・クリアが正しく動くこと）
+            run_test("tcp_retransmit", this.test_tcp_retransmit());
         };
 
         let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -2599,6 +2601,43 @@ impl Shell {
         let conn1 = crate::netstack::TcpConnection::new(9990, 40000, [10, 0, 2, 2], 80);
         let conn2 = crate::netstack::TcpConnection::new(9991, 40001, [10, 0, 2, 2], 80);
         conn1.seq_num != conn2.seq_num
+    }
+
+    /// TCP 再送タイマーテスト
+    ///
+    /// TcpConnection の unacked_packet フィールドが正しく初期化・設定・クリアされることを確認する。
+    fn test_tcp_retransmit(&self) -> bool {
+        use crate::netstack::{TcpConnection, UnackedPacket};
+
+        // 1. 初期状態では unacked_packet は None
+        let mut conn = TcpConnection::new(9980, 40010, [10, 0, 2, 2], 80);
+        if conn.unacked_packet.is_some() {
+            return false;
+        }
+
+        // 2. UnackedPacket を設定し、フィールドが保持されることを確認
+        conn.unacked_packet = Some(UnackedPacket {
+            seq_num: 1000,
+            ack_num: 2000,
+            flags: 0x02, // SYN
+            payload: alloc::vec![1, 2, 3],
+            retransmit_deadline: 100,
+            retransmit_count: 0,
+        });
+        if let Some(ref pkt) = conn.unacked_packet {
+            if pkt.seq_num != 1000 || pkt.ack_num != 2000 || pkt.flags != 0x02 {
+                return false;
+            }
+            if pkt.payload.len() != 3 || pkt.retransmit_count != 0 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        // 3. クリアできることを確認
+        conn.unacked_packet = None;
+        conn.unacked_packet.is_none()
     }
 
     /// GUI IPC のテスト

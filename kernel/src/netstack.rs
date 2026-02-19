@@ -634,6 +634,33 @@ pub enum TcpState {
 }
 
 /// TCP コネクション
+/// TCP 再送の初期 RTO（Retransmission Timeout）。
+/// PIT は約 18.2 Hz なので、1 秒 ≈ 18 ticks。
+const TCP_INITIAL_RTO_TICKS: u64 = 18;
+
+/// TCP 再送の最大回数。
+/// RTO は指数バックオフで増加: 1s, 2s, 4s, 8s, 16s（合計約 31 秒）。
+const TCP_MAX_RETRANSMIT: u8 = 5;
+
+/// 再送待ちパケット
+///
+/// SYN / SYN-ACK / データ / FIN を送信した後、ACK が返ってこなかった場合に
+/// 再送するための情報を保持する。ACK を受信したら `unacked_packet` を None にクリアする。
+pub struct UnackedPacket {
+    /// 送信時のシーケンス番号
+    pub seq_num: u32,
+    /// 送信時の ACK 番号
+    pub ack_num: u32,
+    /// TCP フラグ（SYN, FIN, ACK|PSH 等）
+    pub flags: u8,
+    /// ペイロード（データ送信の場合。SYN/FIN は空）
+    pub payload: Vec<u8>,
+    /// 再送デッドライン（PIT tick）。この時刻を過ぎたら再送する。
+    pub retransmit_deadline: u64,
+    /// 再送回数。指数バックオフの計算に使う。
+    pub retransmit_count: u8,
+}
+
 pub struct TcpConnection {
     /// コネクション ID
     pub id: u32,
@@ -654,6 +681,9 @@ pub struct TcpConnection {
     /// TIME_WAIT 状態の期限（PIT tick）。None なら TIME_WAIT ではない。
     /// TIME_WAIT 期限が来たら net_poller が接続を削除する。
     pub time_wait_deadline: Option<u64>,
+    /// 再送バッファ: 未 ACK のパケット。ACK を受信したらクリアする。
+    /// 1 パケットのみ保持（Stop-and-Wait 方式）。
+    pub unacked_packet: Option<UnackedPacket>,
 }
 
 impl TcpConnection {
@@ -672,6 +702,7 @@ impl TcpConnection {
             ack_num: 0,
             recv_buffer: Vec::new(),
             time_wait_deadline: None,
+            unacked_packet: None,
         }
     }
 }
@@ -1262,6 +1293,69 @@ pub fn net_poller_task() {
             });
         });
 
+        // TCP 再送タイマーチェック
+        // デッドラインを超えた未 ACK パケットを再送する。
+        // Mutex デッドロック防止のため、再送情報を収集してから Mutex 外で送信する。
+        let retransmit_list: Vec<(u32, [u8; 4], u16, u16, u32, u32, u8, Vec<u8>)> = with_net_state(|state| {
+            let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+            let mut list = Vec::new();
+            let mut closed_ids = Vec::new();
+
+            for conn in state.tcp_connections.iter_mut() {
+                if let Some(ref mut pkt) = conn.unacked_packet {
+                    if now >= pkt.retransmit_deadline {
+                        if pkt.retransmit_count >= TCP_MAX_RETRANSMIT {
+                            // 最大再送回数を超えた → 接続を諦める
+                            net_debug!(
+                                "tcp: retransmit limit exceeded for conn {} (port {}), closing",
+                                conn.id, conn.local_port
+                            );
+                            closed_ids.push(conn.id);
+                        } else {
+                            // 指数バックオフで次のデッドラインを計算
+                            pkt.retransmit_count += 1;
+                            let backoff = TCP_INITIAL_RTO_TICKS << pkt.retransmit_count as u64;
+                            pkt.retransmit_deadline = now + backoff;
+                            net_debug!(
+                                "tcp: retransmitting conn {} (port {}), attempt {}, next RTO={}",
+                                conn.id, conn.local_port, pkt.retransmit_count, backoff
+                            );
+                            list.push((
+                                conn.id,
+                                conn.remote_ip,
+                                conn.remote_port,
+                                conn.local_port,
+                                pkt.seq_num,
+                                pkt.ack_num,
+                                pkt.flags,
+                                pkt.payload.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // 最大再送超過の接続を Closed に遷移
+            for id in closed_ids {
+                if let Some(idx) = find_conn_index_by_id(state, id) {
+                    state.tcp_connections[idx].state = TcpState::Closed;
+                    state.tcp_connections[idx].unacked_packet = None;
+                }
+            }
+
+            list
+        });
+
+        // Mutex 外で再送パケットを送信する
+        for (_conn_id, dst_ip, dst_port, src_port, seq_num, ack_num, flags, payload) in &retransmit_list {
+            let _ = send_tcp_packet_internal(*dst_ip, *dst_port, *src_port, *seq_num, *ack_num, *flags, payload);
+        }
+
+        // 再送パケットを送信した場合は waiter を起床させる（状態変更を通知）
+        if !retransmit_list.is_empty() {
+            wake_all_net_waiters();
+        }
+
         // NIC デバイスのイベントフラグをクリアする
         // virtio-net: QEMU SLIRP のイベントループをキック
         // e1000e: ICR を読み取って割り込み原因をクリア
@@ -1607,6 +1701,16 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                     conn.ack_num,
                     TCP_FLAG_SYN | TCP_FLAG_ACK,
                 ));
+                // SYN-ACK の再送情報を記録する
+                let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                conn.unacked_packet = Some(UnackedPacket {
+                    seq_num: conn.seq_num,
+                    ack_num: conn.ack_num,
+                    flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                    payload: Vec::new(),
+                    retransmit_deadline: now + TCP_INITIAL_RTO_TICKS,
+                    retransmit_count: 0,
+                });
                 state.tcp_connections.push(conn);
             }
         } else {
@@ -1620,6 +1724,7 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                             conn.seq_num = ack;
                             conn.ack_num = seq + 1;
                             conn.state = TcpState::Established;
+                            conn.unacked_packet = None; // SYN が ACK されたのでクリア
                             send_packet = Some((
                                 conn.remote_ip,
                                 conn.remote_port,
@@ -1640,12 +1745,17 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                         if ack == conn.seq_num + 1 {
                             conn.seq_num = ack;
                             conn.state = TcpState::Established;
+                            conn.unacked_packet = None; // SYN-ACK が ACK されたのでクリア
                             push_accept = Some((conn.id, conn.local_port));
                             net_debug!("tcp: server connection established on port {}", conn.local_port);
                         }
                     }
                 }
                 TcpState::Established => {
+                    // ACK を受信したらデータ再送バッファをクリアする
+                    if tcp_header.has_flag(TCP_FLAG_ACK) {
+                        conn.unacked_packet = None;
+                    }
                     if tcp_header.has_flag(TCP_FLAG_FIN) {
                         net_debug!("tcp: received FIN");
                         conn.ack_num = seq + 1;
@@ -1674,6 +1784,7 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                 }
                 TcpState::FinWait1 => {
                     if tcp_header.has_flag(TCP_FLAG_ACK) {
+                        conn.unacked_packet = None; // FIN が ACK されたのでクリア
                         if tcp_header.has_flag(TCP_FLAG_FIN) {
                             conn.ack_num = seq + 1;
                             conn.state = TcpState::TimeWait;
@@ -1717,6 +1828,7 @@ fn handle_tcp(ip_header: &Ipv4Header, payload: &[u8]) {
                 TcpState::LastAck => {
                     if tcp_header.has_flag(TCP_FLAG_ACK) {
                         conn.state = TcpState::Closed;
+                        conn.unacked_packet = None; // FIN が ACK されたのでクリア
                     }
                 }
                 _ => {}
@@ -1870,6 +1982,21 @@ pub fn tcp_connect(dst_ip: [u8; 4], dst_port: u16) -> Result<u32, &'static str> 
     net_debug!("tcp: sending SYN");
     send_tcp_packet_internal(dst_ip, dst_port, local_port, initial_seq, 0, TCP_FLAG_SYN, &[])?;
 
+    // SYN の再送情報を記録する
+    let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    with_net_state(|state| {
+        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+            state.tcp_connections[idx].unacked_packet = Some(UnackedPacket {
+                seq_num: initial_seq,
+                ack_num: 0,
+                flags: TCP_FLAG_SYN,
+                payload: Vec::new(),
+                retransmit_deadline: now + TCP_INITIAL_RTO_TICKS,
+                retransmit_count: 0,
+            });
+        }
+    });
+
     // net_poller がパケットを処理するのを待ち、接続状態をチェックする
     let result = wait_net_condition(5000, || {
         with_net_state(|state| {
@@ -1957,7 +2084,24 @@ pub fn tcp_send(conn_id: u32, data: &[u8]) -> Result<(), &'static str> {
     })?;
 
     net_debug!("tcp: sending {} bytes", data.len());
-    send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_ACK | TCP_FLAG_PSH, data)
+    send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_ACK | TCP_FLAG_PSH, data)?;
+
+    // データの再送情報を記録する
+    let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    with_net_state(|state| {
+        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+            state.tcp_connections[idx].unacked_packet = Some(UnackedPacket {
+                seq_num,
+                ack_num,
+                flags: TCP_FLAG_ACK | TCP_FLAG_PSH,
+                payload: data.to_vec(),
+                retransmit_deadline: now + TCP_INITIAL_RTO_TICKS,
+                retransmit_count: 0,
+            });
+        }
+    });
+
+    Ok(())
 }
 
 /// TCP でデータを受信する（ブロッキング、タイムアウト付き）
@@ -2017,6 +2161,21 @@ pub fn tcp_close(conn_id: u32) -> Result<(), &'static str> {
 
     net_debug!("tcp: sending FIN");
     send_tcp_packet_internal(dst_ip, dst_port, local_port, seq_num, ack_num, TCP_FLAG_FIN | TCP_FLAG_ACK, &[])?;
+
+    // FIN の再送情報を記録する
+    let now = crate::interrupts::TIMER_TICK_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+    with_net_state(|state| {
+        if let Some(idx) = find_conn_index_by_id(state, conn_id) {
+            state.tcp_connections[idx].unacked_packet = Some(UnackedPacket {
+                seq_num,
+                ack_num,
+                flags: TCP_FLAG_FIN | TCP_FLAG_ACK,
+                payload: Vec::new(),
+                retransmit_deadline: now + TCP_INITIAL_RTO_TICKS,
+                retransmit_count: 0,
+            });
+        }
+    });
 
     // net_poller がパケットを処理して接続が TimeWait or Closed になるのを待つ
     let _done = wait_net_condition(5000, || {
