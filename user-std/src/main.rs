@@ -254,7 +254,7 @@ fn main() {
     // === std::net テスト ===
     //
     // ネットワークテストは最後に実行する。
-    // DNS lookup が netd との IPC タイムアウトでハングすると、
+    // DNS lookup がカーネル syscall のタイムアウト（5秒×2リトライ）でハングすると、
     // 以降のテストが実行されないため、他のテストを先に完了させる。
 
     // TCP アドレスパーステスト（ネットワーク通信不要）
@@ -281,8 +281,8 @@ fn main() {
         match UdpSocket::bind("0.0.0.0:0") {
             Ok(sock) => {
                 println!("net::udp_bind OK");
-                // read_timeout を設定（5 秒）
-                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                // read_timeout を設定（10 秒、QEMU SLIRP の応答遅延に対応）
+                let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(10)));
 
                 // DNS クエリを手動構築: example.com の A レコード
                 let mut query = [0u8; 29];

@@ -229,6 +229,12 @@ else
             \"serde::from_str OK\" { }
             timeout { exit 1 }
         }
+        # net::tcp_parse はネットワーク通信不要のパーステストなので常に成功する
+        # （serde テストの後、ネットワークテストの最初に実行される）
+        expect {
+            \"net::tcp_parse OK\" { }
+            timeout { exit 1 }
+        }
         expect \"tsh>\"
         send \"exit\r\"
         expect eof
