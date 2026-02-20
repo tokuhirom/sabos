@@ -157,23 +157,6 @@ fn run_selftest_net() {
         }
     }
 
-    // テスト 5: IPv6 ping (fec0::2 = QEMU ゲートウェイ)
-    total += 1;
-    {
-        let ipv6_gw = net::Ipv6Addr::from_octets(
-            [0xfe, 0xc0, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x02]
-        );
-        match net::ping6(&ipv6_gw, 5000) {
-            Ok(_src_ip) => {
-                syscall::write_str("[PASS] net_ipv6_ping\n");
-                passed += 1;
-            }
-            Err(_) => {
-                syscall::write_str("[FAIL] net_ipv6_ping\n");
-            }
-        }
-    }
-
     // 結果出力
     write_summary(passed, total);
 }

@@ -1,7 +1,7 @@
 // shell/selftest.rs — selftest フレームワークとテスト関数
 //
 // cmd_selftest コマンドと全 test_* メソッド。
-// 64 項目の自動テストを実行して [PASS]/[FAIL] を出力する。
+// 65 項目の自動テストを実行して [PASS]/[FAIL] を出力する。
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -240,6 +240,8 @@ impl super::Shell {
             run_test("tcp_isn_random", this.test_tcp_isn_random());
             // 14.3. TCP 再送タイマーテスト（UnackedPacket の記録・クリアが正しく動くこと）
             run_test("tcp_retransmit", this.test_tcp_retransmit());
+            // 14.4. IPv6 スタックテスト（偽パケット注入で ICMPv6 Echo Reply 処理を検証）
+            run_test("ipv6_stack", this.test_ipv6_stack());
         };
 
         let run_gui = |this: &Self, run_test: &mut dyn FnMut(&str, bool)| {
@@ -1762,6 +1764,100 @@ impl super::Shell {
         // 3. クリアできることを確認
         conn.unacked_packet = None;
         conn.unacked_packet.is_none()
+    }
+
+    /// IPv6 スタックテスト
+    ///
+    /// 偽の ICMPv6 Echo Reply パケットを構築して handle_packet() に注入し、
+    /// IPv6/ICMPv6 のパケット処理が正しく動作することを検証する。
+    /// ネットワーク通信不要なので QEMU SLIRP の ICMPv6 非対応に影響されない。
+    fn test_ipv6_stack(&self) -> bool {
+        use crate::netstack;
+
+        // 1. icmpv6_echo_reply をクリア
+        netstack::with_net_state(|state| {
+            state.icmpv6_echo_reply = None;
+        });
+
+        // 2. 偽の Ethernet + IPv6 + ICMPv6 Echo Reply パケットを構築
+        let my_mac = netstack::get_my_mac();
+        let dummy_src_mac: [u8; 6] = [0x52, 0x55, 0x00, 0xAA, 0xBB, 0xCC];
+        // 送信元: fec0::2 (QEMU ゲートウェイ)
+        let src_ipv6: [u8; 16] = [0xfe, 0xc0, 0,0,0,0,0,0, 0,0,0,0,0,0,0, 0x02];
+        // 宛先: fec0::15 (MY_IPV6)
+        let dst_ipv6: [u8; 16] = netstack::MY_IPV6;
+
+        // ICMPv6 Echo Reply ペイロード: type=129, code=0, checksum(2), id=0x1234, seq=1, data=DEADBEEF
+        let id: u16 = 0x1234;
+        let seq: u16 = 1;
+        let mut icmpv6_data: Vec<u8> = Vec::new();
+        icmpv6_data.push(129); // type: Echo Reply
+        icmpv6_data.push(0);   // code
+        icmpv6_data.push(0);   // checksum (placeholder)
+        icmpv6_data.push(0);   // checksum (placeholder)
+        icmpv6_data.extend_from_slice(&id.to_be_bytes());
+        icmpv6_data.extend_from_slice(&seq.to_be_bytes());
+        icmpv6_data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        // ICMPv6 チェックサムを計算（IPv6 疑似ヘッダー + ICMPv6 データ）
+        let checksum = {
+            let icmpv6_len = icmpv6_data.len();
+            let mut pseudo = Vec::new();
+            pseudo.extend_from_slice(&src_ipv6);
+            pseudo.extend_from_slice(&dst_ipv6);
+            pseudo.extend_from_slice(&(icmpv6_len as u32).to_be_bytes());
+            pseudo.push(0); pseudo.push(0); pseudo.push(0);
+            pseudo.push(58); // ICMPv6
+            pseudo.extend_from_slice(&icmpv6_data);
+            // RFC 1071 チェックサム計算
+            let mut sum: u32 = 0;
+            let mut i = 0;
+            while i + 1 < pseudo.len() {
+                let word = u16::from_be_bytes([pseudo[i], pseudo[i + 1]]);
+                sum += word as u32;
+                i += 2;
+            }
+            if i < pseudo.len() {
+                sum += (pseudo[i] as u32) << 8;
+            }
+            while (sum >> 16) != 0 {
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+            !(sum as u16)
+        };
+        icmpv6_data[2] = (checksum >> 8) as u8;
+        icmpv6_data[3] = (checksum & 0xFF) as u8;
+
+        // Ethernet ヘッダー (14 バイト)
+        let mut packet: Vec<u8> = Vec::new();
+        packet.extend_from_slice(&my_mac);       // dst MAC = 自分
+        packet.extend_from_slice(&dummy_src_mac); // src MAC = ダミー
+        packet.extend_from_slice(&0x86DDu16.to_be_bytes()); // ethertype = IPv6
+
+        // IPv6 ヘッダー (40 バイト)
+        packet.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]); // version=6, TC=0, FL=0
+        packet.extend_from_slice(&(icmpv6_data.len() as u16).to_be_bytes()); // payload length
+        packet.push(58);  // next_header = ICMPv6
+        packet.push(64);  // hop limit
+        packet.extend_from_slice(&src_ipv6);
+        packet.extend_from_slice(&dst_ipv6);
+
+        // ICMPv6 ペイロード
+        packet.extend_from_slice(&icmpv6_data);
+
+        // 3. handle_packet() にパケットを注入して処理させる
+        netstack::handle_packet(&packet);
+
+        // 4. icmpv6_echo_reply が正しく設定されたか確認
+        let result = netstack::with_net_state(|state| {
+            state.icmpv6_echo_reply.take()
+        });
+        match result {
+            Some((reply_id, reply_seq, reply_src)) => {
+                reply_id == 0x1234 && reply_seq == 1 && reply_src == src_ipv6
+            }
+            None => false,
+        }
     }
 
     /// GUI IPC のテスト

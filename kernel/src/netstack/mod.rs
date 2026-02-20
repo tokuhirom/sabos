@@ -139,7 +139,7 @@ struct ArpEntry {
 const ARP_CACHE_MAX: usize = 64;
 
 /// ネットワークスタックの内部状態
-pub(self) struct NetState {
+pub(crate) struct NetState {
     pub(self) mac: [u8; 6],
     pub(self) tcp_connections: Vec<types::TcpConnection>,
     pub(self) tcp_next_id: u32,
@@ -154,7 +154,7 @@ pub(self) struct NetState {
     /// UDP エフェメラルポートの次の候補（49152〜65535）
     pub(self) udp_next_port: u16,
     /// ICMPv6 Echo Reply を受信したときに保存する (id, seq, src_ip)
-    pub(self) icmpv6_echo_reply: Option<(u16, u16, [u8; 16])>,
+    pub(crate) icmpv6_echo_reply: Option<(u16, u16, [u8; 16])>,
     /// ネットワークイベントを待っているタスク ID のリスト。
     /// net_poller がパケットを処理した後に全 waiter を起床させる。
     /// これにより tcp_accept 等が個別にパケット受信する必要がなくなる。
@@ -169,7 +169,7 @@ pub(self) struct NetState {
 static NET_STATE: Mutex<Option<NetState>> = Mutex::new(None);
 
 /// NET_STATE のロックを取得し、初期化されていなければ初期化してから返す
-pub(self) fn with_net_state<F, R>(f: F) -> R
+pub(crate) fn with_net_state<F, R>(f: F) -> R
 where
     F: FnOnce(&mut NetState) -> R,
 {
@@ -255,7 +255,7 @@ pub fn is_network_link_up() -> bool {
 }
 
 /// MAC アドレスを取得する（ロック不要版）
-pub(self) fn get_my_mac() -> [u8; 6] {
+pub(crate) fn get_my_mac() -> [u8; 6] {
     *MY_MAC.lock()
 }
 

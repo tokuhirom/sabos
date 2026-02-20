@@ -50,8 +50,10 @@
 - [x] ~~network_dns フレーキーテスト~~ → リトライ + タイマーベースタイムアウトで修正済み
   - 根本原因: netd とカーネルの `poll_and_handle()` が受信キューを取り合うレース条件
   - 暫定修正: DNS クエリを最大 3 回リトライ（最優先タスクで根本解決予定）
-- [ ] net selftest の net_ipv6_ping を安定化
-  - IPv6 ping は QEMU の ipv6=on 設定が IPv4 と排他的に動作する問題あり
+- [x] ~~net selftest の net_ipv6_ping を安定化~~
+  - QEMU SLIRP が ICMPv6 Echo Reply を返さないため外部 ping テストは不安定
+  - カーネル selftest に `ipv6_stack` テストを追加（偽パケット注入で ICMPv6 処理を検証）
+  - selftest_net から `net_ipv6_ping` を削除
 - [ ] HELLOSTD.ELF の net テストのフレーキーさを改善
 
 ### selftest ハング問題の修正 ✓
