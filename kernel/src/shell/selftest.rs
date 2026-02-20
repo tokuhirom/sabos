@@ -126,6 +126,15 @@ impl super::Shell {
             // 11.11. mmap のテスト（匿名ページの動的マッピング）
             run_test("mmap", this.test_mmap());
 
+            // procfs maps テスト
+            run_test("procfs_maps", this.test_procfs_maps());
+
+            // VMA 管理のテスト（4項目）
+            run_test("vma_insert", this.test_vma_insert());
+            run_test("vma_find_free", this.test_vma_find_free());
+            run_test("vma_remove_range", this.test_vma_remove_range());
+            run_test("vma_overlap_reject", this.test_vma_overlap_reject());
+
             // 11.12. AC97 オーディオコントローラの検出テスト
             run_test("ac97_detect", this.test_ac97_detect());
 
@@ -2238,6 +2247,215 @@ impl super::Shell {
             Err(_) => return false,
         };
         text.contains("HELLO.TXT")
+    }
+
+    /// /proc/maps が読めて、JSON に "processes" キーが含まれることを確認する。
+    /// 実行中のユーザープロセスの VMA 情報が取得できる。
+    fn test_procfs_maps(&self) -> bool {
+        // /proc/maps を VFS 経由で開いて読み取る
+        let node = match crate::vfs::open("/proc/maps") {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        let mut buf = alloc::vec![0u8; 4096];
+        let bytes_read = match node.read(0, &mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        if bytes_read == 0 {
+            return false;
+        }
+
+        let text = match core::str::from_utf8(&buf[..bytes_read]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        // JSON に "processes" キーが含まれることを確認
+        // また、実行中のユーザープロセス（SHELL.ELF 等）の VMA が存在するはず
+        text.contains("\"processes\"") && text.contains("\"vmas\"")
+    }
+
+    // =================================================================
+    // VMA 管理のテスト
+    // =================================================================
+
+    /// VMA の挿入とソート順維持のテスト。
+    /// 3 つの VMA を順不同で挿入し、start 昇順に並んでいることを確認する。
+    fn test_vma_insert(&self) -> bool {
+        use crate::vma::{Vma, VmaKind, VmaList, VmaProt};
+
+        let mut list = VmaList::new();
+
+        // 3 つの VMA を順不同で挿入
+        let vma_c = Vma {
+            start: 0x3000,
+            end: 0x4000,
+            prot: VmaProt::read_write(),
+            kind: VmaKind::Anonymous,
+            name: String::from("[anon_c]"),
+        };
+        let vma_a = Vma {
+            start: 0x1000,
+            end: 0x2000,
+            prot: VmaProt::read_only(),
+            kind: VmaKind::ElfLoad,
+            name: String::from(".text"),
+        };
+        let vma_b = Vma {
+            start: 0x2000,
+            end: 0x3000,
+            prot: VmaProt::read_write(),
+            kind: VmaKind::UserStack,
+            name: String::from("[stack]"),
+        };
+
+        if list.insert(vma_c).is_err() { return false; }
+        if list.insert(vma_a).is_err() { return false; }
+        if list.insert(vma_b).is_err() { return false; }
+
+        // ソート順を確認: 0x1000, 0x2000, 0x3000
+        if list.len() != 3 { return false; }
+        let vmas: Vec<&Vma> = list.iter().collect();
+        vmas[0].start == 0x1000 && vmas[1].start == 0x2000 && vmas[2].start == 0x3000
+    }
+
+    /// VMA の隙間から空き領域を検索するテスト。
+    /// 既存 VMA の間にある隙間を正しく見つけられることを確認する。
+    fn test_vma_find_free(&self) -> bool {
+        use crate::vma::{Vma, VmaKind, VmaList, VmaProt};
+
+        let mut list = VmaList::new();
+
+        // 0x1000-0x2000 と 0x4000-0x5000 の 2 つの VMA を挿入
+        // → 0x2000-0x4000 に隙間がある
+        let _ = list.insert(Vma {
+            start: 0x1000, end: 0x2000,
+            prot: VmaProt::read_only(), kind: VmaKind::ElfLoad,
+            name: String::from("a"),
+        });
+        let _ = list.insert(Vma {
+            start: 0x4000, end: 0x5000,
+            prot: VmaProt::read_only(), kind: VmaKind::ElfLoad,
+            name: String::from("b"),
+        });
+
+        // 0x1000-0x6000 の範囲で 0x1000 (4KiB) の空きを探す → 0x2000 が見つかるはず
+        let found = list.find_free_region(0x1000, 0x1000, 0x6000);
+        if found != Some(0x2000) { return false; }
+
+        // 0x2000 (8KiB) の空きを探す → 0x2000 が見つかるはず（隙間は 0x2000 バイト）
+        let found = list.find_free_region(0x2000, 0x1000, 0x6000);
+        if found != Some(0x2000) { return false; }
+
+        // 0x3000 (12KiB) の空きを探す → 隙間 0x2000 では足りないが、0x5000-0x6000 にもない
+        let found = list.find_free_region(0x3000, 0x1000, 0x6000);
+        if found.is_some() { return false; }
+
+        // 範囲を広げれば見つかる（0x5000 以降に十分な空き）
+        let found = list.find_free_region(0x3000, 0x1000, 0x9000);
+        found == Some(0x5000)
+    }
+
+    /// VMA の範囲削除テスト。
+    /// 完全削除、先頭切り取り、末尾切り取り、中央分割の 4 パターンを検証する。
+    fn test_vma_remove_range(&self) -> bool {
+        use crate::vma::{Vma, VmaKind, VmaList, VmaProt};
+
+        // パターン1: 完全一致削除
+        {
+            let mut list = VmaList::new();
+            let _ = list.insert(Vma {
+                start: 0x1000, end: 0x3000,
+                prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+                name: String::from("a"),
+            });
+            let removed = list.remove_range(0x1000, 0x3000);
+            if list.len() != 0 || removed.len() != 1 { return false; }
+        }
+
+        // パターン2: 先頭切り取り（VMA の前半を削除）
+        {
+            let mut list = VmaList::new();
+            let _ = list.insert(Vma {
+                start: 0x1000, end: 0x4000,
+                prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+                name: String::from("a"),
+            });
+            let removed = list.remove_range(0x1000, 0x2000);
+            if list.len() != 1 || removed.len() != 1 { return false; }
+            let vma = list.iter().next().unwrap();
+            if vma.start != 0x2000 || vma.end != 0x4000 { return false; }
+        }
+
+        // パターン3: 末尾切り取り（VMA の後半を削除）
+        {
+            let mut list = VmaList::new();
+            let _ = list.insert(Vma {
+                start: 0x1000, end: 0x4000,
+                prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+                name: String::from("a"),
+            });
+            let removed = list.remove_range(0x3000, 0x4000);
+            if list.len() != 1 || removed.len() != 1 { return false; }
+            let vma = list.iter().next().unwrap();
+            if vma.start != 0x1000 || vma.end != 0x3000 { return false; }
+        }
+
+        // パターン4: 中央分割（VMA の中央部分を削除 → 2 つに分割）
+        {
+            let mut list = VmaList::new();
+            let _ = list.insert(Vma {
+                start: 0x1000, end: 0x5000,
+                prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+                name: String::from("a"),
+            });
+            let removed = list.remove_range(0x2000, 0x4000);
+            if list.len() != 2 || removed.len() != 1 { return false; }
+            let vmas: Vec<&Vma> = list.iter().collect();
+            if vmas[0].start != 0x1000 || vmas[0].end != 0x2000 { return false; }
+            if vmas[1].start != 0x4000 || vmas[1].end != 0x5000 { return false; }
+        }
+
+        true
+    }
+
+    /// 重なる VMA の挿入が拒否されるテスト。
+    fn test_vma_overlap_reject(&self) -> bool {
+        use crate::vma::{Vma, VmaKind, VmaList, VmaProt};
+
+        let mut list = VmaList::new();
+        let _ = list.insert(Vma {
+            start: 0x2000, end: 0x4000,
+            prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+            name: String::from("a"),
+        });
+
+        // 完全に含まれる VMA は拒否される
+        let result = list.insert(Vma {
+            start: 0x2000, end: 0x3000,
+            prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+            name: String::from("b"),
+        });
+        if result.is_ok() { return false; }
+
+        // 部分的に重なる VMA も拒否される
+        let result = list.insert(Vma {
+            start: 0x3000, end: 0x5000,
+            prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+            name: String::from("c"),
+        });
+        if result.is_ok() { return false; }
+
+        // 隣接する VMA（重ならない）は許可される
+        let result = list.insert(Vma {
+            start: 0x4000, end: 0x5000,
+            prot: VmaProt::read_write(), kind: VmaKind::Anonymous,
+            name: String::from("d"),
+        });
+        result.is_ok()
     }
 
     /// virtio-9p の読み取りテスト。

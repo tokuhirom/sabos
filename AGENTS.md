@@ -173,14 +173,14 @@ QEMU は 2 台の virtio-blk デバイス、virtio-9p デバイス、virtio-net�
 
 - `make test` で自動テストを実行できる
 - QEMU を起動して `selftest` コマンドを自動実行し、結果を検証する
-- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P 等（65 項目）
+- テスト対象: メモリアロケータ、ページング、スケジューラ、virtio-blk、FAT32、IPC、ハンドル操作、syscall、ネットワーク、GUI、サーバーデーモン、9P、VMA 等（70 項目）
 - **新機能を追加したら `selftest` にもテストを追加する**
 - **修正したら指示がなくても必ずテストを実行する**
 - **日記の更新や AGENTS.md の更新だけの場合は `make test` を省略してよい**
 
 ### selftest コマンド
 
-シェルで `selftest` を実行すると各サブシステムをテストする（65 項目）:
+シェルで `selftest` を実行すると各サブシステムをテストする（70 項目）:
 
 ```
 sabos> selftest
@@ -190,7 +190,7 @@ sabos> selftest
 [PASS] memory_mapping
 [PASS] paging
 ...
-=== SELFTEST END: 65/65 PASSED ===
+=== SELFTEST END: 70/70 PASSED ===
 ```
 
 ## CI/CD
@@ -279,7 +279,7 @@ sabos> blkread 0    # セクタ 0 の読み取り
 sabos> panic        # カーネルパニックのテスト
 ```
 
-**期待される selftest 結果（65 項目全 PASS）:**
+**期待される selftest 結果（70 項目全 PASS）:**
 ```
 === SELFTEST START ===
 [PASS] memory_allocator
@@ -289,7 +289,7 @@ sabos> panic        # カーネルパニックのテスト
 [PASS] pci_enum
 ...（省略）...
 [PASS] httpd_dirlist
-=== SELFTEST END: 65/65 PASSED ===
+=== SELFTEST END: 70/70 PASSED ===
 ```
 
 ### シェルの起動フロー

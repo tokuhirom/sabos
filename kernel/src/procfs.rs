@@ -14,6 +14,7 @@
 //
 // - /proc/meminfo: メモリ情報（JSON 形式）
 // - /proc/tasks: タスク一覧（JSON 形式）
+// - /proc/maps: 全プロセスの VMA（仮想メモリ領域）情報（JSON 形式）
 
 
 use alloc::boxed::Box;
@@ -29,6 +30,8 @@ use crate::vfs::{FileSystem, VfsNode, VfsNodeKind, VfsDirEntry, VfsError};
 const PROC_MEMINFO: &str = "meminfo";
 /// タスク一覧ファイルのパス
 const PROC_TASKS: &str = "tasks";
+/// VMA マップ情報ファイルのパス
+const PROC_MAPS: &str = "maps";
 
 /// procfs ファイルシステム
 pub struct ProcFs;
@@ -95,6 +98,7 @@ impl FileSystem for ProcFs {
         let data = match path {
             PROC_MEMINFO => generate_meminfo(),
             PROC_TASKS => generate_tasks(),
+            PROC_MAPS => generate_maps(),
             "" => return Err(VfsError::NotAFile),
             _ => return Err(VfsError::NotFound),
         };
@@ -121,6 +125,11 @@ impl FileSystem for ProcFs {
             },
             VfsDirEntry {
                 name: String::from("tasks"),
+                kind: VfsNodeKind::File,
+                size: 0,
+            },
+            VfsDirEntry {
+                name: String::from("maps"),
                 kind: VfsNodeKind::File,
                 size: 0,
             },
@@ -233,6 +242,88 @@ fn generate_tasks() -> Vec<u8> {
         let _ = write_json_string(&mut writer, t.name.as_str());
         let _ = write!(writer, "\"}}");
     }
+    let _ = write!(writer, "]}}\n");
+
+    buf
+}
+
+/// 全プロセスの VMA（仮想メモリ領域）情報を JSON 形式で生成する。
+///
+/// 各プロセスの VMA リストを取得し、以下の形式で出力する:
+/// ```json
+/// {"processes":[
+///   {"id":1,"name":"SHELL.ELF","vmas":[
+///     {"start":"0x400000","end":"0x401000","size":4096,"prot":"r-x","kind":"ElfLoad","name":".text"},
+///     ...
+///   ]},
+///   ...
+/// ]}
+/// ```
+fn generate_maps() -> Vec<u8> {
+    use crate::scheduler::{self, TaskState};
+    use crate::vma::VmaKind;
+
+    // タスク一覧を取得
+    let tasks = scheduler::task_list();
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut writer = VecWriter::new(&mut buf);
+
+    let _ = write!(writer, "{{\"processes\":[");
+    let mut first_process = true;
+
+    for t in &tasks {
+        // ユーザープロセスのみ（カーネルタスクや終了済みタスクは除外）
+        if !t.is_user_process || t.state == TaskState::Finished {
+            continue;
+        }
+
+        // VMA リストを取得
+        let vmas = match scheduler::get_vma_list_for_task(t.id) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if !first_process {
+            let _ = write!(writer, ",");
+        }
+        first_process = false;
+
+        let _ = write!(writer, "{{\"id\":{},\"name\":\"", t.id);
+        let _ = write_json_string(&mut writer, t.name.as_str());
+        let _ = write!(writer, "\",\"vmas\":[");
+
+        for (i, vma) in vmas.iter().enumerate() {
+            if i != 0 {
+                let _ = write!(writer, ",");
+            }
+
+            // プロテクション文字列を構築 (例: "rwx", "r-x", "rw-")
+            let prot_str = alloc::format!(
+                "{}{}{}",
+                if vma.prot.read { "r" } else { "-" },
+                if vma.prot.write { "w" } else { "-" },
+                if vma.prot.execute { "x" } else { "-" },
+            );
+
+            let kind_str = match vma.kind {
+                VmaKind::Anonymous => "Anonymous",
+                VmaKind::ElfLoad => "ElfLoad",
+                VmaKind::UserStack => "UserStack",
+            };
+
+            let _ = write!(
+                writer,
+                "{{\"start\":\"0x{:x}\",\"end\":\"0x{:x}\",\"size\":{},\"prot\":\"{}\",\"kind\":\"{}\",\"name\":\"",
+                vma.start, vma.end, vma.size(), prot_str, kind_str
+            );
+            let _ = write_json_string(&mut writer, vma.name.as_str());
+            let _ = write!(writer, "\"}}");
+        }
+
+        let _ = write!(writer, "]}}");
+    }
+
     let _ = write!(writer, "]}}\n");
 
     buf

@@ -64,7 +64,16 @@ pub struct UserProcess {
     /// プロセス破棄時にこれらのフレームをフレームアロケータに返却する。
     /// 既存の create_user_process() では空 Vec（カーネル既存マッピングを流用するため）。
     /// create_elf_process() では LOAD セグメント + ユーザースタック用のフレームが入る。
+    ///
+    /// VMA リストとは役割が異なる:
+    /// - allocated_frames: 物理フレームの所有権管理（解放用）
+    /// - vma_list: 仮想アドレス空間のマッピング意図管理（検索・分割用）
+    /// 将来の Demand Paging では VMA があっても物理フレームが未割り当ての状態がありうる。
     pub allocated_frames: Vec<PhysFrame<Size4KiB>>,
+    /// プロセスの仮想メモリ領域（VMA）リスト。
+    /// ELF LOAD セグメント、ユーザースタック、mmap 領域を管理する。
+    /// 空き仮想アドレスの検索や munmap での部分アンマップに使う。
+    pub vma_list: crate::vma::VmaList,
 }
 
 /// ユーザープロセスを作成する。
@@ -115,6 +124,7 @@ pub fn create_user_process(program: &UserProgram) -> UserProcess {
         page_table_frame,
         kernel_stack,
         allocated_frames: Vec::new(),
+        vma_list: crate::vma::VmaList::new(),
     }
 }
 
@@ -765,13 +775,53 @@ pub fn create_elf_process(
         env_vars,
     );
 
-    // 6. カーネルスタックを確保（プロセスごとに独立）
+    // 6. VMA リストを構築する
+    //    ELF の各 LOAD セグメントとユーザースタックを VMA として登録する。
+    //    これにより mmap での空き領域検索や /proc/maps での表示に使える。
+    let mut vma_list = crate::vma::VmaList::new();
+    for seg in &elf_info.load_segments {
+        if seg.memsz == 0 {
+            continue;
+        }
+        // ページアラインされた範囲を VMA として登録
+        let page_start = seg.vaddr & !0xFFF;
+        let page_end = (seg.vaddr + seg.memsz + 0xFFF) & !0xFFF;
+        // セグメント名を ELF フラグから推定
+        let name = if seg.flags & 1 != 0 {
+            // 実行可能 → .text
+            String::from(".text")
+        } else if seg.flags & 2 != 0 {
+            // 書き込み可能 → .data/.bss
+            String::from(".data")
+        } else {
+            // 読み取り専用 → .rodata
+            String::from(".rodata")
+        };
+        let _ = vma_list.insert(crate::vma::Vma {
+            start: page_start,
+            end: page_end,
+            prot: crate::vma::VmaProt::from_elf_flags(seg.flags),
+            kind: crate::vma::VmaKind::ElfLoad,
+            name,
+        });
+    }
+    // ユーザースタックの VMA を登録
+    let _ = vma_list.insert(crate::vma::Vma {
+        start: ELF_USER_STACK_VADDR,
+        end: ELF_USER_STACK_VADDR + ELF_USER_STACK_SIZE as u64,
+        prot: crate::vma::VmaProt::read_write(),
+        kind: crate::vma::VmaKind::UserStack,
+        name: String::from("[stack]"),
+    });
+
+    // 7. カーネルスタックを確保（プロセスごとに独立）
     let kernel_stack = alloc::vec![0u8; KERNEL_STACK_SIZE].into_boxed_slice();
 
     let process = UserProcess {
         page_table_frame,
         kernel_stack,
         allocated_frames: all_allocated_frames,
+        vma_list,
     };
 
     let entry_point = elf_info.entry_point;

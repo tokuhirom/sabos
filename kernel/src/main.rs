@@ -40,6 +40,7 @@ mod netstack;
 mod user_ptr;
 mod usermode;
 mod vfs;
+mod vma;
 mod virtio_9p;
 mod virtio_blk;
 mod virtio_net;

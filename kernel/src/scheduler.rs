@@ -942,6 +942,71 @@ pub fn remove_mmap_frames_from_current(frames_to_remove: &[x86_64::structures::p
     }
 }
 
+// =================================================================
+// VMA 操作ヘルパー関数
+// =================================================================
+//
+// 現在のタスクの VmaList を操作するための関数群。
+// syscall/misc.rs の mmap/munmap や procfs から使用する。
+
+/// 現在のタスクの VmaList で空き仮想アドレス領域を検索する。
+///
+/// VMA リストの隙間を走査して、size バイト以上の空き領域を first-fit で見つける。
+/// ページテーブルを走査する旧実装と異なり、VMA 数に対する O(n) で済む。
+pub fn find_free_vma_region(size: u64, base: u64, limit: u64) -> Option<u64> {
+    let sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &sched.tasks[current];
+    if let Some(ref info) = task.user_process_info {
+        info.process.vma_list.find_free_region(size, base, limit)
+    } else {
+        None
+    }
+}
+
+/// 現在のタスクの VmaList に VMA を追加する。
+pub fn add_vma_to_current(vma: crate::vma::Vma) -> Result<(), &'static str> {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &mut sched.tasks[current];
+    if let Some(ref mut info) = task.user_process_info {
+        info.process.vma_list.insert(vma)
+    } else {
+        Err("not a user process")
+    }
+}
+
+/// 現在のタスクの VmaList から指定範囲の VMA を削除・分割する。
+///
+/// 部分的に重なる VMA は分割される。
+/// 返り値は削除された VMA のリスト。
+pub fn remove_vma_range_from_current(start: u64, end: u64) -> alloc::vec::Vec<crate::vma::Vma> {
+    let mut sched = SCHEDULER.lock();
+    let current = sched.current;
+    let task = &mut sched.tasks[current];
+    if let Some(ref mut info) = task.user_process_info {
+        info.process.vma_list.remove_range(start, end)
+    } else {
+        alloc::vec::Vec::new()
+    }
+}
+
+/// 指定したタスク ID の VMA リストのスナップショットを取得する（procfs 用）。
+///
+/// タスクが存在しないか、ユーザープロセスでない場合は None を返す。
+pub fn get_vma_list_for_task(task_id: u64) -> Option<alloc::vec::Vec<crate::vma::Vma>> {
+    let sched = SCHEDULER.lock();
+    for task in &sched.tasks {
+        if task.id == task_id {
+            if let Some(ref info) = task.user_process_info {
+                return Some(info.process.vma_list.iter().cloned().collect());
+            }
+            return None;
+        }
+    }
+    None
+}
+
 /// 現在のタスクの CR3 アドレスを取得する。
 /// Futex のキーとして使う。
 /// ユーザープロセスやスレッドはタスクの cr3 フィールドの値を返す。

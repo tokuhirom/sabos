@@ -178,10 +178,11 @@
 
 Phase 1-3 完了済み（バディアロケータ + スラブアロケータ）。
 
-**Phase 4: ユーザー空間の動的メモリ改善**
-- [ ] VMA (Virtual Memory Area) 管理
+**Phase 4: ユーザー空間の動的メモリ改善** ✓
+- [x] VMA (Virtual Memory Area) 管理
   - プロセスのアドレス空間を VMA リストで管理
   - mmap/munmap の管理を構造化
+  - /proc/maps で VMA 情報を JSON 出力
 
 **Phase 5: 発展的機能**
 - [ ] Demand Paging（ページを必要になるまで確保しない）
